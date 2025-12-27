@@ -1,0 +1,20 @@
+[tool.bumpversion]
+current_version = "0.0.0"
+commit = true
+tag = true
+tag_name = "v{new_version}"
+
+[[tool.bumpversion.files]]
+filename = "Cargo.toml"
+search = "version = \"{current_version}\""
+replace = "version = \"{new_version}\""
+
+[[tool.bumpversion.files]]
+filename = "Readme.md"
+search = "fx-torrent = \"{current_version}\""
+replace = "fx-torrent = \"{new_version}\""
+
+[[tool.bumpversion.files]]
+filename = "src/lib.rs"
+search = "fx-torrent = \"{current_version}\""
+replace = "fx-torrent = \"{new_version}\""
