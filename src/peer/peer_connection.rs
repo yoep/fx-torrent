@@ -377,7 +377,6 @@ mod tests {
     use crate::init_logger;
     use crate::peer::protocol::tests::UtpPacketCaptureExtension;
     use crate::peer::protocol::Piece;
-    use crate::peer::tests::create_utp_stream_pair;
     use crate::peer::ProtocolExtensionFlags;
     use crate::InfoHash;
 
@@ -387,7 +386,7 @@ mod tests {
 
     mod utp {
         use super::*;
-        use crate::timeout;
+        use crate::{create_utp_stream_pair, timeout};
         use std::time::Duration;
 
         #[tokio::test]
@@ -405,7 +404,7 @@ mod tests {
                 vec![Box::new(outgoing_capture.clone())]
             );
             let (incoming_stream, mut outgoing_stream) =
-                create_utp_stream_pair(&incoming_socket, &outgoing_socket).await;
+                create_utp_stream_pair!(&incoming_socket, &outgoing_socket);
             let connection = PeerConnection::<UtpStream>::new_utp(
                 peer_id,
                 incoming_stream.addr(),
@@ -479,7 +478,7 @@ mod tests {
             let handshake_bytes = TryInto::<Vec<u8>>::try_into(handshake).unwrap();
             let (incoming_socket, outgoing_socket) = create_utp_socket_pair!();
             let (mut incoming_stream, outgoing_stream) =
-                create_utp_stream_pair(&incoming_socket, &outgoing_socket).await;
+                create_utp_stream_pair!(&incoming_socket, &outgoing_socket);
             let outgoing_stream_addr = outgoing_stream.addr();
             let connection = PeerConnection::<UtpStream>::new_utp(
                 peer_id,
@@ -580,20 +579,21 @@ mod tests {
     async fn test_peer_connection_shutdown() {
         init_logger!();
         let message = "Lorem ipsum dolor";
-        let socket_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
-        let incoming = TcpListener::bind(socket_addr)
+        let incoming = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
             .expect("expected the tcp listener to bind");
-        let incoming_port = incoming.local_addr().unwrap().port();
+        let incoming_addr = incoming
+            .local_addr()
+            .expect("expected the tcp listener to have been bound to a local address");
 
         tokio::spawn(async move { while let Ok((_stream, _addr)) = incoming.accept().await {} });
 
-        let outgoing_stream = TcpStream::connect((socket_addr.ip(), incoming_port))
+        let outgoing_stream = TcpStream::connect(incoming_addr)
             .await
             .expect("expected to create an outgoing connection");
         let connection = PeerConnection::<TcpStream>::new_tcp(
             PeerId::new(),
-            socket_addr,
+            incoming_addr,
             outgoing_stream,
             Metrics::new(),
         );

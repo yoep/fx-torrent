@@ -370,8 +370,6 @@ pub mod tests {
             )
         }};
         ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr) => {{
-            use crate::dht::DhtTracker;
-
             create_torrent!(
                 $uri,
                 $temp_dir,
@@ -380,7 +378,7 @@ pub mod tests {
                 $operations,
                 $discoveries,
                 $storage,
-                Some(DhtTracker::builder().build().await.unwrap())
+                Some(crate::dht::DhtTracker::builder().build().await.unwrap())
             )
         }};
         ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr, $dht:expr) => {{

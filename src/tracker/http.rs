@@ -67,7 +67,7 @@ impl Into<AnnounceEntryResponse> for HttpResponse {
 
 /// The HTTP/HTTPS tracker connection protocol implementation.
 #[derive(Debug, Display)]
-#[display("{} ({})", handle, url)]
+#[display("Tracker {} HTTP connection ({})", handle, url)]
 pub struct HttpClient {
     /// The handle of the tracker
     handle: TrackerHandle,

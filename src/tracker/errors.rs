@@ -17,7 +17,7 @@ pub type Result<T> = std::result::Result<T, TrackerError>;
 pub enum TrackerError {
     #[error("the tracker handle {0} is invalid")]
     InvalidHandle(TrackerHandle),
-    #[error("tracker url \"{0}\" is invalid")]
+    #[error("tracker url is invalid, {0}")]
     InvalidUrl(String),
     #[error("port {0} is invalid")]
     InvalidPort(u16),
