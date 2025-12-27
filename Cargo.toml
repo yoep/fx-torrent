@@ -51,7 +51,7 @@ extension-pex = []
 [dev-dependencies]
 chrono = "0.4.42"
 crossterm = { version = "0.29", features = ["event-stream"] }
-hex-literal = "0.4"
+hex-literal = "1.1"
 log4rs = { version = "1.4", features = ["console_writer"] }
 mockall = "0.14"
 ratatui = "0.30"
