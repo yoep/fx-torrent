@@ -22,7 +22,8 @@ impl TorrentDhtPeersOperation {
     }
 
     async fn retrieve_peers(&self, context: &Arc<TorrentContext>) {
-        if let Some(dht) = context.dht() {
+        let dht = context.dht();
+        if let Some(dht) = dht.inner.as_ref() {
             let info_hash = context.metadata_lock().read().await.info_hash.clone();
             match dht.get_peers(&info_hash, RETRIEVE_TIMEOUT).await {
                 Ok(peers) => {

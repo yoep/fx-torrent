@@ -15,7 +15,8 @@ use fx_torrent::operation::{
     TorrentMetadataOperation, TorrentTrackersOperation,
 };
 use fx_torrent::{
-    FxSessionCache, FxTorrentSession, Session, SessionEvent, TorrentFlags, TorrentOperationFactory,
+    DhtOption, FxSessionCache, FxTorrentSession, Session, SessionEvent, TorrentFlags,
+    TorrentOperationFactory,
 };
 use log::{error, warn};
 use ratatui::layout::Constraint::{Length, Min};
@@ -374,9 +375,10 @@ impl App {
     async fn create_session_tabs(&mut self) {
         let mut tab_index = 1;
 
-        if let Some(dht) = self.session.dht().await {
+        let dht = self.session.dht();
+        if let Some(dht) = dht.inner.as_ref() {
             let nodes = dht.nodes().await;
-            let widget = DhtInfoWidget::new(dht, nodes);
+            let widget = DhtInfoWidget::new(dht.clone(), nodes);
             self.tabs
                 .insert(tab_index, (Box::new(widget), TabState::with(false, false)));
             tab_index += 1;
@@ -483,8 +485,8 @@ impl App {
             .path(&settings.storage)
             .session_cache(FxSessionCache::new(SESSION_CACHE_LIMIT))
             .operations(operations)
-            .dht_option(if settings.dht_enabled {
-                Some(
+            .dht(if settings.dht_enabled {
+                DhtOption::new(
                     DhtTracker::builder()
                         .default_routing_nodes()
                         .build()
@@ -492,7 +494,7 @@ impl App {
                         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
                 )
             } else {
-                None
+                DhtOption::none()
             })
             .build()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))

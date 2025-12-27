@@ -66,8 +66,9 @@ impl InnerDhtNodesOperation {
 
     async fn connect_dht_nodes(&self, context: Arc<TorrentContext>) {
         let metadata = context.metadata_lock().read().await;
+        let dht = context.dht();
 
-        if let Some(dht) = context.dht() {
+        if let Some(dht) = dht.inner.as_ref() {
             if let Some(nodes) = metadata.nodes.as_ref() {
                 trace!(
                     "Torrent {} is trying to add {} DHT node(s)",

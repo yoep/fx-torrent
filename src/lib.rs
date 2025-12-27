@@ -1,4 +1,5 @@
 pub use compact::*;
+pub use dht_option::*;
 pub use errors::*;
 pub use file::*;
 pub use info_hash::*;
@@ -21,6 +22,7 @@ use std::ops::Range;
 mod compact;
 #[cfg(feature = "dht")]
 pub mod dht;
+mod dht_option;
 mod errors;
 mod file;
 mod info_hash;
@@ -297,10 +299,11 @@ pub mod tests {
             )
         }};
         ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr, $dht:expr) => {{
+            use crate::dht::DhtTracker;
             use crate::peer::PeerDiscovery;
             use crate::tests::create_metadata;
             use crate::tracker::TrackerClient;
-            use crate::{Torrent, TorrentConfig, TorrentFlags, TorrentOperationFactory};
+            use crate::{DhtOption, Torrent, TorrentConfig, TorrentFlags, TorrentOperationFactory};
             use std::time::Duration;
 
             let uri: &str = $uri;
@@ -327,7 +330,7 @@ pub mod tests {
                 .operations(operations.iter().map(|e| e()).collect())
                 .storage($storage)
                 .tracker_manager(tracker_manager)
-                .dht_option(dht)
+                .dht(DhtOption::from(dht))
                 .build()
                 .unwrap()
         }};

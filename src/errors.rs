@@ -1,6 +1,8 @@
+#[cfg(feature = "dht")]
+use crate::dht;
 use crate::storage::Error;
 use crate::tracker::TrackerError;
-use crate::{dht, peer, storage, TorrentHandle};
+use crate::{peer, storage, TorrentHandle};
 use std::io;
 use thiserror::Error;
 
@@ -65,6 +67,7 @@ pub enum TorrentError {
     Tracker(TrackerError),
     #[error("peer error: {0}")]
     Peer(peer::Error),
+    #[cfg(feature = "dht")]
     #[error("dht error: {0}")]
     Dht(dht::Error),
     #[error("an io error occurred, {0}")]
@@ -92,6 +95,7 @@ impl PartialEq for TorrentError {
             (Self::InvalidRange(_), Self::InvalidRange(_)) => true,
             (Self::Tracker(le), Self::Tracker(re)) => le == re,
             (Self::Peer(le), Self::Peer(re)) => le == re,
+            #[cfg(feature = "dht")]
             (Self::Dht(le), Self::Dht(re)) => le == re,
             (Self::Io(_), Self::Io(_)) => true,
             (Self::Timeout, Self::Timeout) => true,
@@ -152,6 +156,7 @@ impl From<storage::Error> for TorrentError {
     }
 }
 
+#[cfg(feature = "dht")]
 impl From<dht::Error> for TorrentError {
     fn from(error: dht::Error) -> Self {
         Self::Dht(error)

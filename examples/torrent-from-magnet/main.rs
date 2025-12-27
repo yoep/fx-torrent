@@ -1,6 +1,6 @@
 use fx_torrent::dht::DhtTracker;
 use fx_torrent::peer::ProtocolExtensionFlags;
-use fx_torrent::{FxTorrentSession, Session, TorrentFlags};
+use fx_torrent::{DhtOption, FxTorrentSession, Session, TorrentFlags};
 use std::io;
 
 #[tokio::main]
@@ -14,13 +14,13 @@ async fn main() -> Result<(), io::Error> {
                 | ProtocolExtensionFlags::LTEP
                 | ProtocolExtensionFlags::Dht,
         )
-        .dht(
+        .dht(DhtOption::new(
             DhtTracker::builder()
                 .default_routing_nodes()
                 .build()
                 .await
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
-        )
+        ))
         .build()
         .expect("failed to create torrent session");
 

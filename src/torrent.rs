@@ -1,12 +1,12 @@
-use crate::dht::DhtTracker;
 use crate::errors::Result;
 use crate::file::File;
 use crate::metrics::Metric;
 use crate::operation::{
     TorrentConnectPeersOperation, TorrentCreateFilesOperation, TorrentCreatePiecesOperation,
-    TorrentDhtNodesOperation, TorrentDhtPeersOperation, TorrentFileValidationOperation,
-    TorrentMetadataOperation, TorrentTrackersOperation,
+    TorrentFileValidationOperation, TorrentMetadataOperation, TorrentTrackersOperation,
 };
+#[cfg(feature = "dht")]
+use crate::operation::{TorrentDhtNodesOperation, TorrentDhtPeersOperation};
 use crate::peer::extension::Extension;
 use crate::peer::{
     BitTorrentPeer, Peer, PeerClientInfo, PeerDiscovery, PeerEntry, PeerEvent, PeerHandle, PeerId,
@@ -20,9 +20,10 @@ use crate::tracker::{
     TrackerHandle,
 };
 use crate::{
-    FileAttributeFlags, FileIndex, FilePool, Metrics, Piece, PieceChunkPool, PieceIndex, PiecePart,
-    PiecePool, PiecePriority, TorrentError, TorrentFlags, TorrentMetadata, TorrentMetadataInfo,
-    TorrentPeer, DEFAULT_TORRENT_EXTENSIONS, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
+    DhtOption, FileAttributeFlags, FileIndex, FilePool, Metrics, Piece, PieceChunkPool, PieceIndex,
+    PiecePart, PiecePool, PiecePriority, TorrentError, TorrentFlags, TorrentMetadata,
+    TorrentMetadataInfo, TorrentPeer, DEFAULT_TORRENT_EXTENSIONS,
+    DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
 };
 use async_trait::async_trait;
 use derive_more::Display;
@@ -163,7 +164,7 @@ pub struct TorrentRequest {
     /// The operations used by the torrent for processing data
     operations: Option<Vec<Box<dyn TorrentOperation>>>,
     /// The DHT node server to use for discovering peers
-    dht: Option<DhtTracker>,
+    dht: Option<DhtOption>,
     /// The peer tracker manager for the torrent
     tracker_manager: Option<TrackerClient>,
 }
@@ -239,15 +240,8 @@ impl TorrentRequest {
     }
 
     /// Set the DHT node server to use for discovering peers.
-    pub fn dht(&mut self, dht: DhtTracker) -> &mut Self {
+    pub fn dht(&mut self, dht: DhtOption) -> &mut Self {
         self.dht = Some(dht);
-        self
-    }
-
-    /// Set the optional DHT node server to use for discovering peers.
-    /// This will override any previously configured DHT node server, even if the value is [None].
-    pub fn dht_option(&mut self, dht: Option<DhtTracker>) -> &mut Self {
-        self.dht = dht;
         self
     }
 
@@ -332,7 +326,7 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
             .operations
             .take()
             .unwrap_or_else(TorrentRequest::default_operations);
-        let dht = request.dht.take();
+        let dht = request.dht.take().unwrap_or_else(|| DhtOption::default());
         let tracker_manager =
             request
                 .tracker_manager
@@ -475,7 +469,7 @@ impl Torrent {
         file_pool: FilePool,
         storage: Box<dyn Storage>,
         operations: Vec<Box<dyn TorrentOperation>>,
-        dht: Option<DhtTracker>,
+        dht: DhtOption,
         tracker_manager: TrackerClient,
     ) -> Self {
         let handle = TorrentHandle::new();
@@ -1242,7 +1236,7 @@ pub struct TorrentContext {
     /// The manager of the trackers for the torrent
     tracker_manager: TrackerClient,
     /// The dht server of the torrent
-    dht: Option<DhtTracker>,
+    dht: DhtOption,
 
     /// The pool of peer connections
     peer_pool: PeerPool,
@@ -1514,8 +1508,8 @@ impl TorrentContext {
     }
 
     /// Get the DHT tracker of the torrent.
-    pub fn dht(&self) -> Option<&DhtTracker> {
-        self.dht.as_ref()
+    pub fn dht(&self) -> &DhtOption {
+        &self.dht
     }
 
     /// Get the piece pool of the torrent.

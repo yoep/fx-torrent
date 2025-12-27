@@ -1,20 +1,19 @@
-#[cfg(feature = "dht")]
-use crate::dht::DhtTracker;
 use crate::errors::Result;
 use crate::operation::{
     TorrentConnectPeersOperation, TorrentCreateFilesOperation, TorrentCreatePiecesOperation,
-    TorrentDhtNodesOperation, TorrentDhtPeersOperation, TorrentFileValidationOperation,
-    TorrentMetadataOperation, TorrentTrackersOperation,
+    TorrentFileValidationOperation, TorrentMetadataOperation, TorrentTrackersOperation,
 };
+#[cfg(feature = "dht")]
+use crate::operation::{TorrentDhtNodesOperation, TorrentDhtPeersOperation};
 use crate::peer::{PeerDiscovery, ProtocolExtensionFlags, TcpPeerDiscovery, UtpPeerDiscovery};
 use crate::session_cache::{FxSessionCache, SessionCache};
 use crate::storage::{DiskStorage, MemoryStorage, Storage, StorageParams};
 use crate::torrent::Torrent;
 use crate::tracker::TrackerClient;
 use crate::{
-    ExtensionFactories, ExtensionFactory, InfoHash, Magnet, NoSessionCache, TorrentConfig,
-    TorrentError, TorrentEvent, TorrentFlags, TorrentHandle, TorrentHealth, TorrentMetadata,
-    TorrentOperation, TorrentOperationFactory, DEFAULT_TORRENT_EXTENSIONS,
+    DhtOption, ExtensionFactories, ExtensionFactory, InfoHash, Magnet, NoSessionCache,
+    TorrentConfig, TorrentError, TorrentEvent, TorrentFlags, TorrentHandle, TorrentHealth,
+    TorrentMetadata, TorrentOperation, TorrentOperationFactory, DEFAULT_TORRENT_EXTENSIONS,
     DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
 };
 use async_trait::async_trait;
@@ -74,8 +73,7 @@ pub trait Session: Debug + Callback<SessionEvent> + Send + Sync {
     fn handle(&self) -> SessionHandle;
 
     /// Get the DHT tracker of the session, if one is present.
-    #[cfg(feature = "dht")]
-    async fn dht(&self) -> Option<DhtTracker>;
+    fn dht(&self) -> DhtOption;
 
     /// Get the tracker manager of the session.
     async fn tracker(&self) -> TrackerClient;
@@ -301,7 +299,7 @@ impl FxTorrentSession {
         operations: Vec<TorrentOperationFactory>,
         storage: Arc<SessionStorageFactory>,
         session_cache: Box<dyn SessionCache>,
-        dht: Option<DhtTracker>,
+        dht: DhtOption,
     ) -> Self {
         let handle = SessionHandle::new();
 
@@ -310,7 +308,7 @@ impl FxTorrentSession {
         let inner = Arc::new(InnerSession {
             handle,
             config: RwLock::new(config),
-            dht: Mutex::new(dht),
+            dht,
             tracker: TrackerClient::new(Duration::from_secs(DEFAULT_TRACKER_TIMEOUT_SECONDS)),
             torrents: Default::default(),
             protocol_extensions,
@@ -396,7 +394,6 @@ impl FxTorrentSession {
             info_hash
         );
         let peer_discoveries = self.inner.create_discoveries().await?;
-        let dht_tracker = self.inner.dht.lock().await.clone();
         let storage = self.inner.storage_factory.clone();
         let torrent = Torrent::request()
             .metadata(torrent_info)
@@ -408,7 +405,7 @@ impl FxTorrentSession {
             .operations(self.inner.torrent_operations())
             .storage(move |params| storage(params))
             .tracker_manager(self.inner.tracker.clone())
-            .dht_option(dht_tracker)
+            .dht(self.inner.dht.clone())
             .build()?;
         let result_torrent = torrent.clone();
 
@@ -435,8 +432,8 @@ impl Session for FxTorrentSession {
         self.inner.handle
     }
 
-    async fn dht(&self) -> Option<DhtTracker> {
-        self.inner.dht.lock().await.clone()
+    fn dht(&self) -> DhtOption {
+        self.inner.dht.clone()
     }
 
     async fn tracker(&self) -> TrackerClient {
@@ -488,7 +485,7 @@ impl Session for FxTorrentSession {
                 .operations(vec![Box::new(TorrentTrackersOperation::new())])
                 .storage(|_| Box::new(MemoryStorage::new()))
                 .tracker_manager(self.inner.tracker.clone())
-                .dht_option(self.inner.dht.lock().await.clone())
+                .dht(self.inner.dht.clone())
                 .build()?,
         };
 
@@ -659,7 +656,7 @@ pub struct FxTorrentSessionBuilder {
     operation_factories: Option<Vec<TorrentOperationFactory>>,
     storage: Option<Arc<SessionStorageFactory>>,
     session_cache: Option<Box<dyn SessionCache>>,
-    dht: Option<DhtTracker>,
+    dht: Option<DhtOption>,
     enable_tcp_peer: Option<bool>,
     enable_utp_peer: Option<bool>,
 }
@@ -746,17 +743,8 @@ impl FxTorrentSessionBuilder {
     }
 
     /// Set if DHT is enabled for the session.
-    #[cfg(feature = "dht")]
-    pub fn dht(&mut self, dht: DhtTracker) -> &mut Self {
+    pub fn dht(&mut self, dht: DhtOption) -> &mut Self {
         self.dht = Some(dht);
-        self
-    }
-
-    /// Set if DHT is enabled for the session.
-    /// This replaces any previously configured DHT tracker node.
-    #[cfg(feature = "dht")]
-    pub fn dht_option(&mut self, dht: Option<DhtTracker>) -> &mut Self {
-        self.dht = dht;
         self
     }
 
@@ -836,7 +824,7 @@ impl FxTorrentSessionBuilder {
             .session_cache
             .take()
             .unwrap_or_else(|| Box::new(FxSessionCache::new(DEFAULT_CACHE_LIMIT)));
-        let dht = self.dht.take();
+        let dht = self.dht.take().unwrap_or_else(|| DhtOption::default());
 
         Ok(FxTorrentSession::new(
             config,
@@ -852,15 +840,16 @@ impl FxTorrentSessionBuilder {
 
 impl Debug for FxTorrentSessionBuilder {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FxTorrentSessionBuilder")
-            .field("path", &self.path)
+        let mut d = f.debug_struct("FxTorrentSessionBuilder");
+        d.field("path", &self.path)
             .field("client_name", &self.client_name)
             .field("protocol_extensions", &self.protocol_extensions)
             .field("extensions", &self.extension_factories)
             .field("operation_factories", &self.operation_factories)
-            .field("session_cache", &self.session_cache)
-            .field("dht", &self.dht)
-            .finish()
+            .field("session_cache", &self.session_cache);
+        #[cfg(feature = "dht")]
+        d.field("dht", &self.dht);
+        d.finish()
     }
 }
 
@@ -888,7 +877,7 @@ struct InnerSession {
     /// The config settings of the session
     config: RwLock<SessionConfig>,
     /// The DHT node server of the session
-    dht: Mutex<Option<DhtTracker>>,
+    dht: DhtOption,
     /// The tracker of the session
     tracker: TrackerClient,
     /// The currently active torrents within the session
@@ -1077,7 +1066,7 @@ mod mock {
         #[async_trait]
         impl Session for Session {
             fn handle(&self) -> SessionHandle;
-            async fn dht(&self) -> Option<DhtTracker>;
+            fn dht(&self) -> DhtOption;
             async fn tracker(&self) -> TrackerClient;
             async fn base_path(&self) -> PathBuf;
             async fn set_base_path(&self, location: PathBuf);
