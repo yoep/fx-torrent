@@ -1,0 +1,62 @@
+[package]
+name = "fx-torrent"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.75"
+license-file = "../LICENSE"
+keywords = ["bittorrent", "libtorrent", "torrent", "magnet", "dht"]
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+async-trait = "0.1"
+axum = "0.8"
+base32 = "0.5"
+base64 = "0.22"
+bit-vec = "0.8"
+bitmask-enum = "2.2"
+byteorder = "1.5"
+bytes = "1.11"
+crc = "3.3"
+derive_more = { version = "2.1", features = ["display"] }
+futures = "0.3"
+fx-callback = "1.0"
+fx-handle = "1.0"
+hex = "0.4"
+itertools = "0.14"
+log = "0.4"
+percent-encoding = "2.3"
+rand = "0.9"
+reqwest = { version = "0.12", features = ["stream"] }
+serde = "1.0"
+serde_bencode = "0.2"
+serde_bytes = "0.11"
+sha1 = "0.10.6"
+sha2 = "0.10.9"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["rt-multi-thread", "time", "macros"] }
+tokio-util = "0.7"
+url = "2.5"
+
+[features]
+default = ["dht", "extension-metadata", "extension-pex", "extension-holepunch", "extension-donthave"]
+
+dht = []
+extension-donthave = []
+extension-holepunch = []
+extension-metadata = []
+extension-pex = []
+
+[dev-dependencies]
+chrono = "0.4.42"
+crossterm = { version = "0.29", features = ["event-stream"] }
+hex-literal = "0.4"
+log4rs = { version = "1.4", features = ["console_writer"] }
+mockall = "0.14"
+ratatui = "0.30"
+tempfile = "3.24"
+tokio = { version = "1.48", features = ["signal"] }
+
+[package.metadata.docs.rs]
+all-features = true
