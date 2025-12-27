@@ -1,0 +1,40 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  build_and_test_linux:
+    name: Build and Test (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "main-linux"
+          cache-on-failure: "true"
+      - name: Build and Test (Linux)
+        run: make test
+
+  crates_io_publish:
+    name: Publish (crates.io)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs:
+      - build_and_test_linux
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cargo login
+        run: |-
+          echo "${{ secrets.CRATES_IO_API_TOKEN }}" | cargo login
+      - name: Publish to crates.io
+        run: cargo publish --all-features
+
+

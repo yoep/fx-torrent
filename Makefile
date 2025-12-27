@@ -6,10 +6,10 @@ prerequisites: ## Install the Cargo requirements for testing
 	@cargo install cargo-llvm-cov
 
 test: prerequisites ## Test the cargo project
-	@cargo llvm-cov --lcov --output-path target/lcov.info nextest
+	@cargo llvm-cov --lcov --output-path target/lcov.info nextest --all-features
 
 cov: ## Test the cargo project with coverage reporting to stdout
-	@cargo llvm-cov nextest
+	@cargo llvm-cov nextest --all-features
 
 build: ## Build the cargo project
 	@cargo build

@@ -3,8 +3,22 @@ name = "fx-torrent"
 version = "0.0.0"
 edition = "2021"
 rust-version = "1.75"
-license-file = "../LICENSE"
+license = "Apache-2.0"
+description = "FX Torrent is a feature rich Bittorrent protocol implementation written in rust supporting Linux, MacOS and Windows."
 keywords = ["bittorrent", "libtorrent", "torrent", "magnet", "dht"]
+repository = "https://github.com/yoep/fx-torrent"
+readme = "README.md"
+exclude = [
+    ".config",
+    ".github",
+    "docs/*",
+    "examples/*",
+    "target/*",
+    "test/*",
+    "torrents/*",
+    ".bumpversion.toml",
+    "Makefile",
+]
 
 [lib]
 crate-type = ["rlib"]
@@ -17,7 +31,6 @@ base64 = "0.22"
 bit-vec = "0.8"
 bitmask-enum = "2.2"
 byteorder = "1.5"
-bytes = "1.11"
 crc = "3.3"
 derive_more = { version = "2.1", features = ["display"] }
 futures = "0.3"

@@ -2,26 +2,26 @@ name: Build
 
 on:
   push:
-    branches: [ master ]
+    branches:
+      - master
   pull_request:
-    branches: [ master ]
-  workflow_dispatch:
-    inputs: {}
+    branches:
+      - "**"
 
 jobs:
-  test:
-    name: Test
+  build_and_test_linux:
+    name: Build and Test (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
       - uses: actions/checkout@v5
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "main"
+          shared-key: "main-linux"
           cache-on-failure: "true"
-      - name: Test
+      - name: Build and test
         run: make test
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -32,40 +32,85 @@ jobs:
           name: codecov-umbrella
           verbose: false
 
-  build-no-features:
-    name: Build (no features)
-    runs-on: ubuntu-latest
-    needs:
-      - test
+  build_and_test_macos:
+    name: Build and Test (MacOS)
+    runs-on: macos-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v5
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "main"
+          shared-key: "main-macos"
+          cache-on-failure: "true"
+      - name: Build and test
+        run: make test
+
+  build_and_test_windows:
+    name: Build and Test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "main-windows"
+          cache-on-failure: "true"
+      - name: Build and test
+        run: make test
+
+  build_no_features:
+    name: Build (no features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs:
+      - build_and_test_linux
+      - build_and_test_macos
+      - build_and_test_windows
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "main-linux"
           cache-on-failure: "true"
       - name: Build
         run: |
           cargo build --no-default-features
 
-  build-all-features:
+  build_all_features:
     name: Build (all features)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs:
-      - test
+      - build_and_test_linux
+      - build_and_test_macos
+      - build_and_test_windows
 
     steps:
       - uses: actions/checkout@v5
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "main"
+          shared-key: "main-linux"
           cache-on-failure: "true"
       - name: Build
         run: |
           cargo build --all-features
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Run rustfmt
+        run: cargo fmt --all -- --check
