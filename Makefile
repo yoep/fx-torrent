@@ -19,7 +19,7 @@ build-release: ## Build the release version of the cargo project
 
 bump-dependencies: ## Install required bump dependencies
 	@$(PYTHON) -m pip install --upgrade pip
-	@pip install bump2version --user
+	@pip install bump-my-version --user
 
 bump-%: bump-dependencies ## Bump the (major, minor, patch) version of the application
-	@bumpversion $*
+	@bump-my-version $*

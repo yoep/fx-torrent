@@ -4,9 +4,9 @@
 ![Version](https://img.shields.io/github/v/tag/yoep/fx-torrent?label=version)
 [![Crates](https://img.shields.io/crates/v/fx-torrent)](https://crates.io/crates/fx-torrent)
 [![License: Apache-2.0](https://img.shields.io/github/license/yoep/fx-torrent)](./LICENSE)
-[![codecov](https://codecov.io/gh/yoep/fx-torrent/branch/master/graph/badge.svg?token=A801IOOZAH)](https://codecov.io/gh/yoep/fx-torrent)
+[![codecov](https://codecov.io/gh/yoep/fx-torrent/graph/badge.svg?token=CDT6SG6YEL)](https://codecov.io/gh/yoep/fx-torrent)
 
-FX-Torrent is the most complete BitTorrent implementation fully written in Rust, which supports both Linux, MacOS and Windows.
+FX-Torrent is the most complete BitTorrent implementation fully written in Rust, which supports both Linux, MacOS, and Windows.
 It supports most of the Bittorrent protocol specifications, such as multi-file torrents, validating existing files, resuming torrent files,
 and is based on the `libtorrent` library for functionality and naming convention.
 
@@ -22,6 +22,7 @@ fx-torrent = "0.0.0"
 ```
 
 Next, create a new `FXTorrentSession` which manages one or more torrents.
+A `Torrent` can be created from a magnet link, torrent file, or passing the raw `TorrentMetadata`.
 
 _create a new session with torrent_
 
