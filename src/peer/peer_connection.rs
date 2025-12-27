@@ -579,20 +579,21 @@ mod tests {
     async fn test_peer_connection_shutdown() {
         init_logger!();
         let message = "Lorem ipsum dolor";
-        let socket_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
-        let incoming = TcpListener::bind(socket_addr)
+        let incoming = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
             .expect("expected the tcp listener to bind");
-        let incoming_port = incoming.local_addr().unwrap().port();
+        let incoming_addr = incoming
+            .local_addr()
+            .expect("expected the tcp listener to have been bound to a local address");
 
         tokio::spawn(async move { while let Ok((_stream, _addr)) = incoming.accept().await {} });
 
-        let outgoing_stream = TcpStream::connect((socket_addr.ip(), incoming_port))
+        let outgoing_stream = TcpStream::connect(incoming_addr)
             .await
             .expect("expected to create an outgoing connection");
         let connection = PeerConnection::<TcpStream>::new_tcp(
             PeerId::new(),
-            socket_addr,
+            incoming_addr,
             outgoing_stream,
             Metrics::new(),
         );

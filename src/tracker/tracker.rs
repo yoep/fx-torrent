@@ -197,6 +197,20 @@ pub struct Tracker {
 
 impl Tracker {
     /// Create a new builder instance for creating a [Tracker].
+    /// See [TrackerBuilder] for available configurations.
+    ///
+    /// # Example
+    ///
+    /// Create a new udp tracker client connection.
+    ///
+    /// ```rust,no_run
+    /// use fx_torrent::tracker::Tracker;
+    ///
+    /// Tracker::builder()
+    ///     .url("udp://tracker.opentrackr.org:1337")
+    ///     .build()
+    ///     .await
+    /// ```
     pub fn builder() -> TrackerBuilder {
         TrackerBuilder::builder()
     }
@@ -209,14 +223,20 @@ impl Tracker {
     ) -> Result<Self> {
         trace!("Trying to create new tracker for {}", url);
         let handle = TrackerHandle::new();
-        let port = if url.scheme() == "https" { 443 } else { 80 };
-        let endpoints = lookup_host(format!(
-            "{}:{}",
-            url.host_str().unwrap_or_default(),
-            url.port().unwrap_or(port)
-        ))
-        .await?
-        .collect::<Vec<_>>();
+        let host = url
+            .host_str()
+            .ok_or(TrackerError::InvalidUrl("host is missing".to_string()))?;
+        let port = match url.port() {
+            Some(p) => p,
+            None => match url.scheme() {
+                "http" => 80,
+                "https" => 443,
+                _ => return Err(TrackerError::InvalidUrl("udp port is missing".to_string())),
+            },
+        };
+        let endpoints = lookup_host(format!("{}:{}", host, port))
+            .await?
+            .collect::<Vec<_>>();
         let connection = Self::create_connection(handle, &url, &endpoints, timeout.clone()).await?;
 
         trace!("Resolved tracker {} to {:?}", url, endpoints);
@@ -504,18 +524,57 @@ mod tests {
     use crate::tracker::TrackerServer;
     use crate::TorrentMetadata;
 
-    #[tokio::test]
-    async fn test_tracker_new() {
-        init_logger!();
-        let url = Url::parse("udp://tracker.opentrackr.org:1337").unwrap();
+    mod new {
+        use super::*;
 
-        let result = Tracker::builder()
-            .url(url)
-            .build()
-            .await
-            .expect("expected the tracker to be created");
+        #[tokio::test]
+        async fn test_new_valid_udp_url() {
+            init_logger!();
+            let url = Url::parse("udp://tracker.opentrackr.org:1337").unwrap();
 
-        assert_eq!(1, result.inner.endpoints.len());
+            let result = Tracker::builder()
+                .url(url)
+                .build()
+                .await
+                .expect("expected the tracker to be created");
+
+            assert_eq!(1, result.inner.endpoints.len());
+        }
+
+        #[tokio::test]
+        async fn test_new_valid_http_url() {
+            init_logger!();
+            let http_server = HttpServer::with_port(0).await.unwrap();
+            let server = TrackerServer::with_listeners(vec![Box::new(http_server)])
+                .await
+                .unwrap();
+            let url =
+                Url::parse(format!("http://localhost:{}/announce", server.addr().port()).as_str())
+                    .unwrap();
+
+            let result = Tracker::builder()
+                .url(url)
+                .build()
+                .await
+                .expect("expected the tracker to be created");
+
+            let endpoints_len = result.inner.endpoints.len();
+            assert!(endpoints_len > 0, "expected the tracker to be created");
+        }
+
+        #[tokio::test]
+        async fn test_new_invalid_url() {
+            init_logger!();
+            let url = Url::parse("udp://tracker.opentrackr.org").unwrap();
+
+            let result = Tracker::builder().url(url).build().await;
+
+            if let Err(e) = result {
+                assert_eq!("tracker url is invalid, udp port is missing", e.to_string());
+            } else {
+                assert!(false, "expected Err(TrackerError), but got {:?}", result);
+            }
+        }
     }
 
     #[tokio::test]

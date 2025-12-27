@@ -26,7 +26,7 @@ const ERROR_CONNECTION_NOT_INITIALIZED: &'static str = "udp connection not start
 
 /// The UDP connection of a tracker.
 #[derive(Debug, Display)]
-#[display("{}", addrs)]
+#[display("Tracker {} UDP connection", handle)]
 pub struct UdpConnection {
     /// The handle of the tracker
     handle: TrackerHandle,
@@ -40,12 +40,13 @@ pub struct UdpConnection {
 #[async_trait]
 impl TrackerClientConnection for UdpConnection {
     async fn start(&mut self) -> Result<()> {
-        let socket = UdpSocket::bind("0:0").await?;
+        let socket = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))).await?;
+        trace!("{} started on {}", self, socket.local_addr()?.port());
         let mut connected = false;
 
         // try to connect to an available address known for the tracker
         while let Some(addr) = self.next_addr().await {
-            trace!("Trying to connect to {:?}", addr);
+            trace!("{} is trying to connect to {:?}", self, addr);
             match socket.connect(addr).await {
                 Ok(_) => {
                     trace!("Successfully connected to tracker address {}", addr);
@@ -165,6 +166,7 @@ impl TrackerClientConnection for UdpConnection {
 
 impl UdpConnection {
     pub fn new(handle: TrackerHandle, addrs: &[SocketAddr], timeout: Duration) -> Self {
+        trace!("Creating new tracker udp connection for {:?}", addrs);
         Self {
             handle,
             addrs: AddressManager::new(addrs),
