@@ -22,4 +22,4 @@ bump-dependencies: ## Install required bump dependencies
 	@pip install bump-my-version --user
 
 bump-%: bump-dependencies ## Bump the (major, minor, patch) version of the application
-	@bump-my-version $*
+	@bump-my-version bump $*

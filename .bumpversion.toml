@@ -10,7 +10,7 @@ search = "version = \"{current_version}\""
 replace = "version = \"{new_version}\""
 
 [[tool.bumpversion.files]]
-filename = "Readme.md"
+filename = "README.md"
 search = "fx-torrent = \"{current_version}\""
 replace = "fx-torrent = \"{new_version}\""
 
