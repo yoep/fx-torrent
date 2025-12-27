@@ -1,0 +1,71 @@
+name: Build
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+    inputs: {}
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "main"
+          cache-on-failure: "true"
+      - name: Test
+        run: make test
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./target/lcov.info
+          flags: unittests
+          name: codecov-umbrella
+          verbose: false
+
+  build-no-features:
+    name: Build (no features)
+    runs-on: ubuntu-latest
+    needs:
+      - test
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "main"
+          cache-on-failure: "true"
+      - name: Build
+        run: |
+          cargo build --no-default-features
+
+  build-all-features:
+    name: Build (all features)
+    runs-on: ubuntu-latest
+    needs:
+      - test
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "main"
+          cache-on-failure: "true"
+      - name: Build
+        run: |
+          cargo build --all-features
