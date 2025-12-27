@@ -586,8 +586,7 @@ pub struct UtpSocketId {
 mod tests {
     use super::*;
     use crate::peer::protocol::UtpStreamState;
-    use crate::peer::tests::create_utp_socket;
-    use crate::{assert_timeout, create_utp_socket_pair, init_logger};
+    use crate::{assert_timeout, create_utp_socket, create_utp_socket_pair, init_logger};
     use std::net::Ipv4Addr;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -710,7 +709,7 @@ mod tests {
         init_logger!();
         let id = UtpConnId::new();
         let (tx, mut rx) = unbounded_channel();
-        let socket = create_utp_socket().await;
+        let socket = create_utp_socket!();
         let context = socket.context();
 
         {

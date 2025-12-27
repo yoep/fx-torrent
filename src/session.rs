@@ -1100,7 +1100,6 @@ pub mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::sync::mpsc::unbounded_channel;
-    use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn test_session_find_torrent() {

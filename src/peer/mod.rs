@@ -22,7 +22,7 @@ pub mod webseed;
 pub mod tests {
     use super::*;
 
-    use crate::peer::protocol::{UtpSocket, UtpSocketExtensions, UtpStream};
+    use crate::peer::protocol::UtpSocket;
     use crate::peer::Peer;
     use crate::timeout;
     use crate::{PieceIndex, Torrent};
@@ -32,7 +32,7 @@ pub mod tests {
     use fx_callback::{Callback, Subscriber, Subscription};
     use mockall::mock;
     use std::fmt::{Display, Formatter};
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -70,42 +70,77 @@ pub mod tests {
     /// Create a new uTP socket.
     #[macro_export]
     macro_rules! create_utp_socket {
-        ($runtime:expr) => {
-            crate::peer::tests::create_utp_socket($runtime)
-        };
-        ($port:expr, $runtime:expr) => {
-            crate::peer::tests::create_utp_socket_with_port($port, $runtime)
-        };
+        () => {{
+            create_utp_socket!(0)
+        }};
+        ($port:expr) => {{
+            use crate::peer::protocol::UtpSocket;
+            use core::net::{Ipv4Addr, SocketAddr};
+            use core::time::Duration;
+
+            let port: u16 = $port;
+
+            UtpSocket::new(
+                SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                Duration::from_secs(1),
+                vec![],
+            )
+            .await
+            .expect("expected an utp socket")
+        }};
     }
 
     /// Create a new uTP socket pair which don't overlap with port ranges.
     #[macro_export]
     macro_rules! create_utp_socket_pair {
-        () => {
-            crate::peer::tests::create_utp_socket_pair(vec![], vec![]).await
-        };
-        ($incoming_extensions:expr, $outgoing_extensions:expr) => {
-            crate::peer::tests::create_utp_socket_pair($incoming_extensions, $outgoing_extensions)
+        () => {{
+            create_utp_socket_pair!(vec![], vec![])
+        }};
+        ($incoming_extensions:expr, $outgoing_extensions:expr) => {{
+            use crate::peer::protocol::{UtpSocket, UtpSocketExtensions};
+            use core::net::{Ipv4Addr, SocketAddr};
+            use core::time::Duration;
+
+            let incoming_extensions: UtpSocketExtensions = $incoming_extensions;
+            let outgoing_extensions: UtpSocketExtensions = $outgoing_extensions;
+
+            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+            let left = UtpSocket::new(addr, Duration::from_secs(2), incoming_extensions)
                 .await
-        };
+                .expect("expected a new utp socket");
+
+            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+            let right = UtpSocket::new(addr, Duration::from_secs(2), outgoing_extensions)
+                .await
+                .expect("expected a new utp socket");
+
+            (left, right)
+        }};
     }
 
-    pub async fn create_utp_socket() -> UtpSocket {
-        UtpSocket::new(
-            SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
-            Duration::from_secs(1),
-            vec![],
-        )
-        .await
-        .expect("expected an utp socket")
-    }
+    /// Create a new uTP stream pair for the given incoming and outgoing sockets.
+    ///
+    /// Use `create_utp_socket_pair!()` to create a new uTP socket pair.
+    #[macro_export]
+    macro_rules! create_utp_stream_pair {
+        ($incoming:expr, $outgoing:expr) => {{
+            use crate::peer::protocol::UtpSocket;
 
-    pub async fn create_utp_socket_with_port(port: u16) -> UtpSocket {
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            let incoming: &UtpSocket = $incoming;
+            let outgoing: &UtpSocket = $outgoing;
 
-        UtpSocket::new(addr, Duration::from_secs(1), vec![])
-            .await
-            .expect("expected an utp socket")
+            let target_addr = incoming.addr();
+            let outgoing_stream = outgoing
+                .connect(target_addr)
+                .await
+                .expect("expected an outgoing utp stream");
+            let incoming_stream = incoming
+                .recv()
+                .await
+                .expect("expected an incoming uTP stream");
+
+            (incoming_stream, outgoing_stream)
+        }};
     }
 
     pub async fn create_utp_peer_pair(
@@ -163,40 +198,6 @@ pub mod tests {
         let incoming_peer = timeout!(rx.recv(), Duration::from_secs(1)).unwrap();
 
         (incoming_peer, outgoing_peer)
-    }
-
-    pub async fn create_utp_socket_pair(
-        incoming_extensions: UtpSocketExtensions,
-        outgoing_extensions: UtpSocketExtensions,
-    ) -> (UtpSocket, UtpSocket) {
-        let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
-        let left = UtpSocket::new(addr, Duration::from_secs(2), incoming_extensions)
-            .await
-            .expect("expected a new utp socket");
-
-        let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
-        let right = UtpSocket::new(addr, Duration::from_secs(2), outgoing_extensions)
-            .await
-            .expect("expected a new utp socket");
-
-        (left, right)
-    }
-
-    pub async fn create_utp_stream_pair(
-        incoming: &UtpSocket,
-        outgoing: &UtpSocket,
-    ) -> (UtpStream, UtpStream) {
-        let target_addr = incoming.addr();
-        let outgoing_stream = outgoing
-            .connect(target_addr)
-            .await
-            .expect("expected an outgoing utp stream");
-        let incoming_stream = incoming
-            .recv()
-            .await
-            .expect("expected an incoming uTP stream");
-
-        (incoming_stream, outgoing_stream)
     }
 
     pub async fn new_tcp_peer_discovery() -> Result<TcpPeerDiscovery> {

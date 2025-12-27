@@ -1076,8 +1076,10 @@ mod tests {
     use super::*;
 
     use crate::peer::protocol::tests::UtpPacketCaptureExtension;
-    use crate::peer::tests::{create_utp_socket, create_utp_stream_pair};
-    use crate::{assert_timeout, create_utp_socket_pair, init_logger, timeout};
+    use crate::{
+        assert_timeout, create_utp_socket, create_utp_socket_pair, create_utp_stream_pair,
+        init_logger, timeout,
+    };
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc::unbounded_channel;
@@ -1112,7 +1114,7 @@ mod tests {
         init_logger!();
         let initial_sequence_number = 1u16;
         let (_sender, receiver) = unbounded_channel();
-        let socket = create_utp_socket().await;
+        let socket = create_utp_socket!();
         let context = socket.context();
         let capture = UtpPacketCaptureExtension::new();
 
@@ -1169,7 +1171,7 @@ mod tests {
         init_logger!();
         let sequence_number = 64;
         let (_sender, receiver) = unbounded_channel();
-        let socket = create_utp_socket().await;
+        let socket = create_utp_socket!();
         let context = socket.context();
         let capture = UtpPacketCaptureExtension::new();
 
@@ -1225,7 +1227,7 @@ mod tests {
         init_logger!();
         let expected_sequence_number = 13;
         let (_sender, receiver) = unbounded_channel();
-        let socket = create_utp_socket().await;
+        let socket = create_utp_socket!();
         let context = socket.context();
 
         let stream = UtpStream::new_incoming(
@@ -1271,7 +1273,7 @@ mod tests {
             vec![Box::new(incoming_capture.clone())],
             vec![Box::new(outgoing_capture.clone())]
         );
-        let (incoming_stream, outgoing_stream) = create_utp_stream_pair(&incoming, &outgoing).await;
+        let (incoming_stream, outgoing_stream) = create_utp_stream_pair!(&incoming, &outgoing);
 
         assert_timeout!(
             Duration::from_millis(500),
@@ -1349,7 +1351,7 @@ mod tests {
             vec![Box::new(outgoing_capture.clone())]
         );
         let (mut incoming_stream, mut outgoing_stream) =
-            create_utp_stream_pair(&incoming, &outgoing).await;
+            create_utp_stream_pair!(&incoming, &outgoing);
         let (tx, mut rx) = unbounded_channel();
 
         assert_timeout!(
@@ -1440,7 +1442,7 @@ mod tests {
         let expected_result = "Lorem ipsum dolor sit amet, consectetur adipiscing elit.";
         let (incoming, outgoing) = create_utp_socket_pair!();
         let (mut incoming_stream, mut outgoing_stream) =
-            create_utp_stream_pair(&incoming, &outgoing).await;
+            create_utp_stream_pair!(&incoming, &outgoing);
         let (tx, mut rx) = unbounded_channel();
 
         assert_timeout!(
@@ -1478,7 +1480,7 @@ mod tests {
     async fn test_utp_stream_close() {
         init_logger!();
         let (incoming, outgoing) = create_utp_socket_pair!();
-        let (incoming_stream, outgoing_stream) = create_utp_stream_pair(&incoming, &outgoing).await;
+        let (incoming_stream, outgoing_stream) = create_utp_stream_pair!(&incoming, &outgoing);
 
         // close the outgoing stream
         outgoing_stream
@@ -1500,8 +1502,7 @@ mod tests {
     async fn test_utp_stream_shutdown() {
         init_logger!();
         let (incoming, outgoing) = create_utp_socket_pair!();
-        let (incoming_stream, mut outgoing_stream) =
-            create_utp_stream_pair(&incoming, &outgoing).await;
+        let (incoming_stream, mut outgoing_stream) = create_utp_stream_pair!(&incoming, &outgoing);
 
         // close the stream through the shutdown fn
         outgoing_stream
