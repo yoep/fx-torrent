@@ -54,33 +54,6 @@ async fn main() -> Result<(), io::Error> {
 
 For more examples, see the [examples](./examples).
 
-## Features
-
-- [x] [BEP3](https://www.bittorrent.org/beps/bep_0003.html) - The BitTorrent Protocol Specification
-- [x] [BEP4](https://www.bittorrent.org/beps/bep_0004.html) - Assigned Numbers
-- [x] [BEP5](https://www.bittorrent.org/beps/bep_0005.html) - DHT Protocol
-- [x] [BEP6](https://www.bittorrent.org/beps/bep_0006.html) - Fast Extension
-- [x] [BEP9](https://www.bittorrent.org/beps/bep_0009.html) - Extension for Peers to Send Metadata Files
-- [x] [BEP10](https://www.bittorrent.org/beps/bep_0010.html) - Extension Protocol
-- [x] [BEP11](https://www.bittorrent.org/beps/bep_0011.html) - Peer Exchange (PEX)
-- [x] [BEP12](https://www.bittorrent.org/beps/bep_0012.html) - Multitracker Metadata Extension
-- [x] [BEP15](https://www.bittorrent.org/beps/bep_0015.html) - UDP Tracker Protocol for BitTorrent
-- [x] [BEP19](https://www.bittorrent.org/beps/bep_0019.html) - WebSeed - HTTP/FTP Seeding (GetRight style)
-- [x] [BEP20](https://www.bittorrent.org/beps/bep_0020.html) - Peer ID Conventions
-- [x] [BEP21](https://www.bittorrent.org/beps/bep_0021.html) - Extension for partial seeds
-- [x] [BEP29](https://www.bittorrent.org/beps/bep_0029.html) - uTorrent transport protocol
-- [x] [BEP32](https://www.bittorrent.org/beps/bep_0032.html) - BitTorrent DHT Extensions for IPv6
-- [ ] [BEP33](https://www.bittorrent.org/beps/bep_0033.html) - DHT scrape
-- [x] [BEP40](https://www.bittorrent.org/beps/bep_0040.html) - Canonical Peer Priority
-- [x] [BEP42](https://www.bittorrent.org/beps/bep_0042.html) - DHT Security extension
-- [ ] [BEP44](https://www.bittorrent.org/beps/bep_0044.html) - Storing arbitrary data in the DHT
-- [x] [BEP47](https://www.bittorrent.org/beps/bep_0047.html) - Padding files and extended file attributes
-- [x] [BEP48](https://www.bittorrent.org/beps/bep_0048.html) - Tracker Protocol Extension: Scrape
-- [ ] [BEP51](https://www.bittorrent.org/beps/bep_0051.html) - DHT Infohash Indexing
-- [ ] [BEP52](https://www.bittorrent.org/beps/bep_0052.html) - The BitTorrent Protocol Specification v2 (WIP)
-- [x] [BEP53](https://www.bittorrent.org/beps/bep_0053.html) - Magnets
-- [x] [BEP54](https://www.bittorrent.org/beps/bep_0054.html) - The lt_donthave extension
-- [ ] [BEP55](https://www.bittorrent.org/beps/bep_0055.html) - Holepunch extension (WIP)
 */
 
 pub use compact::*;
@@ -100,10 +73,10 @@ pub use torrent_health::*;
 pub use torrent_metadata::*;
 pub use torrent_metrics::*;
 pub use torrent_peer::*;
-use torrent_pools::*;
 
 use std::ops::Range;
 
+mod channel;
 mod compact;
 #[cfg(feature = "dht")]
 pub mod dht;
@@ -124,12 +97,12 @@ mod session_cache;
 pub mod storage;
 mod torrent;
 mod torrent_config;
+mod torrent_data;
 mod torrent_flags;
 mod torrent_health;
 mod torrent_metadata;
 mod torrent_metrics;
 mod torrent_peer;
-mod torrent_pools;
 pub mod tracker;
 
 #[cfg(feature = "extension-donthave")]
@@ -229,33 +202,6 @@ pub fn calculate_byte_rate(bytes: usize, elapsed_micro_secs: u128) -> u64 {
     ((bytes as u128 * 1_000_000) / elapsed_micro_secs) as u64
 }
 
-/// Retrieves an available port on the local machine.
-///
-/// This function searches for an available port on all network interfaces at the time of invocation.
-/// However, it's important to note that while a port may be available when retrieved, it may become
-/// unavailable by the time you attempt to bind to it, as this function does not reserve the port.
-///
-/// # Arguments
-///
-/// * `lower_bound` - The lower bound of the available port range (optional, default = 1000).
-/// * `upper_bound` - The upper bound of the available port range (optional, default = [u16::MAX]).
-///
-/// # Returns
-///
-/// Returns an available port if one is found, else `None`.
-#[macro_export]
-macro_rules! available_port {
-    ($lower_bound:expr, $upper_bound:expr) => {
-        crate::available_port($lower_bound, $upper_bound)
-    };
-    ($lower_bound:expr) => {
-        crate::available_port($lower_bound, u16::MAX)
-    };
-    () => {
-        crate::available_port(1000, u16::MAX)
-    };
-}
-
 /// Get the overlapping range of two ranges.
 /// It returns the overlapping range if there is one, else [None].
 #[inline]
@@ -316,9 +262,9 @@ pub mod tests {
         }};
         ($uri:expr, $temp_dir:expr, $options:expr, $config:expr) => {{
             use crate::operation::{
-                TorrentConnectPeersOperation, TorrentCreateFilesOperation,
-                TorrentCreatePiecesOperation, TorrentDhtNodesOperation, TorrentDhtPeersOperation,
-                TorrentFileValidationOperation, TorrentMetadataOperation, TorrentTrackersOperation,
+                TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation,
+                TorrentDhtNodesOperation, TorrentDhtPeersOperation, TorrentFileValidationOperation,
+                TorrentMetadataOperation, TorrentTrackersOperation,
             };
 
             create_torrent!(
@@ -332,8 +278,7 @@ pub mod tests {
                     || Box::new(TorrentDhtPeersOperation::new()),
                     || Box::new(TorrentConnectPeersOperation::new()),
                     || Box::new(TorrentMetadataOperation::new()),
-                    || Box::new(TorrentCreatePiecesOperation::new()),
-                    || Box::new(TorrentCreateFilesOperation::new()),
+                    || Box::new(TorrentCreatePiecesAndFilesOperation::new()),
                     || Box::new(TorrentFileValidationOperation::new()),
                 ]
             )
@@ -364,7 +309,7 @@ pub mod tests {
                     Box::new(crate::storage::DiskStorage::new(
                         params.info_hash,
                         params.path,
-                        params.files,
+                        params.data_pool,
                     ))
                 }
             )

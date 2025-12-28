@@ -114,7 +114,7 @@ impl Peer for HttpPeer {
     }
 
     async fn remote_piece_bitfield(&self) -> BitVec {
-        let total_pieces = self.inner.torrent.piece_pool().len().await;
+        let total_pieces = self.inner.torrent.data_pool().num_of_pieces().await;
         BitVec::from_elem(total_pieces, true)
     }
 
@@ -202,11 +202,11 @@ impl HttpPeerContext {
     /// Try to request the given piece.
     /// It returns an error if the piece couldn't be requested from the webseed.
     async fn request_piece(&self, piece: &PieceIndex, metadata: &TorrentMetadata) -> Result<()> {
-        if let Some(piece) = self.torrent.piece_pool().get(&piece).await {
+        if let Some(piece) = self.torrent.data_pool().piece(&piece).await {
             let piece_len = piece.len();
             let file_index = self
                 .torrent
-                .file_pool()
+                .data_pool()
                 .file_index_for(&piece.index)
                 .await
                 .ok_or(Error::InvalidPiece(piece.index))?;
@@ -216,8 +216,8 @@ impl HttpPeerContext {
             while cursor < piece_len {
                 let file = self
                     .torrent
-                    .file_pool()
-                    .get(&file_index)
+                    .data_pool()
+                    .file(&file_index)
                     .await
                     .ok_or(Error::InvalidPiece(piece.index))?;
                 if file.attributes().contains(FileAttributeFlags::PaddingFile) {

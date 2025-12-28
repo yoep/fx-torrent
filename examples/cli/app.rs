@@ -10,9 +10,9 @@ use futures::{future, FutureExt};
 use fx_callback::{Callback, Subscription};
 use fx_torrent::dht::DhtTracker;
 use fx_torrent::operation::{
-    TorrentConnectPeersOperation, TorrentCreateFilesOperation, TorrentCreatePiecesOperation,
-    TorrentDhtNodesOperation, TorrentDhtPeersOperation, TorrentFileValidationOperation,
-    TorrentMetadataOperation, TorrentTrackersOperation,
+    TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation, TorrentDhtNodesOperation,
+    TorrentDhtPeersOperation, TorrentFileValidationOperation, TorrentMetadataOperation,
+    TorrentTrackersOperation,
 };
 use fx_torrent::{
     DhtOption, FxSessionCache, FxTorrentSession, Session, SessionEvent, TorrentFlags,
@@ -443,8 +443,7 @@ impl App {
         let mut operations: Vec<TorrentOperationFactory> = vec![
             || Box::new(TorrentConnectPeersOperation::new()),
             || Box::new(TorrentMetadataOperation::new()),
-            || Box::new(TorrentCreatePiecesOperation::new()),
-            || Box::new(TorrentCreateFilesOperation::new()),
+            || Box::new(TorrentCreatePiecesAndFilesOperation::new()),
             || Box::new(TorrentFileValidationOperation::new()),
         ];
         let mut operation_index = 0;

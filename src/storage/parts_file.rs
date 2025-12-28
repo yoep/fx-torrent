@@ -1,5 +1,5 @@
 use crate::storage::{Error, Result};
-use crate::torrent_pools::PiecePool;
+use crate::torrent_data::DataPool;
 use crate::{Piece, PieceIndex};
 use log::trace;
 use std::collections::BTreeMap;
@@ -15,7 +15,7 @@ type SlotIndex = usize;
 pub struct PartsFile {
     filename: String,
     path: PathBuf,
-    pieces: PiecePool,
+    data_pool: DataPool,
     piece_slots: RwLock<BTreeMap<PieceIndex, SlotIndex>>,
     slots: RwLock<BTreeMap<SlotIndex, PartSlot>>,
 }
@@ -24,11 +24,11 @@ impl PartsFile {
     /// Create a new parts file instance for the given filename and location path.
     ///
     /// The path to the parts file **should not include** the filename of the parts file.
-    pub fn new<S: AsRef<str>, P: AsRef<Path>>(filename: S, path: P, pieces: PiecePool) -> Self {
+    pub fn new<S: AsRef<str>, P: AsRef<Path>>(filename: S, path: P, data_pool: DataPool) -> Self {
         Self {
             filename: filename.as_ref().to_string(),
             path: path.as_ref().to_path_buf(),
-            pieces,
+            data_pool,
             piece_slots: Default::default(),
             slots: Default::default(),
         }
@@ -72,7 +72,11 @@ impl PartsFile {
     pub async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         let mut slots = self.slots.write().await;
         let mut piece_slots = self.piece_slots.write().await;
-        let piece = self.pieces.get(piece).await.ok_or(Error::Unavailable)?;
+        let piece = self
+            .data_pool
+            .piece(piece)
+            .await
+            .ok_or(Error::Unavailable)?;
         let slot = match piece_slots
             .get(&piece.index)
             .and_then(|slot_index| slots.get(slot_index))
@@ -190,7 +194,7 @@ mod tests {
         let piece_index = 2 as PieceIndex;
         let piece_len = 16;
         let piece_data = "lorem".as_bytes();
-        let pieces = PiecePool::from(vec![Piece {
+        let pieces = DataPool::from(vec![Piece {
             hash: Default::default(),
             index: piece_index,
             offset: 0,

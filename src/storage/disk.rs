@@ -1,6 +1,6 @@
 use crate::storage::parts_file::PartsFile;
 use crate::storage::{Error, Metrics, Result, Storage};
-use crate::torrent_pools::FilePool;
+use crate::torrent_data::DataPool;
 use crate::{
     FileAttributeFlags, FileIndex, FilePriority, InfoHash, PieceIndex, Sha1Hash, Sha256Hash,
 };
@@ -19,20 +19,19 @@ use tokio::sync::RwLock;
 #[derive(Debug)]
 pub struct DiskStorage {
     path: RwLock<PathBuf>,
-    files: FilePool,
+    data_pool: DataPool,
     part_file: PartsFile,
     metrics: Metrics,
 }
 
 impl DiskStorage {
-    pub fn new<P: AsRef<Path>>(info_hash: InfoHash, path: P, files: FilePool) -> Self {
+    pub fn new<P: AsRef<Path>>(info_hash: InfoHash, path: P, data_pool: DataPool) -> Self {
         let part_filename = format!(".{}.parts", hex::encode(info_hash.short_info_hash_bytes()));
-        let piece_pool = files.pieces().clone();
 
         Self {
             path: RwLock::new(path.as_ref().to_path_buf()),
-            files,
-            part_file: PartsFile::new(part_filename, path, piece_pool),
+            part_file: PartsFile::new(part_filename, path, data_pool.clone()),
+            data_pool,
             metrics: Default::default(),
         }
     }
@@ -44,9 +43,8 @@ impl DiskStorage {
 
     /// Get the amount of bytes for the given piece.
     async fn piece_len(&self, piece: &PieceIndex) -> usize {
-        self.files
-            .pieces()
-            .get(piece)
+        self.data_pool
+            .piece(piece)
             .await
             .map(|e| e.len())
             .unwrap_or_default()
@@ -54,10 +52,9 @@ impl DiskStorage {
 
     /// Get the amount of bytes within the torrent.
     async fn torrent_len(&self) -> usize {
-        let last_piece_index = self.files.pieces().len().await.saturating_sub(1);
-        self.files
-            .pieces()
-            .get(&last_piece_index)
+        let last_piece_index = self.data_pool.num_of_pieces().await.saturating_sub(1);
+        self.data_pool
+            .piece(&last_piece_index)
             .await
             .map(|piece| piece.offset.saturating_add(piece.len()))
             .unwrap_or_default()
@@ -110,9 +107,8 @@ impl DiskStorage {
         buffer_len: usize,
     ) -> Result<(FileIndex, usize)> {
         let torrent_piece_start = self
-            .files
-            .pieces()
-            .get(piece)
+            .data_pool
+            .piece(piece)
             .await
             .map(|piece| piece.offset.saturating_add(offset))
             .ok_or(Error::Unavailable)?;
@@ -127,7 +123,7 @@ impl DiskStorage {
         }
 
         let file_index = self
-            .files
+            .data_pool
             .file_index_for(&piece)
             .await
             .ok_or(Error::Unavailable)?;
@@ -174,8 +170,8 @@ impl Storage for DiskStorage {
 
         while cursor < buffer_len {
             let file = self
-                .files
-                .get(&file_index)
+                .data_pool
+                .file(&file_index)
                 .await
                 .ok_or(Error::Unavailable)?;
             let bytes_remaining = buffer_len.saturating_sub(cursor);
@@ -252,8 +248,8 @@ impl Storage for DiskStorage {
 
         while cursor < data_len {
             let file = self
-                .files
-                .get(&file_index)
+                .data_pool
+                .file(&file_index)
                 .await
                 .ok_or(Error::Unavailable)?;
             let bytes_remaining = data_len - cursor;
@@ -269,12 +265,7 @@ impl Storage for DiskStorage {
 
             // check if we need to write to the parts file
             if file.priority == FilePriority::None {
-                let cur_piece = match self
-                    .files
-                    .pieces()
-                    .find_piece_at_offset(torrent_offset)
-                    .await
-                {
+                let cur_piece = match self.data_pool.find_piece_at_offset(torrent_offset).await {
                     Some(piece) => piece,
                     None => return Err(Error::Unavailable),
                 };
@@ -355,9 +346,9 @@ impl Drop for DiskStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operation::{TorrentCreateFilesOperation, TorrentCreatePiecesOperation};
+    use crate::operation::TorrentCreatePiecesAndFilesOperation;
     use crate::tests::read_test_file_to_bytes;
-    use crate::{create_torrent, init_logger};
+    use crate::{create_torrent, init_logger, TorrentOperationResult};
     use crate::{TorrentContext, TorrentOperation};
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -380,7 +371,7 @@ mod tests {
         let storage = DiskStorage::new(
             context.metadata_lock().read().await.info_hash.clone(),
             temp_path,
-            context.file_pool().clone(),
+            context.data_pool().clone(),
         );
 
         // create pieces & files
@@ -400,7 +391,7 @@ mod tests {
         {
             let piece: PieceIndex = 0;
             let offset = 32;
-            let piece_len = context.piece_pool().get(&piece).await.unwrap().length;
+            let piece_len = context.data_pool().piece(&piece).await.unwrap().length;
             let mut buffer = vec![0u8; piece_len];
             let result = storage.read(&mut buffer, &piece, offset).await;
             assert_eq!(
@@ -418,7 +409,7 @@ mod tests {
         // read non-starting piece without offset
         {
             let piece: PieceIndex = 7;
-            let piece_len = context.piece_pool().get(&piece).await.unwrap().length;
+            let piece_len = context.data_pool().piece(&piece).await.unwrap().length;
             let mut buffer = vec![0u8; piece_len];
             let result = storage.read(&mut buffer, &piece, 0).await;
             assert_eq!(
@@ -448,7 +439,7 @@ mod tests {
         let storage = DiskStorage::new(
             context.metadata_lock().read().await.info_hash.clone(),
             temp_path,
-            context.file_pool().clone(),
+            context.data_pool().clone(),
         );
 
         // create pieces & files
@@ -467,8 +458,8 @@ mod tests {
         // get the hash result from the piece
         {
             let piece_hash = context
-                .piece_pool()
-                .get(&piece)
+                .data_pool()
+                .piece(&piece)
                 .await
                 .expect("expected the piece to have been found")
                 .hash;
@@ -488,9 +479,8 @@ mod tests {
     }
 
     async fn create_pieces_and_files(context: &Arc<TorrentContext>) {
-        let piece_operation = TorrentCreatePiecesOperation::new();
-        let file_operation = TorrentCreateFilesOperation::new();
-        let _ = piece_operation.execute(context).await;
-        let _ = file_operation.execute(context).await;
+        let operation = TorrentCreatePiecesAndFilesOperation::new();
+        let result = operation.execute(context).await;
+        assert_eq!(TorrentOperationResult::Continue, result);
     }
 }

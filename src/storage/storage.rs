@@ -1,5 +1,5 @@
 use crate::storage::{Metrics, Result};
-use crate::torrent_pools::FilePool;
+use crate::torrent_data::DataPool;
 use crate::{InfoHash, PieceIndex, Sha1Hash, Sha256Hash};
 use async_trait::async_trait;
 use std::fmt::Debug;
@@ -54,5 +54,5 @@ pub trait Storage: Debug + Send + Sync {
 pub struct StorageParams {
     pub info_hash: InfoHash,
     pub path: PathBuf,
-    pub files: FilePool,
+    pub data_pool: DataPool,
 }
