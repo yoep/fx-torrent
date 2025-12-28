@@ -97,7 +97,7 @@ impl Storage for MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operation::TorrentCreatePiecesOperation;
+    use crate::operation::TorrentCreatePiecesAndFilesOperation;
     use crate::tests::read_test_file_to_bytes;
     use crate::{create_torrent, init_logger};
     use crate::{TorrentOperation, TorrentOperationResult};
@@ -144,7 +144,7 @@ mod tests {
             vec![],
             vec![]
         );
-        let operation = TorrentCreatePiecesOperation::new();
+        let operation = TorrentCreatePiecesAndFilesOperation::new();
         let context = &torrent.instance().unwrap();
         let storage = MemoryStorage::new();
 
@@ -164,8 +164,8 @@ mod tests {
             "expected the pieces to have been created"
         );
         let piece_hash = context
-            .piece_pool()
-            .get(&piece)
+            .data_pool()
+            .piece(&piece)
             .await
             .expect("expected the piece to have been found")
             .hash;

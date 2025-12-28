@@ -2,7 +2,7 @@ use crate::errors::Result;
 use crate::file::File;
 use crate::metrics::Metric;
 use crate::operation::{
-    TorrentConnectPeersOperation, TorrentCreateFilesOperation, TorrentCreatePiecesOperation,
+    TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation,
     TorrentFileValidationOperation, TorrentMetadataOperation, TorrentTrackersOperation,
 };
 #[cfg(feature = "dht")]
@@ -15,15 +15,15 @@ use crate::peer::{
 use crate::peer_pool::PeerPool;
 use crate::storage::{Storage, StorageParams};
 use crate::torrent_config::TorrentConfig;
+use crate::torrent_data::DataPool;
 use crate::tracker::{
     AnnounceEvent, AnnouncementResult, TrackerClient, TrackerClientEvent, TrackerEntry,
     TrackerHandle,
 };
 use crate::{
-    DhtOption, FileAttributeFlags, FileIndex, FilePool, Metrics, Piece, PieceChunkPool, PieceIndex,
-    PiecePart, PiecePool, PiecePriority, TorrentError, TorrentFlags, TorrentMetadata,
-    TorrentMetadataInfo, TorrentPeer, DEFAULT_TORRENT_EXTENSIONS,
-    DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
+    DhtOption, FileAttributeFlags, FileIndex, Metrics, Piece, PieceChunkPool, PieceIndex,
+    PiecePart, PiecePriority, TorrentError, TorrentFlags, TorrentMetadata, TorrentMetadataInfo,
+    TorrentPeer, DEFAULT_TORRENT_EXTENSIONS, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
 };
 use async_trait::async_trait;
 use derive_more::Display;
@@ -267,8 +267,7 @@ impl TorrentRequest {
             Box::new(TorrentDhtPeersOperation::new()),
             Box::new(TorrentConnectPeersOperation::new()),
             Box::new(TorrentMetadataOperation::new()),
-            Box::new(TorrentCreatePiecesOperation::new()),
-            Box::new(TorrentCreateFilesOperation::new()),
+            Box::new(TorrentCreatePiecesAndFilesOperation::new()),
             Box::new(TorrentFileValidationOperation::new()),
         ]
     }
@@ -312,15 +311,14 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
             .config
             .take()
             .unwrap_or_else(|| TorrentConfig::builder().build());
-        let piece_pool = PiecePool::new();
-        let file_pool = FilePool::new(piece_pool.clone());
+        let data_pool = DataPool::new();
         let storage = request.storage.take().ok_or(TorrentError::InvalidRequest(
             "file storage is missing".to_string(),
         ))?;
         let storage_params = StorageParams {
             info_hash: metadata.info_hash.clone(),
             path: config.path().to_path_buf(),
-            files: file_pool.clone(),
+            data_pool: data_pool.clone(),
         };
         let operations = request
             .operations
@@ -342,8 +340,7 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
             extensions,
             options,
             config,
-            piece_pool,
-            file_pool,
+            data_pool,
             storage(storage_params),
             operations,
             dht,
@@ -465,8 +462,7 @@ impl Torrent {
         extensions: ExtensionFactories,
         options: TorrentFlags,
         config: TorrentConfig,
-        piece_pool: PiecePool,
-        file_pool: FilePool,
+        data_pool: DataPool,
         storage: Box<dyn Storage>,
         operations: Vec<Box<dyn TorrentOperation>>,
         dht: DhtOption,
@@ -492,12 +488,11 @@ impl Torrent {
             peer_pool: PeerPool::new(handle, config.peers_upper_limit),
             peer_subscriber,
             peer_discoveries: Arc::new(peer_discoveries),
-            pieces: piece_pool,
+            data_pool,
             piece_chunk_pool: PieceChunkPool::new(),
             pending_piece_requests: Default::default(),
             request_download_permits: Arc::new(Semaphore::new(config.max_in_flight_pieces)),
             request_upload_permits: Arc::new(Semaphore::new(config.peers_upload_slots)),
-            files: file_pool,
             protocol_extensions,
             extensions,
             storage,
@@ -716,7 +711,7 @@ impl Torrent {
     /// It returns the total pieces of this torrent when known.
     pub async fn total_pieces(&self) -> usize {
         if let Some(inner) = self.instance() {
-            return inner.piece_pool().len().await;
+            return inner.data_pool.num_of_pieces().await;
         }
 
         0
@@ -743,7 +738,7 @@ impl Torrent {
     /// Returns the current torrent pieces when known, else [None].
     pub async fn pieces(&self) -> Option<Vec<Piece>> {
         if let Some(inner) = self.instance() {
-            let pieces = inner.pieces.pieces().await;
+            let pieces = inner.data_pool.pieces().await;
             return Some(pieces).filter(|e| e.len() > 0);
         }
 
@@ -764,7 +759,7 @@ impl Torrent {
     /// Returns the piece info if available and found, otherwise [None].
     pub async fn piece_info(&self, piece: &PieceIndex) -> Option<Piece> {
         if let Some(inner) = self.instance() {
-            return inner.pieces.get(&piece).await;
+            return inner.data_pool.piece(&piece).await;
         }
 
         None
@@ -774,7 +769,7 @@ impl Torrent {
     /// It might return an empty array if the metadata is still being retrieved.
     pub async fn piece_priorities(&self) -> BTreeMap<PieceIndex, PiecePriority> {
         if let Some(inner) = self.instance() {
-            return inner.pieces.priorities().await;
+            return inner.data_pool.piece_priorities().await;
         }
 
         BTreeMap::new()
@@ -797,7 +792,7 @@ impl Torrent {
     /// Returns true if the piece has been downloaded, validated, and written to storage, else false.
     pub async fn has_piece(&self, piece: &PieceIndex) -> bool {
         if let Some(inner) = self.instance() {
-            return inner.pieces.is_piece_completed(piece).await;
+            return inner.data_pool.is_piece_completed(piece).await;
         }
 
         false
@@ -1246,7 +1241,7 @@ pub struct TorrentContext {
     peer_discoveries: Arc<Vec<Box<dyn PeerDiscovery>>>,
 
     /// The pieces of the torrent, these are only known if the metadata is available
-    pieces: PiecePool,
+    data_pool: DataPool,
     /// The pool which stores the received piece parts
     piece_chunk_pool: PieceChunkPool,
     /// The in-flight pending requests of pieces by peers
@@ -1257,8 +1252,6 @@ pub struct TorrentContext {
     /// The permit counter for uploading pieces to remote peers
     request_upload_permits: Arc<Semaphore>,
 
-    /// The torrent files
-    files: FilePool,
     /// The storage interface of the torrent
     storage: Box<dyn Storage>,
 
@@ -1348,6 +1341,7 @@ impl TorrentContext {
             .announce_all(&metadata.info_hash, AnnounceEvent::Stopped)
             .await;
         self.tracker_manager.remove_torrent(&metadata.info_hash);
+        self.data_pool.close().await;
         trace!("Torrent {} main loop ended", self);
     }
 
@@ -1512,14 +1506,9 @@ impl TorrentContext {
         &self.dht
     }
 
-    /// Get the piece pool of the torrent.
-    pub fn piece_pool(&self) -> &PiecePool {
-        &self.pieces
-    }
-
-    /// Get the file pool of the torrent.
-    pub fn file_pool(&self) -> &FilePool {
-        &self.files
+    /// Get the data pool of the torrent.
+    pub fn data_pool(&self) -> &DataPool {
+        &self.data_pool
     }
 
     pub fn storage(&self) -> &Box<dyn Storage> {
@@ -1539,7 +1528,7 @@ impl TorrentContext {
         let piece_requests = self.pending_piece_requests.read().await;
         let is_end_game = self.is_end_game().await;
 
-        self.pieces
+        self.data_pool
             .wanted_pieces()
             .await
             .into_iter()
@@ -1559,14 +1548,14 @@ impl TorrentContext {
 
     /// Get the total amount of wanted pieces by the torrent.
     pub async fn total_wanted_pieces(&self) -> usize {
-        self.pieces.wanted_pieces().await.len()
+        self.data_pool.wanted_pieces().await.len()
     }
 
     /// Get if the given bytes have been completed downloading.
     /// It returns true if all bytes are completed, validated and written to the storage, else false.
     pub async fn has_bytes(&self, range: &std::ops::Range<usize>) -> bool {
         let pieces = self
-            .pieces
+            .data_pool
             .pieces()
             .await
             .into_iter()
@@ -1579,7 +1568,7 @@ impl TorrentContext {
             .collect::<Vec<_>>();
 
         for piece in pieces {
-            if !self.pieces.is_piece_completed(&piece.index).await {
+            if !self.data_pool.is_piece_completed(&piece.index).await {
                 return false;
             }
         }
@@ -1590,7 +1579,9 @@ impl TorrentContext {
     /// Prioritize the given pieces within this torrent.
     pub async fn prioritize_pieces(&self, priorities: Vec<(PieceIndex, PiecePriority)>) {
         trace!("Torrent {} is prioritizing pieces {:?}", self, priorities);
-        self.pieces.set_priorities(priorities.as_slice()).await;
+        self.data_pool
+            .set_piece_priorities(priorities.as_slice())
+            .await;
         self.update_interested_pieces_stats().await;
 
         debug!("Torrent {} piece priorities have been changed", self);
@@ -1619,7 +1610,7 @@ impl TorrentContext {
 
     /// Check if the torrent has completed downloading all wanted pieces.
     pub async fn is_completed(&self) -> bool {
-        self.pieces.is_completed().await
+        self.data_pool.is_completed().await
     }
 
     /// Check if downloading piece data is allowed by the torrent.
@@ -1663,12 +1654,12 @@ impl TorrentContext {
     /// Check if the torrent is currently in the end-game phase.
     /// It returns true if it entered the end-game mode.
     pub async fn is_end_game(&self) -> bool {
-        let interested_pieces = self.pieces.interested_pieces().await.len();
+        let interested_pieces = self.data_pool.interested_pieces().await.len();
         if interested_pieces == 0 {
             return true;
         }
 
-        let total_completed_pieces = self.pieces.bitfield().await.count_ones();
+        let total_completed_pieces = self.data_pool.bitfield().await.count_ones();
         // if only 3 percent, counted with a precision of 2 decimals, of the pieces are left to be completed
         // then we enter the end-game phase
         let percentage_completed_pieces =
@@ -1742,7 +1733,7 @@ impl TorrentContext {
         &self,
         torrent_bytes: &std::ops::Range<usize>,
     ) -> Vec<Piece> {
-        self.pieces
+        self.data_pool
             .pieces()
             .await
             .into_iter()
@@ -1752,7 +1743,7 @@ impl TorrentContext {
 
     /// Try to find the [PiecePart] for the given piece and begin index.
     pub async fn find_piece_part(&self, piece: PieceIndex, begin: usize) -> Option<PiecePart> {
-        self.pieces
+        self.data_pool
             .pieces()
             .await
             .into_iter()
@@ -1768,7 +1759,7 @@ impl TorrentContext {
     ///
     /// Returns the cloned pieces for the given file.
     pub async fn file_pieces(&self, file: &File) -> Vec<Piece> {
-        self.pieces
+        self.data_pool
             .pieces()
             .await
             .into_iter()
@@ -1785,7 +1776,7 @@ impl TorrentContext {
     ///
     /// If the torrent's metadata has not yet been fully retrieved, this method will return an empty vector.
     pub async fn files(&self) -> Vec<File> {
-        self.files
+        self.data_pool
             .files()
             .await
             .into_iter()
@@ -1808,7 +1799,7 @@ impl TorrentContext {
     ///
     /// If the torrent's metadata has not yet been fully retrieved, this method will return `0`.
     pub async fn total_files(&self) -> usize {
-        self.files.len().await
+        self.data_pool.num_of_files().await
     }
 
     /// Prioritize the files of the torrent.
@@ -1817,7 +1808,9 @@ impl TorrentContext {
     /// Providing all file indexes of the torrent is not required.
     pub async fn prioritize_files(&self, priorities: Vec<(FileIndex, PiecePriority)>) {
         trace!("Torrent {} is prioritizing files {:?}", self, priorities);
-        self.files.set_priorities(priorities.as_slice()).await;
+        self.data_pool
+            .set_file_priorities(priorities.as_slice())
+            .await;
     }
 
     /// Get the absolute filesystem path to a given file in the torrent.
@@ -1903,7 +1896,7 @@ impl TorrentContext {
 
             // decrease the availability of the pieces that the peer had
             for (piece_index, _) in bitfield.iter().enumerate().filter(|(_, value)| *value) {
-                self.pieces.update_availability(&piece_index, -1).await;
+                self.data_pool.update_availability(&piece_index, -1).await;
             }
 
             self.metrics.peers.dec();
@@ -2077,7 +2070,7 @@ impl TorrentContext {
     ///* `available` - Indicates if the pieces become available or unavailable.
     pub async fn update_piece_availabilities(&self, pieces: Vec<PieceIndex>, available: bool) {
         // check if the metadata is known and the pieces have been created
-        if !self.is_metadata_known().await || self.piece_pool().len().await == 0 {
+        if !self.is_metadata_known().await || self.data_pool().num_of_pieces().await == 0 {
             trace!(
                 "Torrent {} is unable to update piece availabilities, metadata or pieces are unknown",
                 self
@@ -2087,16 +2080,14 @@ impl TorrentContext {
 
         for piece in pieces {
             let change = if available { 1 } else { -1 };
-            self.pieces.update_availability(&piece, change).await;
+            self.data_pool.update_availability(&piece, change).await;
         }
     }
 
     /// Set the pieces of the torrent.
-    pub async fn update_pieces(&self, pieces: Vec<Piece>) {
+    pub(crate) async fn update_pieces(&self, pieces: Vec<Piece>) {
         let total_pieces = pieces.len();
-        trace!("Torrent {} updating {} pieces", self, total_pieces);
-
-        self.pieces.set_pieces(pieces).await;
+        self.data_pool.set_pieces(pieces).await;
 
         {
             // update the piece availability based on the current peer connections
@@ -2127,7 +2118,7 @@ impl TorrentContext {
             let availability_len = availability.len();
             if availability_len > 0 {
                 for (piece, availability) in availability {
-                    self.pieces
+                    self.data_pool
                         .update_availability(&piece, availability as i32)
                         .await;
                 }
@@ -2138,12 +2129,17 @@ impl TorrentContext {
             }
         }
 
-        debug!(
-            "Torrent {} updated pieces to a total of {}",
-            self, total_pieces
-        );
+        debug!("Torrent {} updated {} pieces", self, total_pieces);
         self.update_interested_pieces_stats().await;
         self.invoke_event(TorrentEvent::PiecesChanged(total_pieces));
+    }
+
+    /// Set the files of the torrent, replacing any existing files.
+    pub(crate) async fn update_files(&self, files: Vec<File>) {
+        let total_files = files.len();
+        self.data_pool.set_files(files).await;
+        debug!("Torrent {} updated {} files", self, total_files);
+        self.invoke_event(TorrentEvent::FilesChanged);
     }
 
     /// Set the given piece as completed.
@@ -2172,8 +2168,8 @@ impl TorrentContext {
         {
             let mut pending_requests = self.pending_piece_requests.write().await;
             for piece in pieces.iter() {
-                self.pieces.set_completed(piece, true).await;
-                if let Some(piece) = self.pieces.get(piece).await {
+                self.data_pool.set_completed(piece, true).await;
+                if let Some(piece) = self.data_pool.piece(piece).await {
                     total_completed_pieces_size += piece.length;
                     total_completed_pieces += 1;
 
@@ -2221,18 +2217,6 @@ impl TorrentContext {
         self.send_command_event(TorrentCommandEvent::NotifyPeersHavePieces(pieces));
     }
 
-    /// Update the torrent files of the torrent.
-    /// This replaces any existing files.
-    pub async fn update_files(&self, files: Vec<File>) {
-        trace!(
-            "Updating a total of {} torrent files for {}",
-            files.len(),
-            self
-        );
-        self.files.set_files(files).await;
-        self.invoke_event(TorrentEvent::FilesChanged);
-    }
-
     /// Update the stats info of all interested pieces by the torrent.
     async fn update_interested_pieces_stats(&self) {
         let mut wanted_pieces = 0;
@@ -2241,8 +2225,8 @@ impl TorrentContext {
         let mut wanted_completed_size = 0;
 
         {
-            for piece_index in self.pieces.interested_pieces().await {
-                if let Some(piece) = self.pieces.get(&piece_index).await {
+            for piece_index in self.data_pool.interested_pieces().await {
+                if let Some(piece) = self.data_pool.piece(&piece_index).await {
                     wanted_pieces += 1;
                     wanted_size += piece.length;
 
@@ -2342,7 +2326,7 @@ impl TorrentContext {
             }
             TrackerClientEvent::TrackerAdded(handle) => {
                 let is_paused = self.options.read().await.contains(TorrentFlags::Paused);
-                let is_pieces_known = self.pieces.len().await > 0;
+                let is_pieces_known = self.data_pool.num_of_pieces().await > 0;
                 let is_completed = self.is_completed().await;
                 let mut event = AnnounceEvent::Started;
 
@@ -2465,7 +2449,7 @@ impl TorrentContext {
     }
 
     async fn process_completed_piece_part(&self, piece_part: PiecePart, data: Vec<u8>) {
-        let piece = match self.pieces.get(&piece_part.piece).await {
+        let piece = match self.data_pool.piece(&piece_part.piece).await {
             Some(piece) => piece,
             None => return,
         };
@@ -2494,7 +2478,7 @@ impl TorrentContext {
         {
             Ok(_) => {
                 // update the piece info
-                self.pieces
+                self.data_pool
                     .set_part_completed(&piece.index, &piece_part.part)
                     .await;
                 self.pending_piece_requests
@@ -2502,7 +2486,7 @@ impl TorrentContext {
                     .await
                     .insert(piece.index, Instant::now());
 
-                if self.pieces.is_piece_completed(&piece.index).await {
+                if self.data_pool.is_piece_completed(&piece.index).await {
                     self.send_command_event(TorrentCommandEvent::PieceCompleted(piece_part.piece));
                 }
             }
@@ -2549,7 +2533,7 @@ impl TorrentContext {
                     piece,
                     data_size
                 );
-                self.pieces.set_completed(&piece, false).await;
+                self.data_pool.set_completed(&piece, false).await;
                 self.metrics.wasted.inc_by(data_size as u64);
             }
         } else {
@@ -2587,7 +2571,7 @@ impl TorrentContext {
             return TorrentState::Paused;
         }
 
-        let total_pieces = self.pieces.len().await;
+        let total_pieces = self.data_pool.num_of_pieces().await;
         if total_pieces == 0 {
             return TorrentState::Initializing;
         }
@@ -2609,7 +2593,7 @@ impl TorrentContext {
     ///
     /// If an unknown [PieceIndex] is given, it will always be assumed as invalid as there is no way to validate the data.
     pub async fn validate_piece_index_data(&self, piece: &PieceIndex, data: &[u8]) -> bool {
-        if let Some(piece) = self.pieces.get(piece).await {
+        if let Some(piece) = self.data_pool.piece(piece).await {
             return Self::validate_piece_data(&piece, data);
         } else {
             warn!(
@@ -2672,7 +2656,7 @@ impl TorrentContext {
 
     /// Get the total amount of completed pieces for the torrent.
     pub async fn total_completed_pieces(&self) -> usize {
-        self.pieces.num_completed().await
+        self.data_pool.num_completed_pieces().await
     }
 
     /// Notify the torrent of an invalid received piece part.
@@ -2745,7 +2729,7 @@ impl TorrentContext {
     ///
     /// This doesn't verify if the bytes are valid and completed.
     pub async fn read_file_to_end(&self, file: &File) -> Result<(usize, Vec<u8>)> {
-        if let Some(piece) = self.pieces.get(&file.pieces.start).await {
+        if let Some(piece) = self.data_pool.piece(&file.pieces.start).await {
             let len = file.len();
             let mut buffer = vec![0; len];
             let file_offset = file.torrent_offset.saturating_sub(piece.offset);
@@ -2768,7 +2752,7 @@ impl TorrentContext {
     ///
     /// This doesn't verify if the bytes are valid and completed.
     pub async fn read_piece(&self, piece: &PieceIndex) -> Result<Vec<u8>> {
-        match self.pieces.get(piece).await {
+        match self.data_pool.piece(piece).await {
             None => Err(TorrentError::DataUnavailable),
             Some(piece) => {
                 let mut buffer = vec![0; piece.length];
@@ -2848,7 +2832,7 @@ impl TorrentContext {
             return Err(TorrentError::InvalidRange(torrent_range));
         }
 
-        let pieces = self.pieces.pieces().await;
+        let pieces = self.data_pool.pieces().await;
         let starting_piece = pieces
             .iter()
             .find(|piece| {
@@ -3005,7 +2989,7 @@ mod tests {
 
     use crate::init_logger;
     use crate::operation::{
-        TorrentConnectPeersOperation, TorrentCreateFilesOperation, TorrentCreatePiecesOperation,
+        TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation,
         TorrentFileValidationOperation,
     };
     use crate::{create_torrent, timeout};
@@ -3128,7 +3112,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let expected_result = 75;
-        let operation = TorrentCreatePiecesOperation::new();
+        let operation = TorrentCreatePiecesAndFilesOperation::new();
         let torrent = create_torrent!(
             "debian-udp.torrent",
             temp_path,
@@ -3192,10 +3176,7 @@ mod tests {
         let source_context = source_torrent.instance().unwrap();
 
         // initialize the source torrent
-        let operation = TorrentCreatePiecesOperation::new();
-        let result = operation.execute(&source_context).await;
-        assert_eq!(TorrentOperationResult::Continue, result);
-        let operation = TorrentCreateFilesOperation::new();
+        let operation = TorrentCreatePiecesAndFilesOperation::new();
         let result = operation.execute(&source_context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
         let operation = TorrentFileValidationOperation::new();
@@ -3214,10 +3195,7 @@ mod tests {
 
         // initialize the target torrent
         let target_context = target_torrent.instance().unwrap();
-        let operation = TorrentCreatePiecesOperation::new();
-        let result = operation.execute(&target_context).await;
-        assert_eq!(TorrentOperationResult::Continue, result);
-        let operation = TorrentCreateFilesOperation::new();
+        let operation = TorrentCreatePiecesAndFilesOperation::new();
         let result = operation.execute(&target_context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
         target_context
@@ -3281,7 +3259,7 @@ mod tests {
             .await
             .expect("expected the pieces to have been created");
         let target_context = target_torrent.instance().unwrap();
-        let pieces_bitfield = target_context.piece_pool().bitfield().await;
+        let pieces_bitfield = target_context.data_pool().bitfield().await;
 
         for piece in &pieces[0..num_of_pieces] {
             let piece_index = piece.index;
@@ -3337,28 +3315,22 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::default(),
-            vec![|| Box::new(TorrentCreatePiecesOperation::new()), || {
-                Box::new(TorrentCreateFilesOperation::new())
-            },]
+            vec![|| Box::new(TorrentCreatePiecesAndFilesOperation::new())]
         );
         let context = torrent.instance().unwrap();
 
         let mut receiver = torrent.subscribe();
         tokio::spawn(async move {
-            loop {
-                if let Some(event) = receiver.recv().await {
-                    if let TorrentEvent::PiecesChanged(_) = *event {
-                        tx.send(()).unwrap();
-                    }
-                } else {
-                    break;
+            while let Some(event) = receiver.recv().await {
+                if let TorrentEvent::PiecesChanged(_) = *event {
+                    tx.send(()).unwrap();
                 }
             }
         });
 
         timeout!(
             rx.recv(),
-            Duration::from_millis(200),
+            Duration::from_millis(750),
             "expected the pieces to be created"
         )
         .unwrap();
@@ -3383,7 +3355,7 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::default(),
-            vec![|| Box::new(TorrentCreatePiecesOperation::new())]
+            vec![|| Box::new(TorrentCreatePiecesAndFilesOperation::new())]
         );
         let (tx, mut rx) = unbounded_channel();
 
@@ -3403,7 +3375,7 @@ mod tests {
         // wait for the pieces changed event
         timeout!(
             rx.recv(),
-            Duration::from_millis(200),
+            Duration::from_millis(750),
             "expected the pieces to be created"
         )
         .unwrap();
@@ -3422,29 +3394,23 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::default(),
-            vec![|| Box::new(TorrentCreatePiecesOperation::new()), || {
-                Box::new(TorrentCreateFilesOperation::new())
-            },]
+            vec![|| Box::new(TorrentCreatePiecesAndFilesOperation::new())]
         );
         let (tx, mut rx) = unbounded_channel();
 
         // wait for the pieces changed event
         let mut receiver = torrent.subscribe();
         tokio::spawn(async move {
-            loop {
-                if let Some(event) = receiver.recv().await {
-                    if let TorrentEvent::FilesChanged = *event {
-                        tx.send(()).unwrap();
-                    }
-                } else {
-                    break;
+            while let Some(event) = receiver.recv().await {
+                if let TorrentEvent::FilesChanged = *event {
+                    tx.send(()).unwrap();
                 }
             }
         });
 
         let _ = timeout!(
             rx.recv(),
-            Duration::from_millis(200),
+            Duration::from_millis(750),
             "expected the files to be created"
         )
         .unwrap();
@@ -3471,8 +3437,7 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::default(),
             vec![
-                || Box::new(TorrentCreatePiecesOperation::new()),
-                || Box::new(TorrentCreateFilesOperation::new()),
+                || Box::new(TorrentCreatePiecesAndFilesOperation::new()),
                 || Box::new(TorrentFileValidationOperation::new()),
             ]
         );
@@ -3480,17 +3445,12 @@ mod tests {
 
         let mut receiver = torrent.subscribe();
         tokio::spawn(async move {
-            loop {
-                if let Some(event) = receiver.recv().await {
-                    if let TorrentEvent::StateChanged(state) = &*event {
-                        if state != &TorrentState::Initializing
-                            && state != &TorrentState::CheckingFiles
-                        {
-                            tx.send(()).unwrap();
-                        }
+            while let Some(event) = receiver.recv().await {
+                if let TorrentEvent::StateChanged(state) = &*event {
+                    if state != &TorrentState::Initializing && state != &TorrentState::CheckingFiles
+                    {
+                        tx.send(()).unwrap();
                     }
-                } else {
-                    break;
                 }
             }
         });
@@ -3525,7 +3485,7 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::default(),
-            vec![|| Box::new(TorrentCreatePiecesOperation::new())]
+            vec![|| Box::new(TorrentCreatePiecesAndFilesOperation::new())]
         );
         let context = torrent.instance().unwrap();
 
@@ -3569,8 +3529,7 @@ mod tests {
             TorrentFlags::UploadMode,
             TorrentConfig::default(),
             vec![
-                || Box::new(TorrentCreatePiecesOperation::new()),
-                || Box::new(TorrentCreateFilesOperation::new()),
+                || Box::new(TorrentCreatePiecesAndFilesOperation::new()),
                 || Box::new(TorrentFileValidationOperation::new()),
             ]
         );
@@ -3603,10 +3562,10 @@ mod tests {
             vec![]
         );
         let context = torrent.instance().unwrap();
-        let operation = TorrentCreatePiecesOperation::new();
+        let operation = TorrentCreatePiecesAndFilesOperation::new();
 
         operation.execute(&context).await;
-        let total_pieces = context.piece_pool().len().await;
+        let total_pieces = context.data_pool().num_of_pieces().await;
         assert_ne!(0, total_pieces, "expected the pieces to have been created");
 
         let result = context.is_end_game().await;
@@ -3699,10 +3658,10 @@ mod tests {
             vec![]
         );
         let context = torrent.instance().unwrap();
-        let operation = TorrentCreatePiecesOperation::new();
+        let operation = TorrentCreatePiecesAndFilesOperation::new();
 
         operation.execute(&context).await;
-        let total_pieces = context.piece_pool().len().await;
+        let total_pieces = context.data_pool().num_of_pieces().await;
         assert_ne!(0, total_pieces, "expected the pieces to have been created");
 
         torrent
@@ -3719,7 +3678,7 @@ mod tests {
             .map(|piece| piece as PieceIndex)
             .collect();
         let result = context
-            .piece_pool()
+            .data_pool()
             .wanted_pieces()
             .await
             .into_iter()
@@ -3735,7 +3694,7 @@ mod tests {
             .map(|piece| piece as PieceIndex)
             .collect();
         let result = context
-            .piece_pool()
+            .data_pool()
             .wanted_pieces()
             .await
             .into_iter()
@@ -3757,10 +3716,10 @@ mod tests {
             vec![]
         );
         let context = torrent.instance().unwrap();
-        let operation = TorrentCreatePiecesOperation::new();
+        let operation = TorrentCreatePiecesAndFilesOperation::new();
 
         operation.execute(&context).await;
-        let total_pieces = context.piece_pool().len().await;
+        let total_pieces = context.data_pool().num_of_pieces().await;
         assert_ne!(0, total_pieces, "expected the pieces to have been created");
 
         torrent
@@ -3869,7 +3828,7 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let operation = TorrentCreatePiecesOperation::new();
+            let operation = TorrentCreatePiecesAndFilesOperation::new();
             let torrent = create_torrent!(
                 "debian-udp.torrent",
                 temp_path,
@@ -3932,7 +3891,7 @@ mod tests {
             // check the wanted pieces
             let expected_wanted_pieces = vec![8, 9, 0, 1, 2, 3, 4, 5, 6, 7];
             let result = context
-                .piece_pool()
+                .data_pool()
                 .wanted_pieces()
                 .await
                 .into_iter()
@@ -3945,7 +3904,7 @@ mod tests {
 
             // check the interested pieces
             let expected_interested_pieces = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-            let result = context.piece_pool().interested_pieces().await;
+            let result = context.data_pool().interested_pieces().await;
             assert_eq!(
                 expected_interested_pieces, result,
                 "expected only piece 0 to be interested"
@@ -3957,7 +3916,7 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let operation = TorrentCreatePiecesOperation::new();
+            let operation = TorrentCreatePiecesAndFilesOperation::new();
             let torrent = create_torrent!(
                 "debian-udp.torrent",
                 temp_path,
@@ -3986,8 +3945,6 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let pieces_operation = TorrentCreatePiecesOperation::new();
-            let files_operation = TorrentCreateFilesOperation::new();
             let torrent = create_torrent!(
                 "multifile.torrent",
                 temp_path,
@@ -3998,8 +3955,8 @@ mod tests {
             let context = torrent.instance().unwrap();
 
             // create the pieces and files of the torrent
-            pieces_operation.execute(&context).await;
-            files_operation.execute(&context).await;
+            let operation = TorrentCreatePiecesAndFilesOperation::new();
+            operation.execute(&context).await;
 
             // prioritize only the 2nd file
             let file_priorities = torrent

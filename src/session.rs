@@ -1,6 +1,6 @@
 use crate::errors::Result;
 use crate::operation::{
-    TorrentConnectPeersOperation, TorrentCreateFilesOperation, TorrentCreatePiecesOperation,
+    TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation,
     TorrentFileValidationOperation, TorrentMetadataOperation, TorrentTrackersOperation,
 };
 #[cfg(feature = "dht")]
@@ -806,8 +806,7 @@ impl FxTorrentSessionBuilder {
                 || Box::new(TorrentDhtPeersOperation::new()),
                 || Box::new(TorrentConnectPeersOperation::new()),
                 || Box::new(TorrentMetadataOperation::new()),
-                || Box::new(TorrentCreatePiecesOperation::new()),
-                || Box::new(TorrentCreateFilesOperation::new()),
+                || Box::new(TorrentCreatePiecesAndFilesOperation::new()),
                 || Box::new(TorrentFileValidationOperation::new()),
             ]
         });
@@ -816,7 +815,7 @@ impl FxTorrentSessionBuilder {
                 Box::new(DiskStorage::new(
                     params.info_hash,
                     params.path,
-                    params.files,
+                    params.data_pool,
                 ))
             })
         });

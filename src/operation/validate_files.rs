@@ -42,7 +42,7 @@ impl TorrentFileValidationOperation {
         torrent.tracker_manager().stop_announcing(&info_hash);
 
         tokio::spawn(async move {
-            let pieces = context.piece_pool().pieces().await;
+            let pieces = context.data_pool().pieces().await;
             let piece_len = pieces.get(0).map(|e| e.len()).unwrap_or_default();
 
             // early exit if the torrent is cancelled
@@ -183,7 +183,7 @@ mod tests {
     use super::*;
     use crate::create_torrent;
     use crate::init_logger;
-    use crate::operation::{TorrentCreateFilesOperation, TorrentCreatePiecesOperation};
+    use crate::operation::TorrentCreatePiecesAndFilesOperation;
     use crate::tests::copy_test_file;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -273,7 +273,7 @@ mod tests {
         let result = operation.execute(&context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
 
-        let pieces = context.piece_pool().pieces().await;
+        let pieces = context.data_pool().pieces().await;
         for piece in 0..30 {
             assert_eq!(
                 true,
@@ -283,7 +283,7 @@ mod tests {
             );
             assert_eq!(
                 true,
-                context.piece_pool().is_piece_completed(&piece).await,
+                context.data_pool().is_piece_completed(&piece).await,
                 "expected piece bitfield {} to be completed",
                 piece
             );
@@ -303,11 +303,8 @@ mod tests {
     }
 
     async fn create_pieces_and_files(context: &Arc<TorrentContext>) {
-        let piece_operation = TorrentCreatePiecesOperation::new();
-        let file_operation = TorrentCreateFilesOperation::new();
-
-        // create the pieces and files
-        let _ = piece_operation.execute(&context).await;
-        let _ = file_operation.execute(&context).await;
+        let operation = TorrentCreatePiecesAndFilesOperation::new();
+        let result = operation.execute(&context).await;
+        assert_eq!(TorrentOperationResult::Continue, result);
     }
 }

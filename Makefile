@@ -17,9 +17,8 @@ build: ## Build the cargo project
 build-release: ## Build the release version of the cargo project
 	@cargo build --release
 
-bump-dependencies: ## Install required bump dependencies
-	@$(PYTHON) -m pip install --upgrade pip
-	@pip install bump-my-version --user
+fmt: ## Run the cargo formatter
+	@cargo fmt --all -- --check
 
-bump-%: bump-dependencies ## Bump the (major, minor, patch) version of the application
+bump-%: ## Bump the (major, minor, patch) version of the application
 	@bump-my-version bump $*

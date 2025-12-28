@@ -772,7 +772,7 @@ impl BitTorrentPeer {
 
         // check if the fast protocol is enabled
         // if so, we send the initial fast messages to the remote peer
-        let bitfield = self.inner.torrent.piece_pool().bitfield().await;
+        let bitfield = self.inner.torrent.data_pool().bitfield().await;
         let is_bitfield_known = bitfield.len() > 0;
         let is_fast_enabled = self
             .inner
@@ -858,7 +858,7 @@ impl BitTorrentPeer {
         let (event_sender, event_receiver) = unbounded_channel();
         let extension_registry = Self::create_extension_registry(&extensions);
         let peer_handle = PeerHandle::new();
-        let total_pieces = torrent.piece_pool().len().await;
+        let total_pieces = torrent.data_pool().num_of_pieces().await;
 
         let client = PeerClientInfo {
             handle: peer_handle,
@@ -1287,7 +1287,7 @@ impl PeerContext {
     /// It returns true when the remote has all pieces and the metadata is known, else false.
     pub async fn remote_has_all_pieces(&self) -> bool {
         let remote_pieces = self.remote_pieces.read().await;
-        let torrent_total_pieces = self.torrent.piece_pool().len().await;
+        let torrent_total_pieces = self.torrent.data_pool().num_of_pieces().await;
 
         // the received bitfield can be greater than the actual total pieces due to byte alignment
         remote_pieces.len() >= torrent_total_pieces && remote_pieces.all()
@@ -1363,7 +1363,7 @@ impl PeerContext {
         let client_pending_requests = self.client_pending_requests.read().await;
         let remote_has_all_pieces = self.remote_has_all_pieces().await;
         let remote_pieces = self.remote_pieces.read().await;
-        let wanted_pieces = self.torrent.piece_pool().wanted_pieces().await;
+        let wanted_pieces = self.torrent.data_pool().wanted_pieces().await;
 
         wanted_pieces
             .into_iter()
@@ -1546,7 +1546,7 @@ impl PeerContext {
             TorrentEvent::PiecesChanged(_) => {
                 trace!("Peer {} updating client piece bitfield", self);
                 // retrieve the torrent pieces bitfield and store it as the client bitfield
-                let piece_bitfield = self.torrent.piece_pool().bitfield().await;
+                let piece_bitfield = self.torrent.data_pool().bitfield().await;
                 let bitfield_len = piece_bitfield.len();
                 *self.client_pieces.write().await = piece_bitfield;
 
@@ -2043,7 +2043,7 @@ impl PeerContext {
                 // we might not have the bitfield stored if it was unknown when this peer was created
                 // if that's the case, copy the whole bitfield from the torrent instead
                 if client_pieces.len() <= *piece {
-                    *client_pieces = self.torrent.piece_pool().bitfield().await;
+                    *client_pieces = self.torrent.data_pool().bitfield().await;
                 } else {
                     client_pieces.set(piece.clone(), true);
                 }
@@ -2072,7 +2072,7 @@ impl PeerContext {
     /// The range of the piece will be checked against the known pieces of the torrent, if known.
     /// If the piece is out-of-range, the update will be ignored.
     pub(crate) async fn remote_has_piece(&self, piece: PieceIndex, has_piece: bool) {
-        let total_pieces = self.torrent.piece_pool().len().await;
+        let total_pieces = self.torrent.data_pool().num_of_pieces().await;
         let is_metadata_known = self.torrent.is_metadata_known().await;
 
         {
@@ -2163,7 +2163,7 @@ impl PeerContext {
             return;
         }
 
-        let bitfield_len = self.torrent.piece_pool().len().await;
+        let bitfield_len = self.torrent.data_pool().num_of_pieces().await;
         self.update_remote_pieces(BitVec::from_elem(bitfield_len, have_all))
             .await;
         self.metrics.available_pieces.set(bitfield_len as u64);
@@ -2276,7 +2276,7 @@ impl PeerContext {
 
         // check if we're allowed to download pieces and that the given piece is wanted by the torrent
         let is_download_allowed = self.torrent.is_download_allowed().await;
-        let is_piece_wanted = self.torrent.piece_pool().is_wanted(&piece).await;
+        let is_piece_wanted = self.torrent.data_pool().is_piece_wanted(&piece).await;
         if is_download_allowed && is_piece_wanted {
             if let Some(permit) = self.torrent.request_download_permit(&piece).await {
                 self.send_command_event(PeerCommandEvent::RequestPieceData(RequestPieceData {
@@ -2324,7 +2324,7 @@ impl PeerContext {
         // this can be due to a priority change, or another peer already downloaded the piece data
         if !self
             .torrent
-            .piece_pool()
+            .data_pool()
             .is_piece_wanted(&request_data.piece)
             .await
         {
@@ -2341,7 +2341,7 @@ impl PeerContext {
         }
 
         let permit = request_data.permit;
-        if let Some(piece) = self.torrent.piece_pool().get(&request_data.piece).await {
+        if let Some(piece) = self.torrent.data_pool().piece(&request_data.piece).await {
             let mut sent_requests = 0;
             let requests: Vec<Request> = piece
                 .parts_to_request()
@@ -2688,11 +2688,11 @@ impl PeerContext {
     /// Verify that the given piece request is valid to be processed.
     /// This will check that the requested range is within the piece range and that the piece is completed.
     async fn validate_piece_request(&self, request: &Request) -> bool {
-        let piece_pool = self.torrent.piece_pool();
+        let piece_pool = self.torrent.data_pool();
         let is_piece_completed = piece_pool.is_piece_completed(&request.index).await;
 
         if is_piece_completed {
-            if let Some(piece) = piece_pool.get(&request.index).await {
+            if let Some(piece) = piece_pool.piece(&request.index).await {
                 let piece_len = piece.length;
                 let request_end = request.begin + request.length;
 
@@ -2845,7 +2845,7 @@ impl Drop for PeerContext {
 mod tests {
     use super::*;
 
-    use crate::operation::{TorrentCreateFilesOperation, TorrentCreatePiecesOperation};
+    use crate::operation::TorrentCreatePiecesAndFilesOperation;
     use crate::peer::extension::metadata::MetadataExtension;
     use crate::peer::protocol::tests::UtpPacketCaptureExtension;
     use crate::peer::tests::create_utp_peer_pair;
@@ -3013,7 +3013,7 @@ mod tests {
         let incoming_context = &incoming.inner;
 
         // create the pieces for the torrent
-        let operation = TorrentCreatePiecesOperation::new();
+        let operation = TorrentCreatePiecesAndFilesOperation::new();
         let result = operation.execute(&context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
 
@@ -3085,7 +3085,7 @@ mod tests {
         create_pieces_and_files(&incoming_context).await;
 
         // validate the pieces for the incoming torrent
-        incoming_context.piece_pool().set_completed(&0, true).await;
+        incoming_context.data_pool().set_completed(&0, true).await;
 
         // unchoke the remote peer
         incoming
@@ -3134,7 +3134,7 @@ mod tests {
         create_pieces_and_files(&context).await;
 
         // check if both the client & remote piece bitfield have been updated
-        let torrent_bitfield = context.piece_pool().bitfield().await;
+        let torrent_bitfield = context.data_pool().bitfield().await;
         let peer_context = &outgoing.inner;
         assert_timeout!(
             Duration::from_secs(1),
@@ -3159,18 +3159,14 @@ mod tests {
             temp_path,
             TorrentFlags::UploadMode,
             TorrentConfig::default(),
-            vec![|| Box::new(TorrentCreatePiecesOperation::new()), || {
-                Box::new(TorrentCreateFilesOperation::new())
-            }]
+            vec![|| Box::new(TorrentCreatePiecesAndFilesOperation::new())]
         );
         let target_torrent = create_torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::DownloadMode,
             TorrentConfig::default(),
-            vec![|| Box::new(TorrentCreatePiecesOperation::new()), || {
-                Box::new(TorrentCreateFilesOperation::new())
-            }]
+            vec![|| Box::new(TorrentCreatePiecesAndFilesOperation::new())]
         );
         let target_torrent_context = target_torrent.instance().unwrap();
 
@@ -3300,11 +3296,7 @@ mod tests {
     }
 
     async fn create_pieces_and_files(context: &Arc<TorrentContext>) {
-        let operation = TorrentCreatePiecesOperation::new();
-        let result = operation.execute(&context).await;
-        assert_eq!(TorrentOperationResult::Continue, result);
-
-        let operation = TorrentCreateFilesOperation::new();
+        let operation = TorrentCreatePiecesAndFilesOperation::new();
         let result = operation.execute(&context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
     }
