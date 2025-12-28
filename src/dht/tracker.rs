@@ -1,7 +1,8 @@
 use crate::dht::compact::{CompactIPv4Node, CompactIPv4Nodes, CompactIPv6Node, CompactIPv6Nodes};
 use crate::dht::krpc::{
-    AnnouncePeerResponse, ErrorMessage, FindNodeRequest, FindNodeResponse, GetPeersRequest,
-    GetPeersResponse, Message, MessagePayload, PingMessage, QueryMessage, ResponseMessage, Version,
+    AnnouncePeerRequest, AnnouncePeerResponse, ErrorMessage, FindNodeRequest, FindNodeResponse,
+    GetPeersRequest, GetPeersResponse, Message, MessagePayload, PingMessage, QueryMessage,
+    ResponseMessage, ResponsePayload, SampleInfoHashesRequest, SampleInfoHashesResponse, Version,
     WantFamily,
 };
 use crate::dht::observer::Observer;
@@ -446,6 +447,7 @@ impl TrackerContext {
                 observer.observe(addr, message.ip.as_ref(), &self).await;
                 if let Err(e) = self.handle_incoming_message(message, addr, peers).await {
                     warn!("{} failed to process incoming message, {}", self, e);
+                    self.metrics.errors.inc();
                 }
             }
             ReaderMessage::Error {
@@ -489,81 +491,28 @@ impl TrackerContext {
         match message.payload {
             MessagePayload::Query(query) => match query {
                 QueryMessage::Ping { .. } => {
-                    self.send_response(
-                        transaction_id,
-                        ResponseMessage::Ping {
-                            response: PingMessage { id },
-                        },
-                        &addr,
-                    )
-                    .await?;
+                    self.on_ping_request(id, transaction_id, &addr).await?;
                 }
                 QueryMessage::FindNode { request } => {
-                    let routing_table = self.routing_table.lock().await;
-                    let target_node = request.target;
-                    let (compact_nodes, compact_nodes6) =
-                        Self::closest_node_pairs(&*routing_table, &target_node);
-
-                    self.send_response(
-                        transaction_id,
-                        ResponseMessage::FindNode {
-                            response: FindNodeResponse {
-                                id,
-                                nodes: compact_nodes.into(),
-                                nodes6: compact_nodes6.into(),
-                                token: None,
-                            },
-                        },
-                        &addr,
-                    )
-                    .await?;
+                    self.on_find_node_request(id, transaction_id, &addr, request)
+                        .await?;
                 }
                 QueryMessage::GetPeers { request } => {
                     self.on_get_peers_request(id, transaction_id, &addr, request, &peers)
                         .await?;
                 }
                 QueryMessage::AnnouncePeer { request } => {
-                    let routing_table = self.routing_table.lock().await;
-                    if let Some(node) = routing_table.find_node(&request.id) {
-                        // check if the address matches the node
-                        if node.addr() != &addr {
-                            return self
-                                .send_error(
-                                    transaction_id,
-                                    ErrorMessage::Protocol("Bad node".to_string()),
-                                    &addr,
-                                )
-                                .await;
-                        }
-
-                        let is_valid = match NodeToken::try_from(request.token.as_bytes()) {
-                            Ok(token) => node.verify_token(&token, &addr.ip()).await,
-                            Err(_) => false,
-                        };
-                        if !is_valid {
-                            return self
-                                .send_error(
-                                    transaction_id,
-                                    ErrorMessage::Protocol("Bad token".to_string()),
-                                    &addr,
-                                )
-                                .await;
-                        };
-                    }
-
-                    peers.update_peer(request.info_hash, addr, request.seed.unwrap_or(false));
-                    self.send_response(
-                        transaction_id,
-                        ResponseMessage::Announce {
-                            response: AnnouncePeerResponse { id },
-                        },
-                        &addr,
-                    )
-                    .await?;
+                    self.on_announce_peer_request(id, transaction_id, &addr, request, peers)
+                        .await?;
+                }
+                QueryMessage::SampleInfoHashes { request } => {
+                    self.on_sample_info_hashes_request(id, transaction_id, request, &addr, &peers)
+                        .await?;
                 }
             },
-            MessagePayload::Response(response) => {
+            MessagePayload::Response(response_payload) => {
                 if let Some(pending_request) = self.pending_requests.lock().await.remove(&key) {
+                    let response = response_payload.parse(pending_request.query_name.as_str())?;
                     debug!(
                         "{} received response \"{}\" from {} for {}",
                         self,
@@ -575,56 +524,13 @@ impl TrackerContext {
 
                     match response {
                         ResponseMessage::Ping { response } => {
-                            if !response.id.verify_id(&addr.ip()) {
-                                debug!("{} detected spoofed ping from {}", self, key);
-                                Self::send_reply(
-                                    pending_request.request_type,
-                                    Err(Error::InvalidNodeId),
-                                );
-                                return Ok(());
-                            }
-
-                            self.node_query_result(&addr, true).await;
-                            reply = Ok(Reply::Ping(Node::new(response.id, addr)));
+                            reply = self.on_ping_response(&key, &addr, response).await;
                         }
                         ResponseMessage::FindNode { response } => {
-                            if !response.id.verify_id(&addr.ip()) {
-                                debug!("{} detected spoofed find_node from {}", self, key);
-                                Self::send_reply(
-                                    pending_request.request_type,
-                                    Err(Error::InvalidNodeId),
-                                );
-                                return Ok(());
-                            }
-
-                            self.node_query_result(&addr, true).await;
-                            let nodes = response
-                                .nodes
-                                .as_slice()
-                                .into_iter()
-                                .map(|e| Node::new(e.id, e.addr.clone().into()))
-                                .chain(
-                                    response
-                                        .nodes6
-                                        .as_slice()
-                                        .into_iter()
-                                        .map(|e| Node::new(e.id, e.addr.clone().into())),
-                                )
-                                .collect::<Vec<_>>();
-
-                            debug!(
-                                "{} node {} discovered a total of {} nodes",
-                                self,
-                                addr,
-                                nodes.len()
-                            );
-                            reply = Ok(Reply::FindNode(nodes))
+                            reply = self.on_find_node_response(&key, &addr, response).await;
                         }
                         ResponseMessage::GetPeers { response } => {
-                            match self.on_get_peers_response(&key, &addr, response).await {
-                                None => return Ok(()),
-                                Some(e) => reply = e,
-                            }
+                            reply = self.on_get_peers_response(&key, &addr, response).await;
                         }
                         ResponseMessage::Announce { response } => {
                             if !response.id.verify_id(&addr.ip()) {
@@ -638,6 +544,11 @@ impl TrackerContext {
 
                             self.node_query_result(&addr, true).await;
                             return Ok(());
+                        }
+                        ResponseMessage::SampleInfoHashes { response } => {
+                            reply = self
+                                .on_sample_info_hashes_response(&key, &addr, response)
+                                .await;
                         }
                     }
 
@@ -661,6 +572,247 @@ impl TrackerContext {
         Ok(())
     }
 
+    /// Process a received announce peer request.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node id of the server.
+    /// * `transaction_id` - The transaction id of the query.
+    /// * `addr`- The source address of the node.
+    /// * `request` - The `announce_peer` query arguments.
+    /// * `peers` - The peer storage of the server.
+    async fn on_announce_peer_request(
+        &self,
+        id: NodeId,
+        transaction_id: u16,
+        addr: &SocketAddr,
+        request: AnnouncePeerRequest,
+        peers: &mut PeerStorage,
+    ) -> Result<()> {
+        let routing_table = self.routing_table.lock().await;
+        if let Some(node) = routing_table.find_node(&request.id) {
+            // check if the address matches the node
+            if node.addr() != addr {
+                return self
+                    .send_error(
+                        transaction_id,
+                        ErrorMessage::Protocol("Bad node".to_string()),
+                        &addr,
+                    )
+                    .await;
+            }
+
+            let is_valid = match NodeToken::try_from(request.token.as_bytes()) {
+                Ok(token) => node.verify_token(&token, &addr.ip()).await,
+                Err(_) => false,
+            };
+            if !is_valid {
+                return self
+                    .send_error(
+                        transaction_id,
+                        ErrorMessage::Protocol("Bad token".to_string()),
+                        &addr,
+                    )
+                    .await;
+            };
+        }
+
+        peers.update_peer(request.info_hash, *addr, request.seed.unwrap_or(false));
+        self.send_response(
+            transaction_id,
+            ResponseMessage::Announce {
+                response: AnnouncePeerResponse { id },
+            },
+            &addr,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Process a received sample info hashes request.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node id of the server.
+    /// * `transaction_id` - The transaction id of the query.
+    /// * `addr`- The source address of the node.
+    /// * `request` - The `sample_infohashes` query arguments.
+    /// * `peers` - The peer storage of the server.
+    async fn on_sample_info_hashes_request(
+        &self,
+        id: NodeId,
+        transaction_id: u16,
+        _request: SampleInfoHashesRequest,
+        addr: &SocketAddr,
+        peers: &PeerStorage,
+    ) -> Result<()> {
+        let num = peers.info_hashes().count();
+        let samples = peers.info_hashes().take(20).cloned().collect::<Vec<_>>();
+
+        self.send_response(
+            transaction_id,
+            ResponseMessage::SampleInfoHashes {
+                response: SampleInfoHashesResponse {
+                    id,
+                    interval: 180,
+                    nodes: Default::default(),
+                    nodes6: Default::default(),
+                    num: num as u32,
+                    samples,
+                },
+            },
+            &addr,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Process the given sample info hashes response.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The transaction key of the query.
+    /// * `addr`- The source address of the node.
+    /// * `response` - The received sample info hashes response.
+    async fn on_sample_info_hashes_response(
+        &self,
+        key: &TransactionKey,
+        addr: &SocketAddr,
+        response: SampleInfoHashesResponse,
+    ) -> Result<Reply> {
+        if !response.id.verify_id(&addr.ip()) {
+            debug!("{} detected spoofed sample_infohashes from {}", self, key);
+            return Err(Error::InvalidNodeId);
+        }
+
+        Ok(Reply::SampleInfoHashes(response.samples))
+    }
+
+    /// Process a received ping query.
+    /// This invokes a simple ping-pong between the server and the sender.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node id of the server.
+    /// * `transaction_id` - The transaction id of the query.
+    /// * `addr`- The source address of the node.
+    async fn on_ping_request(
+        &self,
+        id: NodeId,
+        transaction_id: u16,
+        addr: &SocketAddr,
+    ) -> Result<()> {
+        self.send_response(
+            transaction_id,
+            ResponseMessage::Ping {
+                response: PingMessage { id },
+            },
+            &addr,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Process a received ping response.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The transaction key of the query.
+    /// * `addr`- The source address of the node.
+    /// * `response` - The ping response of the node.
+    async fn on_ping_response(
+        &self,
+        key: &TransactionKey,
+        addr: &SocketAddr,
+        response: PingMessage,
+    ) -> Result<Reply> {
+        if !response.id.verify_id(&addr.ip()) {
+            debug!("{} detected spoofed ping from {}", self, key);
+            return Err(Error::InvalidNodeId);
+        }
+
+        self.node_query_result(&addr, true).await;
+        Ok(Reply::Ping(Node::new(response.id, *addr)))
+    }
+
+    /// Process a received find nodes query.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node id of the server.
+    /// * `transaction_id` - The transaction id of the query.
+    /// * `addr`- The source address of the node.
+    /// * `request` - The `find_node` query arguments.
+    async fn on_find_node_request(
+        &self,
+        id: NodeId,
+        transaction_id: u16,
+        addr: &SocketAddr,
+        request: FindNodeRequest,
+    ) -> Result<()> {
+        let routing_table = self.routing_table.lock().await;
+        let target_node = request.target;
+        let (compact_nodes, compact_nodes6) =
+            Self::closest_node_pairs(&*routing_table, &target_node);
+
+        self.send_response(
+            transaction_id,
+            ResponseMessage::FindNode {
+                response: FindNodeResponse {
+                    id,
+                    nodes: compact_nodes.into(),
+                    nodes6: compact_nodes6.into(),
+                    token: None,
+                },
+            },
+            &addr,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Process the received find node response.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The transaction key of the query.
+    /// * `addr`- The source address of the node.
+    /// * `response` - The received find node response.
+    async fn on_find_node_response(
+        &self,
+        key: &TransactionKey,
+        addr: &SocketAddr,
+        response: FindNodeResponse,
+    ) -> Result<Reply> {
+        if !response.id.verify_id(&addr.ip()) {
+            debug!("{} detected spoofed find_node from {}", self, key);
+            return Err(Error::InvalidNodeId);
+        }
+
+        self.node_query_result(&addr, true).await;
+        let nodes = response
+            .nodes
+            .as_slice()
+            .into_iter()
+            .map(|e| Node::new(e.id, e.addr.clone().into()))
+            .chain(
+                response
+                    .nodes6
+                    .as_slice()
+                    .into_iter()
+                    .map(|e| Node::new(e.id, e.addr.clone().into())),
+            )
+            .collect::<Vec<_>>();
+
+        debug!(
+            "{} node {} discovered a total of {} nodes",
+            self,
+            addr,
+            nodes.len()
+        );
+        Ok(Reply::FindNode(nodes))
+    }
+
     /// Process a received get_peers query.
     /// The query will be processed only when the node is already known within the routing table.
     ///
@@ -669,7 +821,7 @@ impl TrackerContext {
     /// * `id` - The node id of the server.
     /// * `transaction_id` - The transaction id of the query.
     /// * `addr`- The source address of the node.
-    /// * `request` - The get_peers query arguments.
+    /// * `request` - The `get_peers` query arguments.
     /// * `peers` - The peer storage of the server.
     async fn on_get_peers_request(
         &self,
@@ -718,12 +870,15 @@ impl TrackerContext {
             }
         }
 
-        let values = peers
-            .peers(&request.info_hash)
-            .filter(|e| e.addr.is_ipv4() == self.socket_addr.is_ipv4())
-            .map(|e| CompactIpAddr::from(e.addr))
-            .map(|e| e.as_bytes())
-            .concat();
+        let values = Some(
+            peers
+                .peers(&request.info_hash)
+                .filter(|e| e.addr.is_ipv4() == self.socket_addr.is_ipv4())
+                .map(|e| CompactIpAddr::from(e.addr))
+                .map(|e| e.as_bytes())
+                .concat(),
+        )
+        .filter(|e| !e.is_empty());
 
         self.send_response(
             transaction_id,
@@ -731,7 +886,7 @@ impl TrackerContext {
                 response: GetPeersResponse {
                     id,
                     token: token.to_vec(),
-                    values: Some(values).filter(|e| !e.is_empty()),
+                    values,
                     nodes: nodes.into(),
                     nodes6: nodes6.into(),
                 },
@@ -748,10 +903,10 @@ impl TrackerContext {
         key: &TransactionKey,
         addr: &SocketAddr,
         response: GetPeersResponse,
-    ) -> Option<Result<Reply>> {
+    ) -> Result<Reply> {
         if !response.id.verify_id(&addr.ip()) {
             debug!("{} detected spoofed get_peers from {}", self, key);
-            return None;
+            return Err(Error::InvalidNodeId);
         }
 
         self.node_query_result(&addr, true).await;
@@ -759,7 +914,7 @@ impl TrackerContext {
             .update_announce_token(&response.id, &response.token)
             .await
         {
-            return Some(Err(e));
+            return Err(e);
         }
 
         let nodes = response
@@ -785,11 +940,11 @@ impl TrackerContext {
             match addr.ip() {
                 IpAddr::V4(_) => match CompactIpv4Addrs::try_from(values.as_slice()) {
                     Ok(addrs) => addrs.into_iter().map(|e| e.into()).collect::<Vec<_>>(),
-                    Err(e) => return Some(Err(Error::Parse(e.to_string()))),
+                    Err(e) => return Err(Error::Parse(e.to_string())),
                 },
                 IpAddr::V6(_) => match CompactIpv6Addrs::try_from(values.as_slice()) {
                     Ok(addrs) => addrs.into_iter().map(|e| e.into()).collect::<Vec<_>>(),
-                    Err(e) => return Some(Err(Error::Parse(e.to_string()))),
+                    Err(e) => return Err(Error::Parse(e.to_string())),
                 },
             }
         } else {
@@ -797,7 +952,7 @@ impl TrackerContext {
         };
 
         self.metrics.discovered_peers.inc_by(peers.len() as u64);
-        Some(Ok(Reply::GetPeers(peers)))
+        Ok(Reply::GetPeers(peers))
     }
 
     async fn on_error_response(
@@ -1050,6 +1205,7 @@ impl TrackerContext {
                 pending_requests.insert(
                     TransactionKey { id, addr: *addr },
                     PendingRequest {
+                        query_name: name,
                         request_type: on_pending(tx),
                         timestamp_sent: Instant::now(),
                     },
@@ -1080,13 +1236,13 @@ impl TrackerContext {
     async fn send_response(
         &self,
         transaction_id: u16,
-        response: ResponseMessage,
+        message: ResponseMessage,
         addr: &SocketAddr,
     ) -> Result<()> {
         let message = Message::builder()
             .transaction_id(transaction_id)
             .version(Version::from(VERSION_IDENTIFIER))
-            .payload(MessagePayload::Response(response))
+            .payload(MessagePayload::Response(ResponsePayload::Message(message)))
             .ip((*addr).into())
             .port(addr.port())
             .build()?;
@@ -1499,6 +1655,7 @@ impl NodeReader {
 /// Represents a request that has been sent to a DHT node and is awaiting a response.
 #[derive(Debug)]
 struct PendingRequest {
+    query_name: String,
     request_type: PendingRequestType,
     timestamp_sent: Instant,
 }
@@ -1518,6 +1675,7 @@ enum Reply {
     Ping(Node),
     FindNode(Vec<Node>),
     GetPeers(Vec<SocketAddr>),
+    SampleInfoHashes(Vec<InfoHash>),
 }
 
 #[derive(Debug, Display, Clone, PartialEq, Eq, Hash)]

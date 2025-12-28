@@ -24,11 +24,16 @@ async fn main() -> io::Result<()> {
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
         ))
         .build()
-        .expect("failed to create torrent session");
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     match session.fetch_magnet(magnet, Duration::from_secs(20)).await {
         Ok(info) => println!("Retrieved {:?}", info),
-        Err(e) => println!("Failed to retrieve magnet info, {}", e),
+        Err(e) => {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("failed to retrieve magnet info, {}", e),
+            ))
+        }
     };
 
     Ok(())

@@ -30,42 +30,42 @@ impl AppLogger {
                 vec![
                     Logger {
                         name: "DHT".to_string(),
-                        target: "popcorn_fx_torrent::dht".to_string(),
+                        target: "fx_torrent::dht".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "DNS".to_string(),
-                        target: "popcorn_fx_torrent::dns".to_string(),
+                        target: "fx_torrent::dns".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "Operations".to_string(),
-                        target: "popcorn_fx_torrent::operation".to_string(),
+                        target: "fx_torrent::operation".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "Peers".to_string(),
-                        target: "popcorn_fx_torrent::peer".to_string(),
+                        target: "fx_torrent::peer".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "Peer protocol".to_string(),
-                        target: "popcorn_fx_torrent::peer::protocol".to_string(),
+                        target: "fx_torrent::peer::protocol".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "Session".to_string(),
-                        target: "popcorn_fx_torrent::session".to_string(),
+                        target: "fx_torrent::session".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "Torrent".to_string(),
-                        target: "popcorn_fx_torrent::torrent".to_string(),
+                        target: "fx_torrent::torrent".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "Trackers".to_string(),
-                        target: "popcorn_fx_torrent::tracker".to_string(),
+                        target: "fx_torrent::tracker".to_string(),
                         level: Level::Info,
                     },
                 ]

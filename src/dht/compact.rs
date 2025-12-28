@@ -20,7 +20,7 @@ pub trait CompactIpNodes {
 }
 
 /// A list of compact IPv4 nodes.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CompactIPv4Nodes(Vec<CompactIPv4Node>);
 
 impl CompactIPv4Nodes {
@@ -287,7 +287,7 @@ impl From<&CompactIPv6Node> for Vec<u8> {
 }
 
 /// A list of compact IPv6 nodes.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CompactIPv6Nodes(Vec<CompactIPv6Node>);
 
 impl CompactIPv6Nodes {
