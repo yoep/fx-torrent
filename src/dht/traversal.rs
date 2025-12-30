@@ -1,3 +1,4 @@
+use crate::channel::ChannelSender;
 use crate::dht::{Node, NodeId, TrackerCommand, TrackerContext};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -10,28 +11,41 @@ use tokio::sync::Semaphore;
 
 /// The DHT traversal algorithm to discover nodes in the DHT network.
 #[derive(Debug)]
-pub struct TraversalAlgorithm {
+pub(crate) struct TraversalAlgorithm {
     queried: HashSet<SocketAddr>,
     unqueried: VecDeque<PendingQuery>,
+    sender: ChannelSender<TrackerCommand>,
     permits: Arc<Semaphore>,
     limit: usize,
 }
 
 impl TraversalAlgorithm {
-    pub fn new(bucket_size: usize, routing_nodes: Vec<SocketAddr>) -> Self {
+    /// Create a new traversal algorithm instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `bucket_size` - The bucket size of the underlying node routing table.
+    /// * `routing_nodes` - The bootstrap nodes to start the traversal with.
+    /// * `sender` - The command sender to execute tasks on the main loop.
+    pub fn new(
+        bucket_size: usize,
+        routing_nodes: Vec<SocketAddr>,
+        sender: ChannelSender<TrackerCommand>,
+    ) -> Self {
         Self {
             queried: Default::default(),
             unqueried: routing_nodes
                 .into_iter()
                 .map(|addr| PendingQuery { id: None, addr })
                 .collect(),
+            sender,
             permits: Arc::new(Semaphore::new(bucket_size)),
             limit: bucket_size * 160, // = bucket size * max routing table buckets
         }
     }
 
     /// Execute the traversal algorithm for the given target node ID.
-    pub async fn run(&mut self, target_id: NodeId, context: &TrackerContext) {
+    pub async fn run(&mut self, target_id: NodeId, context: &mut TrackerContext) {
         if self.permits.available_permits() == 0 {
             return;
         }
@@ -65,7 +79,7 @@ impl TraversalAlgorithm {
         }
     }
 
-    async fn send_pending_queries(&mut self, target_id: NodeId, context: &TrackerContext) {
+    async fn send_pending_queries(&mut self, target_id: NodeId, context: &mut TrackerContext) {
         let mut queries = vec![];
         while let Some(query) = self.unqueried.pop_front() {
             if self.queried.contains(&query.addr) {
@@ -79,11 +93,11 @@ impl TraversalAlgorithm {
 
             self.queried.insert(query.addr);
             let node = Node::new(NodeId::from_ip(&query.addr.ip()), query.addr);
-            let response = context.find_node(target_id, target_id, &node).await;
+            let response = context.find_node(target_id, &node).await;
             queries.push(async move { (permit, response.await) });
         }
 
-        let command_sender = context.command_sender().clone();
+        let command_sender = self.sender.clone();
         tokio::spawn(async move {
             let mut futures = FuturesUnordered::from_iter(queries);
             while let Some((permit, response)) = futures.next().await {
@@ -92,11 +106,14 @@ impl TraversalAlgorithm {
                     Ok(nodes) => {
                         trace!(
                             "DHT traversal discovered nodes, {:?}",
-                            nodes.iter().map(|e| e.addr()).collect::<Vec<_>>()
+                            nodes.iter().map(|e| e.addr).collect::<Vec<_>>()
                         );
                         for node in nodes {
                             let _ = command_sender
-                                .send(TrackerCommand::AddTraversalNode((*node.id(), *node.addr())));
+                                .fire_and_forget(TrackerCommand::AddTraversalNode((
+                                    node.id, node.addr,
+                                )))
+                                .await;
                         }
                     }
                     Err(e) => {
@@ -135,18 +152,22 @@ struct PendingQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dht::DhtEvent;
-    use crate::{create_node_server_pair, init_logger, timeout};
+    use crate::dht::observer::Observer;
+    use crate::dht::peers::PeerStorage;
+    use crate::dht::{DhtEvent, Event};
+    use crate::{channel, create_tracker_context, init_logger};
     use fx_callback::Callback;
     use std::net::Ipv4Addr;
     use std::time::Duration;
     use tokio::sync::oneshot;
+    use tokio::{select, time};
 
     #[test]
     fn test_new() {
         init_logger!();
         let addr: SocketAddr = (Ipv4Addr::LOCALHOST, 9000).into();
-        let traversal = TraversalAlgorithm::new(8, vec![addr]);
+        let (sender, _receiver) = channel!(2);
+        let traversal = TraversalAlgorithm::new(8, vec![addr], sender);
 
         assert_eq!(
             0,
@@ -158,7 +179,8 @@ mod tests {
 
     #[test]
     fn test_restart() {
-        let mut traversal = TraversalAlgorithm::new(8, vec![]);
+        let (sender, _receiver) = channel!(2);
+        let mut traversal = TraversalAlgorithm::new(8, vec![], sender);
 
         // insert a queried node
         traversal.queried.insert((Ipv4Addr::LOCALHOST, 9877).into());
@@ -185,14 +207,17 @@ mod tests {
     #[tokio::test]
     async fn test_run() {
         init_logger!();
-        let (source, target) = create_node_server_pair!();
-        let source_id = source.id().await;
-        let target_id = target.id().await;
-        let target_addr: SocketAddr = (Ipv4Addr::LOCALHOST, target.addr().port()).into();
-        let (tx, rx) = oneshot::channel();
-        let mut traversal = TraversalAlgorithm::new(8, vec![target_addr.clone()]);
+        let mut source = create_tracker_context!();
+        let mut target = create_tracker_context!();
+        let source_id = source.routing_table.id;
+        let target_id = target.routing_table.id;
+        let target_addr: SocketAddr = (Ipv4Addr::LOCALHOST, target.socket_addr.port()).into();
+        let (tx, mut rx) = oneshot::channel();
+        let (sender, receiver) = channel!(2);
+        let mut traversal = TraversalAlgorithm::new(8, vec![target_addr.clone()], sender.clone());
 
-        let mut subscription = source.subscribe();
+        // subscribe to the source node events
+        let mut subscription = source.callbacks.subscribe();
         tokio::spawn(async move {
             while let Some(event) = subscription.recv().await {
                 if let DhtEvent::NodeAdded(node) = &*event {
@@ -202,18 +227,39 @@ mod tests {
             }
         });
 
-        traversal.run(source_id, &*source.inner).await;
+        // start the target main loop in a separate task
+        tokio::spawn(async move {
+            let (sender, receiver) = channel!(1);
+            let observer = Observer::new(sender.clone());
+            let traversal = TraversalAlgorithm::new(8, vec![], sender);
 
-        // wait for the target node to have been added
-        let result = timeout!(
-            rx,
-            Duration::from_millis(750),
-            "expected the target node to have been added"
-        )
-        .unwrap();
+            target.start(observer, traversal, receiver).await;
+        });
+
+        // run the traversal algorithm
+        traversal.run(source_id, &mut source).await;
+
+        // process the incoming message
+        let mut observer = Observer::new(sender);
+        let mut peers = PeerStorage::new();
+        let timeout = time::sleep(Duration::from_millis(750));
+        tokio::pin!(timeout);
+        let result = loop {
+            select! {
+                _ = &mut timeout => {
+                    assert!(false, "timeout waiting for node to be added");
+                },
+                result = &mut rx => {
+                    break result;
+                },
+                Some(message) = source.receiver.recv() => {
+                    source.run(Event::Incoming(message), &mut observer, &mut traversal, &mut peers).await;
+                }
+            }
+        }
+            .unwrap();
         assert_eq!(
-            &target_id,
-            result.id(),
+            target_id, result.id,
             "expected the target node to have been added"
         );
 

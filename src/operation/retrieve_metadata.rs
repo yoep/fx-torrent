@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use log::trace;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 /// The torrent metadata operation is responsible for checking if the metadata for a torrent is present and if not, retrieving it from peers.
 #[derive(Debug)]
@@ -48,6 +50,7 @@ impl TorrentOperation for TorrentMetadataOperation {
         "retrieve metadata operation"
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn execute(&self, torrent: &Arc<TorrentContext>) -> TorrentOperationResult {
         let is_metadata_known = self.is_metadata_known(&torrent).await;
 

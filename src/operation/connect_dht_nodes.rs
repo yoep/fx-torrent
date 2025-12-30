@@ -4,6 +4,8 @@ use log::{debug, trace};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::lookup_host;
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 /// Connect to the DHT nodes defined within the torrent metadata.
 #[derive(Debug)]
@@ -28,6 +30,7 @@ impl TorrentOperation for TorrentDhtNodesOperation {
         "connect torrent DHT nodes operation"
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn execute(&self, torrent: &Arc<TorrentContext>) -> TorrentOperationResult {
         if self.inner.should_connect_to_dht_nodes() {
             self.inner.running.store(true, Ordering::Relaxed);

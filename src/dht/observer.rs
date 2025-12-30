@@ -1,3 +1,4 @@
+use crate::channel::ChannelSender;
 use crate::dht::{TrackerCommand, TrackerContext};
 use crate::CompactIpAddr;
 use itertools::Itertools;
@@ -18,13 +19,15 @@ pub struct Observer {
     external_ip: Option<IpAddr>,
     /// The observed external IP addresses of the server (target_addr, own_addr)
     observed_addrs: HashSet<ObservedAddress>,
+    sender: ChannelSender<TrackerCommand>,
 }
 
 impl Observer {
-    pub fn new() -> Self {
+    pub fn new(sender: ChannelSender<TrackerCommand>) -> Self {
         Self {
             external_ip: None,
             observed_addrs: Default::default(),
+            sender,
         }
     }
 
@@ -76,13 +79,13 @@ impl Observer {
             .map(|(addr, _)| addr)
             .next()
         {
-            let routing_table = context.routing_table_lock().await;
+            let routing_table = &context.routing_table;
             // check if the observed external IP address is different from the current stored node id ip
             if !routing_table.id.is_secure_id(&candidate) {
                 self.external_ip.replace(candidate);
-                let _ = context
-                    .command_sender()
-                    .send(TrackerCommand::UpdateExternalIp(candidate));
+                self.sender
+                    .fire_and_forget(TrackerCommand::UpdateExternalIp(candidate))
+                    .await;
             }
         }
     }

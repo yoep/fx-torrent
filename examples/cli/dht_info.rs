@@ -59,7 +59,9 @@ impl DhtInfoWidget {
                 self.data.ip = Some(*ip);
             }
             DhtEvent::NodeAdded(node) => {
-                self.node_info_widget.add_node(node.clone());
+                if let Some(node) = self.dht.node(node).await {
+                    self.node_info_widget.add_node(node);
+                }
             }
             DhtEvent::Stats(metrics) => {
                 self.data.total_nodes = metrics.nodes.get();
@@ -88,7 +90,7 @@ impl DhtInfoWidget {
             DhtInfoCommand::AddNode(addr) => {
                 let dht = self.dht.clone();
                 tokio::spawn(async move {
-                    let _ = dht.add_node(addr).await;
+                    let _ = dht.add_node(&addr).await;
                 });
             }
         }

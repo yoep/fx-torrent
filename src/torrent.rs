@@ -47,6 +47,8 @@ use tokio::{select, time};
 use tokio_util::sync::{
     CancellationToken, WaitForCancellationFuture, WaitForCancellationFutureOwned,
 };
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 use url::Url;
 
 const PEER_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1280,6 +1282,10 @@ pub struct TorrentContext {
 impl TorrentContext {
     /// Start the main loop of this torrent.
     /// It starts listening for events from different receivers and processes them accordingly.
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(skip(context, operations, command_receiver, peer_event_receiver))
+    )]
     async fn start(
         &self,
         context: &Arc<TorrentContext>,
@@ -2053,6 +2059,7 @@ impl TorrentContext {
         self.invoke_event(TorrentEvent::StateChanged(state));
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn update_stats(&self) {
         self.invoke_event(TorrentEvent::Stats(self.metrics.snapshot()));
         self.metrics.tick(OPERATIONS_INTERVAL)
@@ -2294,6 +2301,7 @@ impl TorrentContext {
     }
 
     /// Handle a command event from the channel of the torrent.
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn handle_command_event(&self, event: TorrentCommandEvent) {
         trace!("Torrent {} handling command event {:?}", self, event);
         match event {
@@ -2316,6 +2324,7 @@ impl TorrentContext {
         }
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn handle_tracker_event(&self, event: TrackerClientEvent) {
         trace!("Handling event {:?} for torrent {}", event, self);
         match event {
@@ -2385,6 +2394,7 @@ impl TorrentContext {
 
     /// Handle the given peer event.
     /// This will update the torrent context info based on an event that occurred within one of its peers.
+    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     async fn handle_peer_event(&self, event: PeerEvent) {
         match event {
             PeerEvent::PeersDiscovered(peers) => self.add_peer_addresses(peers).await,
@@ -2494,6 +2504,7 @@ impl TorrentContext {
         }
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     async fn process_completed_piece(&self, piece: PieceIndex) {
         if let Some(data) = self.piece_chunk_pool.get(piece).await {
             let data_size = data.len();
@@ -2592,6 +2603,7 @@ impl TorrentContext {
     /// ## Remarks
     ///
     /// If an unknown [PieceIndex] is given, it will always be assumed as invalid as there is no way to validate the data.
+    #[cfg_attr(feature = "tracing", instrument(skip(self, data)))]
     pub async fn validate_piece_index_data(&self, piece: &PieceIndex, data: &[u8]) -> bool {
         if let Some(piece) = self.data_pool.piece(piece).await {
             return Self::validate_piece_data(&piece, data);
@@ -2855,6 +2867,7 @@ impl TorrentContext {
     }
 
     /// Cleanup the peer resources which have been closed or are no longer valid.
+    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     async fn clean_peers(&self) {
         trace!("Torrent {} is executing peer cleanup cycle", self);
         for peer in self.peer_pool.clean().await {
@@ -2932,6 +2945,7 @@ impl TorrentContext {
     ///
     /// This will execute the operations in order as defined by the chain.
     /// If an operation returns [None], the execution chain will be interrupted.
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn execute_operations_chain(
         context: &Arc<TorrentContext>,
         operations: &Vec<Box<dyn TorrentOperation>>,

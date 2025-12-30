@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::time;
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 use url::Url;
 
 const BURST_DURATION: Duration = Duration::from_secs(10);
@@ -333,6 +335,7 @@ impl TorrentOperation for TorrentConnectPeersOperation {
         "create peer connections operation"
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn execute(&self, torrent: &Arc<TorrentContext>) -> TorrentOperationResult {
         let wanted_connections = torrent.remaining_peer_connections_needed().await;
         if wanted_connections > 0 {

@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::RwLock;
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 type SlotIndex = usize;
 
@@ -34,6 +36,7 @@ impl PartsFile {
         }
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self, buffer)))]
     pub async fn read(
         &self,
         buffer: &mut [u8],
@@ -69,6 +72,7 @@ impl PartsFile {
         Ok(bytes_read)
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self, data)))]
     pub async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         let mut slots = self.slots.write().await;
         let mut piece_slots = self.piece_slots.write().await;

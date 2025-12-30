@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::select;
 use tokio::sync::Mutex;
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 /// The maximum number of bytes to validate at once
 const CHUNK_VALIDATION_MAX_BYTE_SIZE: usize = 50 * 1000 * 1000; // 50MB
@@ -33,6 +35,7 @@ impl TorrentFileValidationOperation {
         }
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn validate_files(&self, torrent: &Arc<TorrentContext>, files: Vec<File>) {
         let info_hash = torrent.metadata_lock().read().await.info_hash.clone();
         let state = self.state.clone();
@@ -158,6 +161,7 @@ impl TorrentOperation for TorrentFileValidationOperation {
         "torrent file validation operation"
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn execute(&self, torrent: &Arc<TorrentContext>) -> TorrentOperationResult {
         // check the current state of the validator
         match *self.state.lock().await {

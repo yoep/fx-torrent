@@ -7,6 +7,8 @@ use log::{debug, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 /// The torrent trackers operation is responsible for adding the known trackers to the torrent.
 /// This operation add the trackers in a "fire-and-forget" mode and only waits for one tracker connection to have been established.
@@ -96,6 +98,7 @@ impl TorrentOperation for TorrentTrackersOperation {
         "connect trackers operation"
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn execute(&self, torrent: &Arc<TorrentContext>) -> TorrentOperationResult {
         // build the tiered trackers cache if needed
         if !self.initialized.load(Ordering::Relaxed) {

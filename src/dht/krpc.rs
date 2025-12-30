@@ -270,6 +270,7 @@ pub struct GetPeersResponse {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnnouncePeerRequest {
     pub id: NodeId,
+    #[serde(with = "serde_implied_port")]
     pub implied_port: bool,
     pub info_hash: InfoHash,
     pub port: u16,
@@ -755,6 +756,56 @@ mod serde_info_hash {
     }
 }
 
+mod serde_implied_port {
+    use super::*;
+    use serde::de::Visitor;
+
+    pub fn serialize<S>(value: &bool, serializer: S) -> result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(*value as u64)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> result::Result<bool, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct BoolVisitor;
+        impl<'de> Visitor<'de> for BoolVisitor {
+            type Value = bool;
+
+            fn expecting(&self, f: &mut Formatter) -> std::fmt::Result {
+                write!(f, "expected an integer representing a boolean value")
+            }
+
+            fn visit_i64<E>(self, v: i64) -> result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match v {
+                    0 => Ok(false),
+                    1 => Ok(true),
+                    _ => Err(de::Error::custom("invalid boolean value")),
+                }
+            }
+
+            fn visit_u64<E>(self, v: u64) -> result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match v {
+                    0 => Ok(false),
+                    1 => Ok(true),
+                    _ => Err(de::Error::custom("invalid boolean value")),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(BoolVisitor {})
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -884,6 +935,66 @@ mod tests {
             // serialize the payload and compare it with the original payload
             let result = serde_bencode::to_bytes(&result).unwrap();
             assert_eq!(payload_hex, hex::encode(result.as_slice()));
+        }
+    }
+
+    mod announce_peer {
+        use super::*;
+
+        #[test]
+        fn test_request() {
+            let payload = "d1:ad2:id20:abcdefghij012345678912:implied_porti1e9:info_hash20:mnopqrstuvwxyz1234564:porti6881e5:token8:aoeusnthe1:q13:announce_peer1:t2:aa1:y1:qe";
+            let expected_result = Message::builder()
+                .transaction_id_bytes("aa".as_bytes())
+                .payload(MessagePayload::Query(QueryMessage::AnnouncePeer {
+                    request: AnnouncePeerRequest {
+                        id: NodeId::try_from("abcdefghij0123456789".as_bytes()).unwrap(),
+                        implied_port: true,
+                        info_hash: InfoHash::from_str("mnopqrstuvwxyz123456").unwrap(),
+                        port: 6881,
+                        token: "aoeusnth".to_string(),
+                        name: None,
+                        seed: None,
+                    },
+                }))
+                .build()
+                .unwrap();
+
+            // deserialize the payload
+            let result =
+                serde_bencode::from_str::<Message>(payload).expect("expected a valid message");
+            assert_eq!(expected_result, result);
+
+            // serialize the payload and compare it with the original payload
+            let result = serde_bencode::to_string(&result).unwrap();
+            assert_eq!(payload, result.as_str());
+        }
+
+        #[test]
+        fn test_response() {
+            let payload = "d1:rd2:id20:mnopqrstuvwxyz123456e1:t2:aa1:y1:re";
+            let expected_result = Message::builder()
+                .transaction_id_bytes("aa".as_bytes())
+                .payload(MessagePayload::Response(ResponsePayload::Message(
+                    ResponseMessage::Announce {
+                        response: AnnouncePeerResponse {
+                            id: NodeId::try_from("mnopqrstuvwxyz123456".as_bytes()).unwrap(),
+                        },
+                    },
+                )))
+                .build()
+                .unwrap();
+
+            // deserialize the payload
+            let result = deserialize_response(
+                serde_bencode::from_str::<Message>(payload).unwrap(),
+                MESSAGE_ANNOUNCE,
+            );
+            assert_eq!(expected_result, result);
+
+            // serialize the payload and compare it with the original payload
+            let result = serde_bencode::to_string(&result).unwrap();
+            assert_eq!(payload, result.as_str());
         }
     }
 

@@ -50,6 +50,9 @@ sha2 = "0.10.9"
 thiserror = "2.0"
 tokio = { version = "1.48", features = ["rt-multi-thread", "time", "macros"] }
 tokio-util = "0.7"
+tracing = { version = "0.1", optional = true }
+tracing-futures = { version = "0.2", optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
 url = "2.5"
 
 [features]
@@ -60,6 +63,7 @@ extension-donthave = []
 extension-holepunch = []
 extension-metadata = []
 extension-pex = []
+tracing = ["dep:tracing", "dep:tracing-futures", "dep:tracing-subscriber"]
 
 [dev-dependencies]
 chrono = "0.4.42"
@@ -69,6 +73,12 @@ mockall = "0.14"
 ratatui = "0.30"
 tempfile = "3.24"
 tokio = { version = "1.48", features = ["signal"] }
+tracing-chrome = "0.7"
 
 [package.metadata.docs.rs]
 all-features = true
+
+[[example]]
+name = "cli"
+path = "examples/cli/main.rs"
+required-features = ["tracing"]
