@@ -30,42 +30,42 @@ impl AppLogger {
                 vec![
                     Logger {
                         name: "DHT".to_string(),
-                        target: "popcorn_fx_torrent::dht".to_string(),
+                        target: "fx_torrent::dht".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "DNS".to_string(),
-                        target: "popcorn_fx_torrent::dns".to_string(),
+                        target: "fx_torrent::dns".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "Operations".to_string(),
-                        target: "popcorn_fx_torrent::operation".to_string(),
+                        target: "fx_torrent::operation".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "Peers".to_string(),
-                        target: "popcorn_fx_torrent::peer".to_string(),
+                        target: "fx_torrent::peer".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "Peer protocol".to_string(),
-                        target: "popcorn_fx_torrent::peer::protocol".to_string(),
+                        target: "fx_torrent::peer::protocol".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "Session".to_string(),
-                        target: "popcorn_fx_torrent::session".to_string(),
+                        target: "fx_torrent::session".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "Torrent".to_string(),
-                        target: "popcorn_fx_torrent::torrent".to_string(),
+                        target: "fx_torrent::torrent".to_string(),
                         level: Level::Info,
                     },
                     Logger {
                         name: "Trackers".to_string(),
-                        target: "popcorn_fx_torrent::tracker".to_string(),
+                        target: "fx_torrent::tracker".to_string(),
                         level: Level::Info,
                     },
                 ]
@@ -115,7 +115,7 @@ impl Log for AppLogger {
     }
 
     fn log(&self, record: &Record) {
-        if !self.enabled(record.metadata()) {
+        if !Log::enabled(&self, record.metadata()) {
             return;
         }
 
@@ -234,5 +234,98 @@ impl AppLogfileWriter {
             .truncate(true)
             .open(LOG_FILE_PATH)
             .await
+    }
+}
+
+#[cfg(feature = "tracing")]
+mod log_tracing {
+    use super::*;
+    use std::fmt::Debug;
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::Layer;
+
+    impl<S> Layer<S> for AppLogger
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let metadata = event.metadata();
+            let level = metadata.level();
+            let target = metadata.target();
+            if target != "log" {
+                return;
+            }
+
+            let mut visitor = EventVisitor {
+                message: None,
+                target: None,
+                module_path: None,
+            };
+            event.record(&mut visitor);
+
+            let target = visitor.target.unwrap_or_default();
+            let metadata = Metadata::builder()
+                .level(match *level {
+                    tracing::Level::ERROR => Level::Error,
+                    tracing::Level::WARN => Level::Warn,
+                    tracing::Level::INFO => Level::Info,
+                    tracing::Level::DEBUG => Level::Debug,
+                    tracing::Level::TRACE => Level::Trace,
+                })
+                .target(target.as_str())
+                .build();
+
+            if self.inner.enabled(&metadata) {
+                self.inner.send_entry(
+                    &Record::builder()
+                        .metadata(metadata)
+                        .module_path(visitor.module_path.as_deref())
+                        .args(format_args!("{}", visitor.message.unwrap_or_default()))
+                        .build(),
+                )
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct EventVisitor {
+        message: Option<String>,
+        target: Option<String>,
+        module_path: Option<String>,
+    }
+
+    impl Visit for EventVisitor {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            match field.name() {
+                "message" => {
+                    self.message = Some(value.to_string());
+                }
+                "log.target" => {
+                    self.target = Some(value.to_string());
+                }
+                "log.module_path" => {
+                    self.module_path = Some(value.to_string());
+                }
+                _ => {}
+            }
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+            match field.name() {
+                "message" => {
+                    self.message = Some(format!("{:?}", value));
+                }
+                "log.target" => {
+                    self.target = Some(format!("{:?}", value));
+                }
+                "log.module_path" => {
+                    self.module_path = Some(format!("{:?}", value));
+                }
+                _ => {}
+            }
+        }
     }
 }

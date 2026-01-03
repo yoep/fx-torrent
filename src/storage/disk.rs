@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use tokio::fs::{create_dir_all, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::RwLock;
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 /// File system storage for the torrent piece data.
 #[derive(Debug)]
@@ -162,6 +164,7 @@ impl DiskStorage {
 
 #[async_trait]
 impl Storage for DiskStorage {
+    #[cfg_attr(feature = "tracing", instrument(skip(self, buffer)))]
     async fn read(&self, buffer: &mut [u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         let mut cursor = 0;
         let buffer_len = buffer.len();
@@ -241,6 +244,7 @@ impl Storage for DiskStorage {
         Ok(cursor)
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self, data)))]
     async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         let mut cursor = 0;
         let data_len = data.len();
@@ -304,6 +308,7 @@ impl Storage for DiskStorage {
         Ok(cursor)
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash> {
         let len = self.piece_len(piece).await;
         let mut buffer = vec![0u8; len];
@@ -316,6 +321,7 @@ impl Storage for DiskStorage {
             .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash> {
         let len = self.piece_len(piece).await;
         let mut buffer = vec![0u8; len];

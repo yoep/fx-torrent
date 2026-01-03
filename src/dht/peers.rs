@@ -31,6 +31,11 @@ impl PeerStorage {
         let entry = self.peers.entry(info_hash).or_default();
         entry.insert(PeerEntry::new(addr, seed));
     }
+
+    /// Returns an iterator over all info hashes stored in the storage.
+    pub fn info_hashes(&self) -> impl Iterator<Item = &InfoHash> {
+        self.peers.keys()
+    }
 }
 
 #[derive(Debug)]

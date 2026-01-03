@@ -1,12 +1,16 @@
+use crate::dht::Error;
 use crate::{TorrentContext, TorrentOperation, TorrentOperationResult};
 use async_trait::async_trait;
 use log::{debug, trace};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 const RETRIEVE_INTERVAL: Duration = Duration::from_secs(90);
-const RETRIEVE_TIMEOUT: Duration = Duration::from_secs(3);
+const RETRIEVE_TIMEOUT: Duration = Duration::from_secs(1); // FIXME: increase once the operation is spawned on a separate task
 
 /// Retrieve potential peer addresses for the torrent through the DHT network.
 #[derive(Debug)]
@@ -25,7 +29,16 @@ impl TorrentDhtPeersOperation {
         let dht = context.dht();
         if let Some(dht) = dht.inner.as_ref() {
             let info_hash = context.metadata_lock().read().await.info_hash.clone();
-            match dht.get_peers(&info_hash, RETRIEVE_TIMEOUT).await {
+
+            // FIXME: spawn this on a separate task, as it's blocking the torrent loop
+            let result = timeout(
+                RETRIEVE_TIMEOUT,
+                dht.get_peers(&info_hash, RETRIEVE_TIMEOUT),
+            )
+            .await
+            .map_err(|_| Error::Timeout)
+            .flatten();
+            match result {
                 Ok(peers) => {
                     debug!("Torrent {} discovered {} DHT peers", context, peers.len());
                     context.add_peer_addresses(peers).await;
@@ -51,6 +64,7 @@ impl TorrentOperation for TorrentDhtPeersOperation {
         "retrieve DHT peers operation"
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn execute(&self, torrent: &Arc<TorrentContext>) -> TorrentOperationResult {
         let elapsed = if let Some(last_executed) = self.last_executed.lock().await.as_ref() {
             last_executed.elapsed()

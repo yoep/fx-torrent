@@ -1,11 +1,13 @@
+use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
+use std::result;
 use std::task::{Context, Poll};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
 /// The result type of channel operations.
-pub type Result<T> = std::result::Result<T, ChannelError>;
+pub type Result<T> = result::Result<T, ChannelError>;
 
 /// An error which can occur during a channel operation.
 #[derive(Debug, Error)]
@@ -22,13 +24,16 @@ pub struct ChannelSender<T> {
 
 impl<T> ChannelSender<T> {
     /// Send the given message closure to the channel.
-    pub async fn send<F, R>(&self, message: F) -> Response<R>
+    ///
+    /// The `M` message mapper accepts a reply sender to send the result of the channel operation.
+    pub async fn send<M, R, E, S>(&self, message: M) -> Response<R, E>
     where
-        F: FnOnce(Reply<R>) -> T,
+        M: FnOnce(Reply<S>) -> T,
+        Response<R, E>: From<oneshot::Receiver<S>>,
     {
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel::<S>();
         match self.inner.send(message(Reply::new(tx))).await {
-            Ok(()) => Response::new(rx),
+            Ok(()) => rx.into(),
             Err(_) => Response::closed(),
         }
     }
@@ -62,31 +67,128 @@ impl<T> ChannelReceiver<T> {
 
 /// Receives a value from the channel and returns a result.
 ///
-/// This future resolves with the received value or an error if the channel is closed.
+/// # Example
+///
+/// Create a response from a value receiver.
+/// The value type will always result in a `Result<T, ChannelError>`.
+///
+/// ```rust,no_run
+/// use tokio::sync::oneshot;
+///
+/// let (tx, rx) = oneshot::channel::<bool>();
+/// Response::from(rx).await; // returns Ok(true) or Err(ChannelError)
+/// ```
+///
+/// Create a response from a value result receiver.
+///
+/// ```rust,no_run
+/// use tokio::sync::oneshot;
+///
+/// enum CustomError {
+///     Parse,
+///     Closed,
+/// }
+///
+/// impl From<ChannelError> for CustomError {
+///     fn from(_: ChannelError) -> Self {
+///         Self::Closed
+///     }
+/// }
+///
+/// let (tx, rx) = oneshot::channel::<Result<bool, CustomError>>();
+/// Response::from(rx).await; // returns Ok(true) or Err(CustomError)
+/// ```
 #[derive(Debug)]
-pub struct Response<T> {
-    inner: oneshot::Receiver<T>,
+pub struct Response<T, E> {
+    inner: InnerResponse<T, E>,
 }
 
-impl<T> Response<T> {
-    fn new(inner: oneshot::Receiver<T>) -> Self {
-        Self { inner }
+impl<T, E> Response<T, E> {
+    /// Create a failed response which immediately returns as an error.
+    pub fn err(e: E) -> Self {
+        Self {
+            inner: InnerResponse::Err(Some(e)),
+        }
     }
 
-    fn closed() -> Self {
-        let (_, rx) = oneshot::channel();
-        Self::new(rx)
+    /// Create a closed response which immediately returns as an closed error.
+    pub fn closed() -> Self {
+        Self {
+            inner: InnerResponse::Closed,
+        }
     }
 }
 
-impl<T> Future for Response<T> {
-    type Output = Result<T>;
+impl<T, E> Future for Response<T, E>
+where
+    E: Unpin,
+    ChannelError: Into<E>,
+{
+    type Output = result::Result<T, E>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.get_mut().inner).poll(cx)
+    }
+}
+
+impl<T> From<oneshot::Receiver<T>> for Response<T, ChannelError> {
+    fn from(rx: oneshot::Receiver<T>) -> Self {
+        Self {
+            inner: InnerResponse::PendingMapper(rx),
+        }
+    }
+}
+
+impl<T, E> From<oneshot::Receiver<result::Result<T, E>>> for Response<T, E> {
+    fn from(rx: oneshot::Receiver<result::Result<T, E>>) -> Self {
+        Self {
+            inner: InnerResponse::Pending(rx),
+        }
+    }
+}
+
+enum InnerResponse<T, E> {
+    Pending(oneshot::Receiver<result::Result<T, E>>),
+    PendingMapper(oneshot::Receiver<T>),
+    Err(Option<E>),
+    Closed,
+}
+
+impl<T, E> Future for InnerResponse<T, E>
+where
+    E: Unpin,
+    ChannelError: Into<E>,
+{
+    type Output = result::Result<T, E>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        Pin::new(&mut this.inner)
-            .poll(cx)
-            .map(|e| e.map_err(|_| ChannelError::Closed))
+        match this {
+            InnerResponse::Pending(rx) => Pin::new(rx)
+                .poll(cx)
+                .map(|res| res.unwrap_or_else(|_| Err(ChannelError::Closed.into()))),
+            InnerResponse::PendingMapper(rx) => Pin::new(rx).poll(cx).map(|res| match res {
+                Ok(v) => Ok(v),
+                Err(_) => Err(ChannelError::Closed.into()),
+            }),
+            InnerResponse::Err(e) => {
+                let err = e.take().unwrap_or_else(|| ChannelError::Closed.into());
+                *this = InnerResponse::Closed;
+                Poll::Ready(Err(err))
+            }
+            InnerResponse::Closed => Poll::Ready(Err(ChannelError::Closed.into())),
+        }
+    }
+}
+
+impl<T, E> Debug for InnerResponse<T, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending(_) => write!(f, "Pending"),
+            Self::PendingMapper(_) => write!(f, "PendingMapper"),
+            Self::Err(_) => write!(f, "Err"),
+            Self::Closed => write!(f, "Closed"),
+        }
     }
 }
 
@@ -104,6 +206,11 @@ impl<T> Reply<T> {
     /// Send the given value as a response to the channel request.
     pub fn send(self, value: T) {
         let _ = self.inner.send(value);
+    }
+
+    /// Take the inner resolution sender.
+    pub(crate) fn take(self) -> oneshot::Sender<T> {
+        self.inner
     }
 }
 
@@ -304,9 +411,9 @@ mod tests {
         });
     }
 
-    async fn validate_response(
+    async fn validate_response<E: Debug + From<ChannelError> + Unpin>(
         expected_arg_value: u32,
-        response: Response<bool>,
+        response: Response<bool, E>,
         mut receiver: ChannelReceiver<TestCommand>,
     ) {
         let result = receiver.recv().await;

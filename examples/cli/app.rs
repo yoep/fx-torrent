@@ -148,6 +148,7 @@ impl App {
         })
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(terminal), err))]
     pub async fn run(&mut self, mut terminal: DefaultTerminal) -> io::Result<()> {
         let mut reader = EventStream::new();
         self.create_session_tabs().await;

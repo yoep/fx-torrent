@@ -597,14 +597,14 @@ mod tests {
     use crate::init_logger;
     use crate::tests::read_test_file_to_bytes;
     use crate::{Magnet, TorrentMetadata};
-    use hex_literal::hex;
 
     #[test]
     fn test_info_hash_from_metadata_v1() {
         init_logger!();
         let info_data = b"hello world";
+        let info_hash_bytes = hex::decode("2aae6c35c94fcfb415dbe95f408b9ce91ee846ed").unwrap();
         let mut expected_result: [u8; 20] = [0; 20];
-        expected_result.copy_from_slice(hex!("2aae6c35c94fcfb415dbe95f408b9ce91ee846ed").as_ref());
+        expected_result.copy_from_slice(info_hash_bytes.as_ref());
 
         let result = InfoHash::from_metadata_v1(info_data);
 

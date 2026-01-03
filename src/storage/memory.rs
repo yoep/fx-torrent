@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 use tokio::sync::RwLock;
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 /// Fast in-memory storage of torrent piece data.
 /// This storage type is not recommended for large torrents.
@@ -28,6 +30,7 @@ impl MemoryStorage {
 
 #[async_trait]
 impl Storage for MemoryStorage {
+    #[cfg_attr(feature = "tracing", instrument(skip(self, buffer)))]
     async fn read(&self, buffer: &mut [u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         let mut cursor = 0usize;
         let buffer_len = buffer.len();
@@ -52,6 +55,7 @@ impl Storage for MemoryStorage {
         Ok(cursor)
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self, data)))]
     async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         let mut pieces = self.pieces.write().await;
         let piece = if !pieces.contains_key(&piece) {
@@ -69,6 +73,7 @@ impl Storage for MemoryStorage {
         Ok(data.len())
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash> {
         let pieces = self.pieces.read().await;
         let bytes = pieces.get(&piece).map(|e| &e[..]).unwrap_or(&[]);
@@ -77,6 +82,7 @@ impl Storage for MemoryStorage {
             .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash> {
         let pieces = self.pieces.read().await;
         let bytes = pieces.get(&piece).map(|e| &e[..]).unwrap_or(&[]);

@@ -1,13 +1,15 @@
 use crate::dht::{Error, NodeId, NodeMetrics, Result};
 use rand::{rng, Rng};
 use sha1::{Digest, Sha1};
+use std::fmt::Display;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 
 const TOKEN_SECRET_SIZE: usize = 20;
-const TOKEN_SIZE: usize = 4;
+const TOKEN_SIZE: usize = 8;
+const TOKEN_MAX_LEN: usize = 64;
 const QUESTIONABLE_NODE_AFTER: Duration = Duration::from_secs(15 * 60); // 15 mins.
 const BAD_NODE_AFTER_TIMEOUTS: usize = 5;
 const BAD_NODE_ERROR_RATE_THRESHOLD: usize = 2;
@@ -16,20 +18,46 @@ const TOKEN_SECRET_REFRESH: Duration = Duration::from_secs(60 * 5); // 5 mins.
 /// The opaque token secret value used within the hashing process.
 type TokenSecretValue = [u8; TOKEN_SECRET_SIZE];
 
-/// The announce token for a node.
+/// The unique identifier key of a node.
 #[derive(Debug, Copy, Clone, PartialEq)]
-pub struct NodeToken([u8; TOKEN_SIZE]);
+pub struct NodeKey {
+    /// The unique ID of the node
+    pub id: NodeId,
+    /// The address of the node within the DHT network
+    pub addr: SocketAddr,
+}
+
+/// The announce token for a node.
+/// This is derived from token secret.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeToken(Vec<u8>);
 
 impl NodeToken {
-    /// Copy the token bytes into a new buffer.
+    /// Returns the underlying byte slice of the token.
+    pub fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+
+    /// Returns an owned vector containing the bytes of the token.
     pub fn to_vec(&self) -> Vec<u8> {
         self.0.to_vec()
     }
 
+    /// Returns the length of the token in bytes.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns a [NodeToken] from the given byte slice.
     fn from<T: AsRef<[u8]>>(value: T) -> Self {
-        let mut token = [0u8; TOKEN_SIZE];
-        token.copy_from_slice(&value.as_ref()[0..TOKEN_SIZE]);
-        Self(token)
+        let len = value.as_ref().len().min(TOKEN_SIZE);
+        Self(value.as_ref()[0..len].to_vec())
+    }
+}
+
+impl Display for NodeToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", String::from_utf8_lossy(&self.0))
     }
 }
 
@@ -37,7 +65,9 @@ impl TryFrom<&[u8]> for NodeToken {
     type Error = Error;
 
     fn try_from(value: &[u8]) -> Result<Self> {
-        if value.len() != TOKEN_SIZE {
+        // as token should always be short binary strings,
+        // we limit the length to `TOKEN_MAX_LEN` bytes to prevent token abuse
+        if value.len() > TOKEN_MAX_LEN {
             return Err(Error::InvalidToken);
         }
 
@@ -61,8 +91,7 @@ impl Node {
     pub(crate) fn new_with_state(id: NodeId, addr: SocketAddr, state: NodeState) -> Self {
         Self {
             inner: Arc::new(InnerNode {
-                id,
-                addr,
+                key: NodeKey { id, addr },
                 token: RwLock::new(TokenSecret::new()),
                 announce_token: Mutex::new(None),
                 state: Mutex::new(state),
@@ -74,12 +103,17 @@ impl Node {
 
     /// Returns a reference to the id of this node.
     pub fn id(&self) -> &NodeId {
-        &self.inner.id
+        &self.inner.key.id
     }
 
     /// Returns a reference to the address of this node.
     pub fn addr(&self) -> &SocketAddr {
-        &self.inner.addr
+        &self.inner.key.addr
+    }
+
+    /// Returns a reference to the key of this node.
+    pub fn key(&self) -> &NodeKey {
+        &self.inner.key
     }
 
     /// Returns the metrics of this node.
@@ -109,7 +143,7 @@ impl Node {
             .token
             .read()
             .await
-            .generate(&self.inner.addr.ip())
+            .generate(&self.inner.key.addr.ip())
     }
 
     /// Rotate the token secret for this node, if needed.
@@ -120,6 +154,11 @@ impl Node {
         if token_secret.needs_rotation() {
             token_secret.rotate();
         }
+    }
+
+    /// Returns the opaque token for this node, if available.
+    pub(crate) async fn announce_token(&self) -> Option<NodeToken> {
+        self.inner.announce_token.lock().await.clone()
     }
 
     /// Update the opaque token for this node.
@@ -145,13 +184,13 @@ impl Node {
     /// Get the distance between this node and the target node.
     /// See [NodeId::distance] for more information.
     pub fn distance(&self, node: &Node) -> u8 {
-        self.inner.id.distance(&node.inner.id)
+        self.inner.key.id.distance(&node.inner.key.id)
     }
 
     /// Check if the [NodeId] is valid for its own ip address.
     /// See BEP42 for more info.
     pub fn is_secure(&self) -> bool {
-        self.inner.id.verify_id(&self.inner.addr.ip())
+        self.inner.key.id.verify_id(&self.inner.key.addr.ip())
     }
 }
 
@@ -163,10 +202,7 @@ impl PartialEq for Node {
 
 #[derive(Debug)]
 struct InnerNode {
-    /// The unique ID of the node
-    id: NodeId,
-    /// The address of the node within the DHT network
-    addr: SocketAddr,
+    key: NodeKey,
     /// The unique token of the node
     token: RwLock<TokenSecret>,
     /// The token to use for announcing a peer
@@ -213,7 +249,7 @@ impl InnerNode {
 
 impl PartialEq for InnerNode {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && self.addr == other.addr
+        self.key == other.key
     }
 }
 

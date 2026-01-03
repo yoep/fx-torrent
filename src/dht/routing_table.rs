@@ -1,4 +1,4 @@
-use crate::dht::{Node, NodeId, NodeState};
+use crate::dht::{Node, NodeId, NodeKey, NodeState};
 use crate::metrics::Metric;
 use itertools::Itertools;
 use std::cmp::Ordering;
@@ -65,6 +65,11 @@ impl RoutingTable {
     /// Returns the found node within the routing table, if found.
     pub fn find_node(&self, id: &NodeId) -> Option<&Node> {
         self.nodes().find(|node| node.id() == id)
+    }
+
+    /// Returns the found node within the routing table, if found.
+    pub fn find_node_by_key(&self, key: &NodeKey) -> Option<&Node> {
+        self.nodes().find(|node| node.key() == key)
     }
 
     /// Returns the closest nodes slice for the given node id.

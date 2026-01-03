@@ -34,26 +34,48 @@ mod tests {
     #[macro_export]
     macro_rules! create_node_server_pair {
         () => {{
-            use crate::create_node_server_pair;
-            use crate::dht::node_id::NodeId;
-
             create_node_server_pair!(NodeId::new(), NodeId::new())
         }};
         ($node_id1:expr, $node_id2:expr) => {{
             use crate::dht::DhtTracker;
+            use crate::dht::NodeId;
+
+            let node_id1: NodeId = $node_id1;
+            let node_id2: NodeId = $node_id2;
 
             let left_node = DhtTracker::builder()
-                .node_id($node_id1)
+                .node_id(node_id1)
                 .build()
                 .await
                 .unwrap();
             let right_node = DhtTracker::builder()
-                .node_id($node_id2)
+                .node_id(node_id2)
                 .build()
                 .await
                 .unwrap();
 
             (left_node, right_node)
+        }};
+    }
+
+    /// Create a new DHT tracker context.
+    #[macro_export]
+    macro_rules! create_tracker_context {
+        () => {{
+            create_tracker_context!(NodeId::new())
+        }};
+        ($node_id:expr) => {{
+            use crate::dht::DhtTracker;
+            use crate::dht::NodeId;
+            use crate::dht::TrackerContext;
+            use std::sync::Arc;
+
+            let id: NodeId = $node_id;
+
+            let socket = Arc::new(DhtTracker::bind_socket().await.unwrap());
+            let socket_addr = socket.local_addr().unwrap();
+
+            TrackerContext::new(id, socket, socket_addr)
         }};
     }
 }

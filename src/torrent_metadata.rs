@@ -559,7 +559,7 @@ impl TorrentMetadataInfoBuilder {
 ///
 /// ```
 /// use std::convert::TryInto;
-/// use crate::popcorn_fx_torrent::torrent::{TorrentMetadata, TorrentError, MagnetResult};
+/// use crate::fx_torrent::torrent::{TorrentMetadata, TorrentError, MagnetResult};
 ///
 /// fn parse_torrent_data(data: &[u8]) -> MagnetResult<TorrentMetadata> {
 ///     let torrent_info: TorrentMetadata = data.try_into()?;

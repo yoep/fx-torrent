@@ -6,6 +6,8 @@ use crate::{
 use async_trait::async_trait;
 use log::{debug, trace, warn};
 use std::sync::Arc;
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 #[derive(Debug)]
 pub struct TorrentCreatePiecesAndFilesOperation;
@@ -181,6 +183,7 @@ impl TorrentOperation for TorrentCreatePiecesAndFilesOperation {
         "create pieces operation"
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn execute(&self, torrent: &Arc<TorrentContext>) -> TorrentOperationResult {
         // check if the pieces have already been created
         // if so, continue the chain

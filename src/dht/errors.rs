@@ -1,3 +1,4 @@
+use crate::channel::ChannelError;
 use crate::dht::krpc::ErrorMessage;
 use std::{io, result};
 use thiserror::Error;
@@ -33,6 +34,12 @@ pub enum Error {
 impl From<ErrorMessage> for Error {
     fn from(value: ErrorMessage) -> Self {
         Self::Response(value.code(), value.description().to_string())
+    }
+}
+
+impl From<ChannelError> for Error {
+    fn from(_: ChannelError) -> Self {
+        Self::Io(io::Error::new(io::ErrorKind::Interrupted, "channel closed"))
     }
 }
 
