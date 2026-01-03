@@ -274,7 +274,8 @@ pub struct AnnouncePeerRequest {
     pub implied_port: bool,
     pub info_hash: InfoHash,
     pub port: u16,
-    pub token: String,
+    #[serde(with = "serde_bytes")]
+    pub token: Vec<u8>,
     /// The name of the torrent, if provided
     #[serde(default, rename = "n", skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -952,7 +953,7 @@ mod tests {
                         implied_port: true,
                         info_hash: InfoHash::from_str("mnopqrstuvwxyz123456").unwrap(),
                         port: 6881,
-                        token: "aoeusnth".to_string(),
+                        token: "aoeusnth".as_bytes().to_vec(),
                         name: None,
                         seed: None,
                     },

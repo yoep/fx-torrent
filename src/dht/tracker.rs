@@ -101,7 +101,7 @@ impl DhtTracker {
         let traversal =
             TraversalAlgorithm::new(DEFAULT_BUCKET_SIZE, routing_nodes, command_sender.clone());
 
-        // start the context in a separate thread
+        // start the context in a separate task
         tokio::spawn(async move {
             context.start(observer, traversal, command_receiver).await;
         });
@@ -356,6 +356,43 @@ impl DhtTracker {
             .send(|tx| TrackerCommand::AnnouncePeer {
                 info_hash: info_hash.clone(),
                 peer_addr: *peer_addr,
+                node: None,
+                response: tx,
+            })
+            .await
+            .await
+    }
+
+    /// Announce the given peer to a specific node within the network.
+    #[cfg_attr(feature = "tracing", instrument(err(level = Level::INFO)))]
+    pub async fn announce_peer_to(
+        &self,
+        info_hash: &InfoHash,
+        peer_addr: &SocketAddr,
+        node: &NodeKey,
+    ) -> Result<()> {
+        self.sender
+            .send(|tx| TrackerCommand::AnnouncePeer {
+                info_hash: info_hash.clone(),
+                peer_addr: *peer_addr,
+                node: Some(*node),
+                response: tx,
+            })
+            .await
+            .await
+    }
+
+    /// Returns the info hashes from given node.
+    #[cfg_attr(feature = "tracing", instrument(err(level = Level::INFO)))]
+    pub async fn scrape_info_hash_from(
+        &self,
+        target: &NodeId,
+        node: &NodeKey,
+    ) -> Result<Vec<InfoHash>> {
+        self.sender
+            .send(|tx| TrackerCommand::ScrapeInfoHashes {
+                target: *target,
+                node: *node,
                 response: tx,
             })
             .await
@@ -518,7 +555,14 @@ pub(crate) enum TrackerCommand {
     AnnouncePeer {
         info_hash: InfoHash,
         peer_addr: SocketAddr,
+        node: Option<NodeKey>,
         response: Reply<Result<()>>,
+    },
+    /// Scrape the info hashes from the given node.
+    ScrapeInfoHashes {
+        target: NodeId,
+        node: NodeKey,
+        response: Reply<Result<Vec<InfoHash>>>,
     },
     TotalNodes {
         response: Reply<usize>,
@@ -559,17 +603,20 @@ impl Debug for TrackerCommand {
                     target_id
                 )
             }
-            TrackerCommand::AnnouncePeer { info_hash, .. } => write!(
-                f,
-                "TrackerCommand::AnnouncePeer{{ info_hash: {:?} }}",
-                info_hash
-            ),
             TrackerCommand::GetPeers { info_hash, .. } => {
                 write!(
                     f,
                     "TrackerCommand::GetPeers{{ info_hash: {:?} }}",
                     info_hash
                 )
+            }
+            TrackerCommand::AnnouncePeer { info_hash, .. } => write!(
+                f,
+                "TrackerCommand::AnnouncePeer{{ info_hash: {:?} }}",
+                info_hash
+            ),
+            TrackerCommand::ScrapeInfoHashes { node, .. } => {
+                write!(f, "TrackerCommand::ScrapeInfoHashes{{ node: {:?} }}", node)
             }
             TrackerCommand::TotalNodes { .. } => write!(f, "TrackerCommand::TotalNodes"),
             TrackerCommand::GetNode { node, .. } => {
@@ -608,7 +655,7 @@ pub(crate) enum Event {
 
 /// The internal tracker context of the DHT node server.
 #[derive(Debug, Display)]
-#[display("DHT node server [{}]", socket_addr)]
+#[display("DHT node server [{}]", socket_addr.port())]
 pub(crate) struct TrackerContext {
     /// The current transaction ID of the node server
     transaction_id: u16,
@@ -643,7 +690,7 @@ impl TrackerContext {
         tokio::spawn(async move {
             let reader = NodeReader {
                 socket: reader_socket,
-                socket_addr,
+                addr_port: socket_addr.port(),
                 sender,
                 cancellation_token: reader_cancellation_token,
             };
@@ -786,7 +833,6 @@ impl TrackerContext {
             addr,
             message
         );
-        let id = &self.routing_table.id;
         let node_id = message.id().cloned();
         let transaction_id = message.transaction_id();
         let key = TransactionKey {
@@ -798,22 +844,22 @@ impl TrackerContext {
         match message.payload {
             MessagePayload::Query(query) => match query {
                 QueryMessage::Ping { .. } => {
-                    self.on_ping_request(id, transaction_id, &addr).await?;
+                    self.on_ping_request(transaction_id, &addr).await?;
                 }
                 QueryMessage::FindNode { request } => {
-                    self.on_find_node_request(id, transaction_id, &addr, request)
+                    self.on_find_node_request(transaction_id, &addr, request)
                         .await?;
                 }
                 QueryMessage::GetPeers { request } => {
-                    self.on_get_peers_request(id, transaction_id, &addr, request, &peers)
+                    self.on_get_peers_request(transaction_id, &addr, request, &peers)
                         .await?;
                 }
                 QueryMessage::AnnouncePeer { request } => {
-                    self.on_announce_peer_request(id, transaction_id, &addr, request, peers)
+                    self.on_announce_peer_request(transaction_id, &addr, request, peers)
                         .await?;
                 }
                 QueryMessage::SampleInfoHashes { request } => {
-                    self.on_sample_info_hashes_request(id, transaction_id, request, &addr, &peers)
+                    self.on_sample_info_hashes_request(transaction_id, request, &addr, &peers)
                         .await?;
                 }
             },
@@ -884,7 +930,6 @@ impl TrackerContext {
     ///
     /// # Arguments
     ///
-    /// * `id` - The node id of the server.
     /// * `transaction_id` - The transaction id of the query.
     /// * `addr`- The source address of the node.
     /// * `request` - The `announce_peer` query arguments.
@@ -892,7 +937,6 @@ impl TrackerContext {
     #[cfg_attr(feature = "tracing", instrument(skip(self, peers)))]
     async fn on_announce_peer_request(
         &self,
-        id: &NodeId,
         transaction_id: u16,
         addr: &SocketAddr,
         request: AnnouncePeerRequest,
@@ -910,7 +954,7 @@ impl TrackerContext {
                     .await;
             }
 
-            let is_valid = match NodeToken::try_from(request.token.as_bytes()) {
+            let is_valid = match NodeToken::try_from(request.token.as_slice()) {
                 Ok(token) => node.verify_token(&token, &addr.ip()).await,
                 Err(_) => false,
             };
@@ -925,11 +969,19 @@ impl TrackerContext {
             };
         }
 
+        trace!(
+            "{} adding peer address {} for info hash {}",
+            self,
+            addr,
+            request.info_hash
+        );
         peers.update_peer(request.info_hash, *addr, request.seed.unwrap_or(false));
         self.send_response(
             transaction_id,
             ResponseMessage::Announce {
-                response: AnnouncePeerResponse { id: *id },
+                response: AnnouncePeerResponse {
+                    id: self.routing_table.id,
+                },
             },
             &addr,
         )
@@ -979,7 +1031,6 @@ impl TrackerContext {
     ///
     /// # Arguments
     ///
-    /// * `id` - The node id of the server.
     /// * `transaction_id` - The transaction id of the query.
     /// * `addr`- The source address of the node.
     /// * `request` - The `sample_infohashes` query arguments.
@@ -987,23 +1038,23 @@ impl TrackerContext {
     #[cfg_attr(feature = "tracing", instrument(skip(self, peers)))]
     async fn on_sample_info_hashes_request(
         &self,
-        id: &NodeId,
         transaction_id: u16,
-        _request: SampleInfoHashesRequest,
+        request: SampleInfoHashesRequest,
         addr: &SocketAddr,
         peers: &PeerStorage,
     ) -> Result<()> {
         let num = peers.info_hashes().count();
         let samples = peers.info_hashes().take(20).cloned().collect::<Vec<_>>();
+        let (nodes, nodes6) = Self::closest_node_pairs(&self.routing_table, &request.target);
 
         self.send_response(
             transaction_id,
             ResponseMessage::SampleInfoHashes {
                 response: SampleInfoHashesResponse {
-                    id: *id,
+                    id: self.routing_table.id,
                     interval: 180,
-                    nodes: Default::default(),
-                    nodes6: Default::default(),
+                    nodes,
+                    nodes6,
                     num: num as u32,
                     samples,
                 },
@@ -1056,20 +1107,16 @@ impl TrackerContext {
     ///
     /// # Arguments
     ///
-    /// * `id` - The node id of the server.
     /// * `transaction_id` - The transaction id of the query.
     /// * `addr`- The source address of the node.
     #[cfg_attr(feature = "tracing", instrument(err(level = Level::INFO)))]
-    async fn on_ping_request(
-        &self,
-        id: &NodeId,
-        transaction_id: u16,
-        addr: &SocketAddr,
-    ) -> Result<()> {
+    async fn on_ping_request(&self, transaction_id: u16, addr: &SocketAddr) -> Result<()> {
         self.send_response(
             transaction_id,
             ResponseMessage::Ping {
-                response: PingMessage { id: *id },
+                response: PingMessage {
+                    id: self.routing_table.id,
+                },
             },
             &addr,
         )
@@ -1122,14 +1169,12 @@ impl TrackerContext {
     ///
     /// # Arguments
     ///
-    /// * `id` - The node id of the server.
     /// * `transaction_id` - The transaction id of the query.
     /// * `addr`- The source address of the node.
     /// * `request` - The `find_node` query arguments.
     #[cfg_attr(feature = "tracing", instrument)]
     async fn on_find_node_request(
         &self,
-        id: &NodeId,
         transaction_id: u16,
         addr: &SocketAddr,
         request: FindNodeRequest,
@@ -1142,7 +1187,7 @@ impl TrackerContext {
             transaction_id,
             ResponseMessage::FindNode {
                 response: FindNodeResponse {
-                    id: *id,
+                    id: self.routing_table.id,
                     nodes: compact_nodes.into(),
                     nodes6: compact_nodes6.into(),
                     token: None,
@@ -1217,7 +1262,6 @@ impl TrackerContext {
     ///
     /// # Arguments
     ///
-    /// * `id` - The node id of the server.
     /// * `transaction_id` - The transaction id of the query.
     /// * `addr`- The source address of the node.
     /// * `request` - The `get_peers` query arguments.
@@ -1225,17 +1269,13 @@ impl TrackerContext {
     #[cfg_attr(feature = "tracing", instrument(skip(self, peers)))]
     async fn on_get_peers_request(
         &self,
-        id: &NodeId,
         transaction_id: u16,
         addr: &SocketAddr,
         request: GetPeersRequest,
         peers: &PeerStorage,
     ) -> Result<()> {
         let token: NodeToken;
-        let nodes: CompactIPv4Nodes;
-        let nodes6: CompactIPv6Nodes;
-
-        match self.routing_table.find_node(&request.id) {
+        let (nodes, nodes6) = match self.routing_table.find_node(&request.id) {
             None => {
                 return self
                     .send_error(
@@ -1262,9 +1302,9 @@ impl TrackerContext {
                     };
 
                 token = node.generate_token().await;
-                (nodes, nodes6) = Self::closest_node_pairs(&self.routing_table, &info_hash_as_node);
+                Self::closest_node_pairs(&self.routing_table, &info_hash_as_node)
             }
-        }
+        };
 
         let values = Some(
             peers
@@ -1280,7 +1320,7 @@ impl TrackerContext {
             transaction_id,
             ResponseMessage::GetPeers {
                 response: GetPeersResponse {
-                    id: *id,
+                    id: self.routing_table.id,
                     token: token.to_vec(),
                     values,
                     nodes: nodes.into(),
@@ -1432,14 +1472,6 @@ impl TrackerContext {
                         .await
                 }
             },
-            TrackerCommand::AnnouncePeer {
-                info_hash,
-                peer_addr,
-                response,
-            } => {
-                self.announce_peer_to_network(info_hash, &peer_addr).await;
-                response.send(Ok(()));
-            }
             TrackerCommand::GetPeers {
                 node,
                 info_hash,
@@ -1447,6 +1479,32 @@ impl TrackerContext {
             } => match self.routing_table.find_node_by_key(&node).cloned() {
                 None => response.send(Err(Error::InvalidNodeId)),
                 Some(node) => self.get_peers(info_hash, &node, response).await,
+            },
+            TrackerCommand::AnnouncePeer {
+                info_hash,
+                peer_addr,
+                node,
+                response,
+            } => match node {
+                None => {
+                    self.announce_peer_to_network(info_hash, &peer_addr).await;
+                    response.send(Ok(()));
+                }
+                Some(node) => match self.routing_table.find_node_by_key(&node).cloned() {
+                    None => response.send(Err(Error::InvalidNodeId)),
+                    Some(node) => {
+                        self.announce_peer_to(info_hash, &peer_addr, &node, response)
+                            .await
+                    }
+                },
+            },
+            TrackerCommand::ScrapeInfoHashes {
+                target,
+                node,
+                response,
+            } => match self.routing_table.find_node_by_key(&node).cloned() {
+                None => response.send(Err(Error::InvalidNodeId)),
+                Some(node) => self.scrape_info_hashes(&target, &node, response).await,
             },
             TrackerCommand::TotalNodes { response } => response.send(self.routing_table.len()),
             TrackerCommand::GetNode { node, response } => {
@@ -1559,6 +1617,37 @@ impl TrackerContext {
         .await
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self, node, response)))]
+    async fn announce_peer_to(
+        &mut self,
+        info_hash: InfoHash,
+        peer_addr: &SocketAddr,
+        node: &Node,
+        response: Reply<Result<()>>,
+    ) {
+        if let Some(token) = node.announce_token().await {
+            self.send_query(
+                QueryMessage::AnnouncePeer {
+                    request: AnnouncePeerRequest {
+                        id: self.routing_table.id,
+                        implied_port: false,
+                        info_hash: info_hash.clone(),
+                        port: peer_addr.port(),
+                        token: token.to_vec(),
+                        name: None,
+                        seed: None,
+                    },
+                },
+                node.addr(),
+                Some(PendingRequestType::AnnouncePeer(response.take())),
+                || node.failed(),
+            )
+            .await
+        } else {
+            response.send(Err(Error::InvalidToken));
+        }
+    }
+
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     async fn announce_peer_to_network(&mut self, info_hash: InfoHash, peer_addr: &SocketAddr) {
         for node in self.routing_table.nodes().cloned().collect::<Vec<_>>() {
@@ -1570,7 +1659,7 @@ impl TrackerContext {
                             implied_port: false,
                             info_hash: info_hash.clone(),
                             port: peer_addr.port(),
-                            token: token.to_string(),
+                            token: token.to_vec(),
                             name: None,
                             seed: None,
                         },
@@ -1582,6 +1671,27 @@ impl TrackerContext {
                 .await
             }
         }
+    }
+
+    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
+    async fn scrape_info_hashes(
+        &mut self,
+        target: &NodeId,
+        node: &Node,
+        response: Reply<Result<Vec<InfoHash>>>,
+    ) {
+        self.send_query(
+            QueryMessage::SampleInfoHashes {
+                request: SampleInfoHashesRequest {
+                    id: self.routing_table.id,
+                    target: *target,
+                },
+            },
+            node.addr(),
+            Some(PendingRequestType::ScrapeInfoHashes(response.take())),
+            || node.failed(),
+        )
+        .await
     }
 
     #[cfg_attr(feature = "tracing", instrument)]
@@ -1945,6 +2055,8 @@ impl TrackerContext {
         })
     }
 
+    /// Returns the nodes closest to the given target node id.
+    /// It creates a pair of compact IPv4 and IPv6 nodes based on the nodes within the bucket closest to the target.
     fn closest_node_pairs(
         routing_table: &RoutingTable,
         target: &NodeId,
@@ -1993,10 +2105,10 @@ pub(crate) enum ReaderMessage {
 }
 
 #[derive(Debug, Display)]
-#[display("DHT node reader [{}]", socket_addr)]
+#[display("DHT node reader [{}]", addr_port)]
 struct NodeReader {
     socket: Arc<UdpSocket>,
-    socket_addr: SocketAddr,
+    addr_port: u16,
     sender: UnboundedSender<ReaderMessage>,
     cancellation_token: CancellationToken,
 }
@@ -2290,6 +2402,112 @@ mod tests {
         }
     }
 
+    mod announce_peer {
+        use super::*;
+        use std::str::FromStr;
+
+        #[tokio::test]
+        async fn test_announce_peer() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let (source, target) = create_node_server_pair!();
+            let source_id = source.id().await.unwrap();
+            let target_id = target.id().await.unwrap();
+            let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
+            let peer_addr = (Ipv4Addr::LOCALHOST, 8080).into();
+
+            // request peers from the target node
+            // this will set the initial announce token in the source tracker for the target node
+            let target_key = source.ping(target_addr).await.unwrap();
+            let result = source.get_peers_from(&info_hash, &target_key).await;
+            assert!(
+                result.is_ok(),
+                "expected the peers to have been queried, but got {:?}",
+                result
+            );
+
+            // verify that an announce token has been written to the source node for the target
+            let node = source
+                .node_by_id(&target_id)
+                .await
+                .expect("expected the source node to exist within the target");
+            assert!(
+                node.announce_token().await.is_some(),
+                "expected the target node {} to have an announce token",
+                node.id()
+            );
+
+            // announce the torrent peer to the target node
+            let result = source.announce_peer(&info_hash, &peer_addr).await;
+            verify_announce_peer(&info_hash, &source, &source_id, &target_key, result).await;
+        }
+
+        #[tokio::test]
+        async fn test_announce_peer_to() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let (source, target) = create_node_server_pair!();
+            let source_id = source.id().await.unwrap();
+            let target_id = target.id().await.unwrap();
+            let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
+            let peer_addr = (Ipv4Addr::LOCALHOST, 8080).into();
+
+            // request peers from the target node
+            // this will set the initial announce token in the source tracker for the target node
+            let target_key = source.ping(target_addr).await.unwrap();
+            let result = source.get_peers_from(&info_hash, &target_key).await;
+            assert!(
+                result.is_ok(),
+                "expected the peers to have been queried, but got {:?}",
+                result
+            );
+
+            // verify that an announce token has been written to the source node for the target
+            let node = source
+                .node_by_id(&target_id)
+                .await
+                .expect("expected the source node to exist within the target");
+            assert!(
+                node.announce_token().await.is_some(),
+                "expected the target node {} to have an announce token",
+                node.id()
+            );
+
+            // announce the torrent peer to the target node
+            let result = source
+                .announce_peer_to(&info_hash, &peer_addr, &target_key)
+                .await;
+            verify_announce_peer(&info_hash, &source, &source_id, &target_key, result).await;
+        }
+
+        async fn verify_announce_peer(
+            info_hash: &InfoHash,
+            source: &DhtTracker,
+            source_id: &NodeId,
+            target_key: &NodeKey,
+            result: Result<()>,
+        ) {
+            assert!(
+                result.is_ok(),
+                "expected the announce to have been successful, but got {:?}",
+                result
+            );
+
+            // retrieve the announced peer from the target
+            let info_hashes = source
+                .scrape_info_hash_from(&source_id, &target_key)
+                .await
+                .unwrap();
+            assert_eq!(
+                Some(info_hash),
+                info_hashes.first(),
+                "expected the info hash to be present"
+            );
+        }
+    }
+
     mod bootstrap {
         use super::*;
 
@@ -2324,7 +2542,6 @@ mod tests {
             let nodes = futures::future::join_all(futures).await;
 
             for node in &nodes {
-                let node_id = node.id().await;
                 let addr = (Ipv4Addr::LOCALHOST, node.port()).into();
                 let result = bootstrap_node.add_node(&addr).await;
                 assert_eq!(result, Ok(()), "expected the node to be added successfully");

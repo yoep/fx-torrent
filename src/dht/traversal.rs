@@ -213,7 +213,7 @@ mod tests {
         let target_id = target.routing_table.id;
         let target_addr: SocketAddr = (Ipv4Addr::LOCALHOST, target.socket_addr.port()).into();
         let (tx, mut rx) = oneshot::channel();
-        let (sender, receiver) = channel!(2);
+        let (sender, _receiver) = channel!(2);
         let mut traversal = TraversalAlgorithm::new(8, vec![target_addr.clone()], sender.clone());
 
         // subscribe to the source node events
