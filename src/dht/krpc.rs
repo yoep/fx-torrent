@@ -401,7 +401,7 @@ impl ResponsePayload {
                 // extract "r" from the raw value as we're trying to parse a specific message
                 if let value::Value::Dict(e) = value {
                     match e.get("r".as_bytes()) {
-                        Some(v) => serde_bencode::to_bytes(v)?, // this is overhead, but I've no other idea on how to use the Value
+                        Some(v) => serde_bencode::to_bytes(v)?, // FIXME: this is overhead, but I've no other idea on how to use the Value
                         _ => {
                             return Err(Error::InvalidMessage(
                                 "expected the raw value to container 'r'".to_string(),
@@ -437,10 +437,14 @@ impl ResponsePayload {
                 response: serde_bencode::from_bytes(bytes.as_slice())
                     .map_err(|e| Self::parse_error(query_name, e))?,
             }),
-            MESSAGE_SAMPLE_INFO_HASHES => Ok(ResponseMessage::SampleInfoHashes {
-                response: serde_bencode::from_bytes(bytes.as_slice())
-                    .map_err(|e| Self::parse_error(query_name, e))?,
-            }),
+            MESSAGE_SAMPLE_INFO_HASHES => match serde_bencode::from_bytes(bytes.as_slice()) {
+                Ok(e) => Ok(ResponseMessage::SampleInfoHashes { response: e }),
+                Err(_) => {
+                    // not all nodes support this query and will handle it as a `find_node`
+                    // so we'll retry again for `find_node`
+                    Self::try_parse(MESSAGE_FIND_NODE, bytes)
+                }
+            },
             _ => Err(Error::InvalidMessage(format!(
                 "unable to parse response payload, unknown query \"{}\"",
                 query_name

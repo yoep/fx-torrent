@@ -48,6 +48,7 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(60 * 15);
 const BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 5);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
+const INDEX_INFO_HASHES_INTERVAL: Duration = Duration::from_secs(30);
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_BUCKET_SIZE: usize = 8;
 
@@ -207,6 +208,15 @@ impl DhtTracker {
         }
     }
 
+    /// Returns the info hashes known within the DHT network.
+    pub async fn info_hashes(&self) -> Vec<InfoHash> {
+        let response = self
+            .sender
+            .send(|tx| TrackerCommand::GetInfoHashes { response: tx })
+            .await;
+        response.await.unwrap_or_default()
+    }
+
     /// Try to ping the given node address.
     /// This function waits for a response from the node, so it might be recommended to wrap this fn call in a timeout.
     ///
@@ -295,7 +305,7 @@ impl DhtTracker {
     }
 
     /// Returns the peer addresses for the given torrent info hash from a specific node within the network.
-    #[cfg_attr(feature = "tracing", instrument(err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
     pub async fn get_peers_from(
         &self,
         info_hash: &InfoHash,
@@ -314,7 +324,7 @@ impl DhtTracker {
     /// Returns the peer addresses for the given torrent info hash within the network.
     /// This function waits for a response from one oe more nodes within the routing table.
     /// Each queried node is limited to the given timeout.
-    #[cfg_attr(feature = "tracing", instrument(err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
     pub async fn get_peers(
         &self,
         info_hash: &InfoHash,
@@ -350,7 +360,7 @@ impl DhtTracker {
     }
 
     /// Announce the given peer to the DHT network.
-    #[cfg_attr(feature = "tracing", instrument(err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
     pub async fn announce_peer(&self, info_hash: &InfoHash, peer_addr: &SocketAddr) -> Result<()> {
         self.sender
             .send(|tx| TrackerCommand::AnnouncePeer {
@@ -364,7 +374,7 @@ impl DhtTracker {
     }
 
     /// Announce the given peer to a specific node within the network.
-    #[cfg_attr(feature = "tracing", instrument(err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
     pub async fn announce_peer_to(
         &self,
         info_hash: &InfoHash,
@@ -382,9 +392,9 @@ impl DhtTracker {
             .await
     }
 
-    /// Returns the info hashes from given node.
-    #[cfg_attr(feature = "tracing", instrument(err(level = Level::INFO)))]
-    pub async fn scrape_info_hash_from(
+    /// Returns a sample of available info hashes from the given node.
+    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
+    pub async fn scrape_info_hashes_from(
         &self,
         target: &NodeId,
         node: &NodeKey,
@@ -397,6 +407,43 @@ impl DhtTracker {
             })
             .await
             .await
+    }
+
+    /// Returns the available info hashes from the DHT network.
+    /// Each queried node is limited to the given timeout.
+    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
+    pub async fn scrape_info_hashes(
+        &self,
+        target: &NodeId,
+        timeout: Duration,
+    ) -> Result<Vec<InfoHash>> {
+        let nodes = self
+            .sender
+            .send(|tx| TrackerCommand::GoodSearchNodes { response: tx })
+            .await
+            .await?;
+
+        let futures = nodes.iter().map(|node| async {
+            let response = self
+                .sender
+                .send(|tx| TrackerCommand::ScrapeInfoHashes {
+                    target: *target,
+                    node: *node,
+                    response: tx,
+                })
+                .await;
+
+            select! {
+                _ = time::sleep(timeout) => Err(Error::Timeout),
+                result = response => result,
+            }
+        });
+
+        Ok(futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .flat_map(|result| result.ok())
+            .concat())
     }
 
     /// Close the DHT node server.
@@ -581,6 +628,10 @@ pub(crate) enum TrackerCommand {
     GetNodes {
         response: Reply<Vec<Node>>,
     },
+    /// Returns the info hashes known to the DHT network.
+    GetInfoHashes {
+        response: Reply<Vec<InfoHash>>,
+    },
     /// Returns the node keys of "good" nodes which can be used in search queries.
     GoodSearchNodes {
         response: Reply<Vec<NodeKey>>,
@@ -626,6 +677,7 @@ impl Debug for TrackerCommand {
                 write!(f, "TrackerCommand::GetNodeById{{ id: {:?} }}", id)
             }
             TrackerCommand::GetNodes { .. } => write!(f, "TrackerCommand::GetNodes"),
+            TrackerCommand::GetInfoHashes { .. } => write!(f, "TrackerCommand::GetInfoHashes"),
             TrackerCommand::GoodSearchNodes { .. } => write!(f, "TrackerCommand::GoodSearchNodes"),
             TrackerCommand::AddTraversalNode { .. } => {
                 write!(f, "TrackerCommand::AddTraversalNode")
@@ -649,6 +701,8 @@ pub(crate) enum Event {
     RefreshTick,
     #[display("BootstrapTick")]
     BootstrapTick,
+    #[display("IndexInfoHashesTick")]
+    IndexInfoHashesTick,
     #[display("StatsTick")]
     StatsTick,
 }
@@ -724,6 +778,7 @@ impl TrackerContext {
         let mut bootstrap_interval = interval(BOOTSTRAP_INTERVAL);
         let mut refresh_interval = interval(REFRESH_INTERVAL);
         let mut cleanup_interval = interval(CLEANUP_INTERVAL);
+        let mut index_info_hashes_interval = interval(INDEX_INFO_HASHES_INTERVAL);
         let mut stats_interval = interval(STATS_INTERVAL);
 
         debug!("{} started", self);
@@ -743,6 +798,7 @@ impl TrackerContext {
                 _ = cleanup_interval.tick() => event = Event::CleanupTick,
                 _ = refresh_interval.tick() => event = Event::RefreshTick,
                 _ = bootstrap_interval.tick() => event = Event::BootstrapTick,
+                _ = index_info_hashes_interval.tick() => event = Event::IndexInfoHashesTick,
                 _ = stats_interval.tick() => event = Event::StatsTick,
             }
 
@@ -766,10 +822,11 @@ impl TrackerContext {
                 self.on_message_received(message, observer, traversal, peers)
                     .await
             }
-            Event::Command(command) => self.handle_command(command, traversal).await,
+            Event::Command(command) => self.handle_command(command, traversal, peers).await,
             Event::CleanupTick => self.cleanup_pending_requests().await,
             Event::RefreshTick => self.refresh_routing_table().await,
             Event::BootstrapTick => self.bootstrap(traversal).await,
+            Event::IndexInfoHashesTick => self.index_info_hashes().await,
             Event::StatsTick => self.stats_tick().await,
         }
     }
@@ -903,6 +960,8 @@ impl TrackerContext {
                                 &addr,
                                 pending_request,
                                 response,
+                                traversal,
+                                peers,
                             )
                             .await;
                         }
@@ -1052,7 +1111,7 @@ impl TrackerContext {
             ResponseMessage::SampleInfoHashes {
                 response: SampleInfoHashesResponse {
                     id: self.routing_table.id,
-                    interval: 180,
+                    interval: 360,
                     nodes,
                     nodes6,
                     num: num as u32,
@@ -1080,11 +1139,31 @@ impl TrackerContext {
         addr: &SocketAddr,
         pending_request: PendingRequest,
         response: SampleInfoHashesResponse,
+        traversal: &mut TraversalAlgorithm,
+        peers: &mut PeerStorage,
     ) {
         if !response.id.verify_id(&addr.ip()) {
             debug!("{} detected spoofed sample_infohashes from {}", self, key);
             Self::resolve_as_err(pending_request.request_type, Error::InvalidNodeId);
             return;
+        }
+
+        // update the refresh interval for the node
+        // this will allow us to index info hashes from this node in the future
+        if let Some(node) = self.routing_table.find_node(&response.id) {
+            node.update_indexing_interval(Duration::from_secs(response.interval as u64))
+                .await;
+        }
+
+        // add the announced nodes to the traversal algorithm
+        let nodes = Self::collect_nodes(&response.nodes, &response.nodes6);
+        for node in nodes {
+            traversal.add_node(Some(node.id), node.addr);
+        }
+
+        // add the info hashes to the peer storage
+        for info_hash in &response.samples {
+            peers.register(info_hash);
         }
 
         match pending_request.request_type {
@@ -1358,21 +1437,9 @@ impl TrackerContext {
             return;
         }
 
-        let nodes = response
-            .nodes
-            .as_slice()
-            .into_iter()
-            .map(|e| Node::new(e.id, e.addr.clone().into()))
-            .chain(
-                response
-                    .nodes6
-                    .as_slice()
-                    .into_iter()
-                    .map(|e| Node::new(e.id, e.addr.clone().into())),
-            )
-            .collect::<Vec<_>>();
+        let nodes = Self::collect_nodes(&response.nodes, &response.nodes6);
         for node in nodes {
-            traversal.add_node(Some(*node.id()), *node.addr());
+            traversal.add_node(Some(node.id), node.addr);
         }
 
         let peers: Vec<SocketAddr> = if let Some(values) = response.values {
@@ -1452,6 +1519,7 @@ impl TrackerContext {
         &mut self,
         command: TrackerCommand,
         traversal: &mut TraversalAlgorithm,
+        peers: &mut PeerStorage,
     ) {
         match command {
             TrackerCommand::Id { response } => {
@@ -1504,7 +1572,10 @@ impl TrackerContext {
                 response,
             } => match self.routing_table.find_node_by_key(&node).cloned() {
                 None => response.send(Err(Error::InvalidNodeId)),
-                Some(node) => self.scrape_info_hashes(&target, &node, response).await,
+                Some(node) => {
+                    self.scrape_info_hashes(&target, &node, Some(response.take()))
+                        .await
+                }
             },
             TrackerCommand::TotalNodes { response } => response.send(self.routing_table.len()),
             TrackerCommand::GetNode { node, response } => {
@@ -1518,6 +1589,9 @@ impl TrackerContext {
             }
             TrackerCommand::GetNodes { response } => {
                 response.send(self.routing_table.nodes().cloned().collect::<Vec<_>>());
+            }
+            TrackerCommand::GetInfoHashes { response } => {
+                response.send(peers.info_hashes().cloned().collect());
             }
             TrackerCommand::GoodSearchNodes { response } => {
                 response.send(
@@ -1678,7 +1752,7 @@ impl TrackerContext {
         &mut self,
         target: &NodeId,
         node: &Node,
-        response: Reply<Result<Vec<InfoHash>>>,
+        response: Option<oneshot::Sender<Result<Vec<InfoHash>>>>,
     ) {
         self.send_query(
             QueryMessage::SampleInfoHashes {
@@ -1688,10 +1762,34 @@ impl TrackerContext {
                 },
             },
             node.addr(),
-            Some(PendingRequestType::ScrapeInfoHashes(response.take())),
+            response.map(PendingRequestType::ScrapeInfoHashes),
             || node.failed(),
         )
         .await
+    }
+
+    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
+    async fn index_info_hashes(&mut self) {
+        let node_id = self.routing_table.id;
+        let search_nodes = Self::find_good_search_nodes(&self.routing_table)
+            .await
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for node in &search_nodes {
+            // check if an index interval is known for the node
+            // if so, and we have a last index timestamp, check that we're allowed to index the node again
+            match (node.last_indexed().await, node.indexing_interval().await) {
+                (Some(last_indexed), Some(interval)) => {
+                    if Instant::now().duration_since(last_indexed) < interval {
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+
+            self.scrape_info_hashes(&node_id, node, None).await;
+        }
     }
 
     #[cfg_attr(feature = "tracing", instrument)]
@@ -2087,6 +2185,22 @@ impl TrackerContext {
             }
         }
         (compact_nodes.into(), compact_nodes6.into())
+    }
+
+    /// Collect the IPv4 and IPv6 nodes from the compact nodes.
+    fn collect_nodes(nodes: &CompactIPv4Nodes, nodes6: &CompactIPv6Nodes) -> Vec<NodeKey> {
+        nodes
+            .as_slice()
+            .into_iter()
+            .map(|e| NodeKey {
+                id: e.id,
+                addr: SocketAddr::from(&e.addr),
+            })
+            .chain(nodes6.as_slice().into_iter().map(|e| NodeKey {
+                id: e.id,
+                addr: SocketAddr::from(&e.addr),
+            }))
+            .collect()
     }
 }
 
@@ -2497,7 +2611,7 @@ mod tests {
 
             // retrieve the announced peer from the target
             let info_hashes = source
-                .scrape_info_hash_from(&source_id, &target_key)
+                .scrape_info_hashes_from(&source_id, &target_key)
                 .await
                 .unwrap();
             assert_eq!(
@@ -2505,6 +2619,73 @@ mod tests {
                 info_hashes.first(),
                 "expected the info hash to be present"
             );
+        }
+    }
+
+    mod scrape_info_hashes {
+        use super::*;
+        use crate::create_tracker_context;
+        use std::str::FromStr;
+
+        #[tokio::test]
+        async fn test_index_interval() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let mut source = create_tracker_context!();
+            let (sender, _receiver) = channel!(2);
+            let mut traversal = TraversalAlgorithm::new(8, vec![], sender.clone());
+            let mut observer = Observer::new(sender.clone());
+            let mut storage = PeerStorage::new();
+            let (announcer, target) = create_node_server_pair!();
+            let target_id = target.id().await.unwrap();
+            let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
+            let peer_addr = (Ipv4Addr::LOCALHOST, 8080).into();
+
+            // announce the peer addr to the target node through the announcer
+            let target_key = announcer.ping(target_addr).await.unwrap();
+            let _ = announcer
+                .get_peers_from(&info_hash, &target_key)
+                .await
+                .unwrap();
+            let _ = announcer
+                .announce_peer(&info_hash, &peer_addr)
+                .await
+                .unwrap();
+
+            // add the target to the source node
+            source
+                .update_node(target_id, target_addr, &mut traversal)
+                .await;
+
+            // run the indexer
+            source
+                .run(
+                    Event::IndexInfoHashesTick,
+                    &mut observer,
+                    &mut traversal,
+                    &mut storage,
+                )
+                .await;
+
+            let timeout = time::sleep(Duration::from_millis(750));
+            tokio::pin!(timeout);
+            let result = loop {
+                select! {
+                    _ = &mut timeout => assert!(false, "timed out waiting for the info hash to be indexed"),
+                    Some(message) = source.receiver.recv() => {
+                        source.run(Event::Incoming(message), &mut observer, &mut traversal, &mut storage).await;
+                        if storage.info_hashes().count() > 0 {
+                            break storage.info_hashes().cloned().collect::<Vec<_>>();
+                        }
+                    },
+                }
+            };
+            assert!(
+                result.contains(&info_hash),
+                "expected the info hash to be present in the storage: {:?}",
+                result
+            )
         }
     }
 

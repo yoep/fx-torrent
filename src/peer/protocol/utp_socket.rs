@@ -574,7 +574,7 @@ impl UtpSocketContext {
 
 /// The unique identifier of an uTP socket.
 #[derive(Debug, Display, Copy, Clone)]
-#[display("{}:{}", handle, "addr.port()")]
+#[display("{}:{}", handle, addr.port())]
 pub struct UtpSocketId {
     /// The unique socket handle
     handle: UtpHandle,
