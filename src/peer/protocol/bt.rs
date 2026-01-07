@@ -342,7 +342,6 @@ impl TryFrom<&[u8]> for Message {
 
         // try to read the message type which is the first single byte in the message
         let msg_type_id = cursor.read_u8()?;
-        trace!("Trying to parse message type id {}", msg_type_id);
         let msg_type = MessageType::try_from(msg_type_id)?;
 
         trace!(

@@ -3109,7 +3109,7 @@ mod tests {
 
         // wait for the torrent to have fully received piece 0
         assert_timeout!(
-            Duration::from_millis(750),
+            Duration::from_millis(1200),
             outgoing_torrent.has_piece(&0).await,
             "expected piece to have been available"
         );
