@@ -1,30 +1,21 @@
-use crate::peer::PeerId;
 use crate::tracker::{
     AnnounceEntryResponse, AnnounceEvent, Announcement, ConnectionMetrics, Result, ScrapeResult,
-    ServerRequest, TrackerClientConnection, TrackerError, TrackerHandle, TrackerListener,
+    TrackerClientConnection, TrackerError, TrackerHandle,
 };
-use crate::{CompactIpv4Addr, CompactIpv4Addrs, InfoHash};
+use crate::{CompactIpv4Addrs, InfoHash};
 use async_trait::async_trait;
-use axum::extract::{ConnectInfo, RawQuery, State};
-use axum::http::StatusCode;
-use axum::routing::get;
-use axum::Router;
 use derive_more::Display;
 use itertools::Itertools;
-use log::{debug, error, trace, warn};
+use log::{debug, trace};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Error, Response};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
-use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+#[cfg(feature = "tracker-server")]
+pub use server::*;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio::sync::{oneshot, Mutex, Notify};
-use tokio::{select, time};
+use tokio::select;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -250,74 +241,111 @@ impl TrackerClientConnection for HttpClient {
     }
 }
 
-#[derive(Debug)]
-pub struct HttpServer {
-    inner: Arc<InnerServer>,
-}
+#[cfg(feature = "tracker-server")]
+mod server {
+    use super::*;
 
-impl HttpServer {
-    pub async fn with_port(port: u16) -> Result<Self> {
-        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
-        let addr = listener.local_addr()?;
-        let inner = Arc::new(InnerServer {
-            handle: Default::default(),
-            addr,
-            queue: Default::default(),
-            waker: Default::default(),
-            timeout: Duration::from_secs(15),
-            metrics: Default::default(),
-            cancellation_token: Default::default(),
-        });
+    use crate::peer::PeerId;
+    use crate::tracker::{ServerRequest, TrackerListener};
+    use crate::CompactIpv4Addr;
+    use axum::extract::{ConnectInfo, RawQuery, State};
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use axum::Router;
+    use log::{error, warn};
+    use std::collections::VecDeque;
+    use std::io;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+    use tokio::sync::{oneshot, Mutex, Notify};
+    use tokio::time;
 
-        let state = inner.clone();
-        tokio::spawn(async move {
-            let router = Router::new()
-                .route("/announce", get(Self::do_announce))
-                .route("/scrape", get(Self::do_scrape))
-                .with_state(state.clone());
-
-            if let Err(e) = axum::serve(
-                listener,
-                router.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(state.cancellation_token.clone().cancelled_owned())
-            .await
-            {
-                error!("Http tracker {} failed to start, {}", state, e)
-            }
-        });
-
-        Ok(Self { inner })
+    #[derive(Debug)]
+    pub struct HttpServer {
+        inner: Arc<InnerServer>,
     }
 
-    async fn do_announce(
-        State(state): State<Arc<InnerServer>>,
-        ConnectInfo(addr): ConnectInfo<SocketAddr>,
-        query: RawQuery,
-    ) -> (StatusCode, Vec<u8>) {
-        let status_code: StatusCode;
-        let response: HttpResponse;
+    impl HttpServer {
+        pub async fn with_port(port: u16) -> Result<Self> {
+            let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
+            let addr = listener.local_addr()?;
+            let inner = Arc::new(InnerServer {
+                handle: Default::default(),
+                addr,
+                queue: Default::default(),
+                waker: Default::default(),
+                timeout: Duration::from_secs(15),
+                metrics: Default::default(),
+                cancellation_token: Default::default(),
+            });
 
-        if let Some(query) = query.0 {
-            match AnnounceParams::from_str(query.as_str()) {
-                Ok(params) => match state.announce(addr, params).await {
-                    Ok(e) => {
-                        status_code = StatusCode::OK;
-                        response = HttpResponse {
-                            failure_reason: None,
-                            tracker_id: None,
-                            interval: Some(e.interval_seconds as u32),
-                            complete: Some(e.seeders),
-                            incomplete: Some(e.leechers),
-                            peers: e
-                                .peers
-                                .into_iter()
-                                .filter_map(|e| CompactIpv4Addr::try_from(e).ok())
-                                .collect::<Vec<_>>()
-                                .into(),
-                        };
-                    }
+            let state = inner.clone();
+            tokio::spawn(async move {
+                let cancellation_token = state.cancellation_token.clone();
+                let router = Router::new()
+                    .route("/announce", get(Self::do_announce))
+                    .route("/scrape", get(Self::do_scrape))
+                    .with_state(state);
+
+                if let Err(e) = axum::serve(
+                    listener,
+                    router.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .with_graceful_shutdown(cancellation_token.cancelled_owned())
+                .await
+                {
+                    error!("Http server tracker failed to start, {}", e)
+                }
+            });
+
+            Ok(Self { inner })
+        }
+
+        async fn do_announce(
+            State(state): State<Arc<InnerServer>>,
+            ConnectInfo(addr): ConnectInfo<SocketAddr>,
+            query: RawQuery,
+        ) -> (StatusCode, Vec<u8>) {
+            let status_code: StatusCode;
+            let response: HttpResponse;
+
+            if let Some(query) = query.0 {
+                match AnnounceParams::from_str(query.as_str()) {
+                    Ok(params) => match state.announce(addr, params).await {
+                        Ok(e) => {
+                            status_code = StatusCode::OK;
+                            response = HttpResponse {
+                                failure_reason: None,
+                                tracker_id: None,
+                                interval: Some(e.interval_seconds as u32),
+                                complete: Some(e.seeders),
+                                incomplete: Some(e.leechers),
+                                peers: e
+                                    .peers
+                                    .into_iter()
+                                    .filter_map(|e| CompactIpv4Addr::try_from(e).ok())
+                                    .collect::<Vec<_>>()
+                                    .into(),
+                            };
+                        }
+                        Err(e) => {
+                            status_code = StatusCode::BAD_REQUEST;
+                            response = HttpResponse {
+                                failure_reason: Some(e.to_string()),
+                                interval: None,
+                                tracker_id: None,
+                                complete: None,
+                                incomplete: None,
+                                peers: Vec::with_capacity(0).into(),
+                            }
+                        }
+                    },
                     Err(e) => {
+                        debug!(
+                            "Http tracker {} failed to parse announce request, {}",
+                            state, e
+                        );
                         status_code = StatusCode::BAD_REQUEST;
                         response = HttpResponse {
                             failure_reason: Some(e.to_string()),
@@ -328,194 +356,179 @@ impl HttpServer {
                             peers: Vec::with_capacity(0).into(),
                         }
                     }
-                },
-                Err(e) => {
-                    debug!(
-                        "Http tracker {} failed to parse announce request, {}",
-                        state, e
-                    );
-                    status_code = StatusCode::BAD_REQUEST;
-                    response = HttpResponse {
-                        failure_reason: Some(e.to_string()),
-                        interval: None,
-                        tracker_id: None,
-                        complete: None,
-                        incomplete: None,
-                        peers: Vec::with_capacity(0).into(),
-                    }
+                }
+            } else {
+                status_code = StatusCode::BAD_REQUEST;
+                response = HttpResponse {
+                    failure_reason: Some("missing announcement information".to_string()),
+                    interval: None,
+                    tracker_id: None,
+                    complete: None,
+                    incomplete: None,
+                    peers: Vec::with_capacity(0).into(),
                 }
             }
-        } else {
-            status_code = StatusCode::BAD_REQUEST;
-            response = HttpResponse {
-                failure_reason: Some("missing announcement information".to_string()),
-                interval: None,
-                tracker_id: None,
-                complete: None,
-                incomplete: None,
-                peers: Vec::with_capacity(0).into(),
+
+            match serde_bencode::to_bytes(&response) {
+                Ok(bytes) => (status_code, bytes),
+                Err(e) => {
+                    error!("Http tracker {} failed to serialize response, {}", state, e);
+                    (StatusCode::INTERNAL_SERVER_ERROR, Vec::with_capacity(0))
+                }
             }
         }
 
-        match serde_bencode::to_bytes(&response) {
-            Ok(bytes) => (status_code, bytes),
-            Err(e) => {
-                error!("Http tracker {} failed to serialize response, {}", state, e);
-                (StatusCode::INTERNAL_SERVER_ERROR, Vec::with_capacity(0))
-            }
-        }
-    }
+        async fn do_scrape(
+            State(state): State<Arc<InnerServer>>,
+            query: RawQuery,
+        ) -> (StatusCode, Vec<u8>) {
+            let status_code: StatusCode;
+            let response: ScrapeResult;
 
-    async fn do_scrape(
-        State(state): State<Arc<InnerServer>>,
-        query: RawQuery,
-    ) -> (StatusCode, Vec<u8>) {
-        let status_code: StatusCode;
-        let response: ScrapeResult;
+            if let Some(query) = query.0 {
+                let mut info_hashes = vec![];
+                for keypair in query.split("&") {
+                    let mut key_value = keypair.splitn(2, "=");
+                    let key = key_value.next().unwrap_or_default();
+                    let value = key_value.next().unwrap_or_default();
 
-        if let Some(query) = query.0 {
-            let mut info_hashes = vec![];
-            for keypair in query.split("&") {
-                let mut key_value = keypair.splitn(2, "=");
-                let key = key_value.next().unwrap_or_default();
-                let value = key_value.next().unwrap_or_default();
-
-                if key.to_lowercase().trim() == "info_hash" {
-                    let bytes =
-                        percent_encoding::percent_decode(value.as_bytes()).collect::<Vec<_>>();
-                    match InfoHash::try_from_bytes(bytes.as_slice()) {
-                        Ok(e) => info_hashes.push(e),
-                        Err(e) => {
-                            debug!("Http tracker {} failed to parse info hash, {}", state, e);
-                            continue;
+                    if key.to_lowercase().trim() == "info_hash" {
+                        let bytes =
+                            percent_encoding::percent_decode(value.as_bytes()).collect::<Vec<_>>();
+                        match InfoHash::try_from_bytes(bytes.as_slice()) {
+                            Ok(e) => info_hashes.push(e),
+                            Err(e) => {
+                                debug!("Http tracker {} failed to parse info hash, {}", state, e);
+                                continue;
+                            }
                         }
+                    } // otherwise, ignore the query parameter
+                }
+
+                match state.scrape(info_hashes).await {
+                    Ok(e) => {
+                        status_code = StatusCode::OK;
+                        response = e;
                     }
-                } // otherwise, ignore the query parameter
+                    Err(e) => {
+                        warn!("Http tracker {} failed process request, {}", state, e);
+                        status_code = StatusCode::INTERNAL_SERVER_ERROR;
+                        response = ScrapeResult::default();
+                    }
+                }
+            } else {
+                status_code = StatusCode::BAD_REQUEST;
+                response = ScrapeResult::default();
             }
 
-            match state.scrape(info_hashes).await {
-                Ok(e) => {
-                    status_code = StatusCode::OK;
-                    response = e;
-                }
+            match serde_bencode::to_bytes(&response) {
+                Ok(bytes) => (status_code, bytes),
                 Err(e) => {
-                    warn!("Http tracker {} failed process request, {}", state, e);
-                    status_code = StatusCode::INTERNAL_SERVER_ERROR;
-                    response = ScrapeResult::default();
+                    error!("Http tracker {} failed to serialize response, {}", state, e);
+                    (StatusCode::INTERNAL_SERVER_ERROR, Vec::with_capacity(0))
                 }
             }
-        } else {
-            status_code = StatusCode::BAD_REQUEST;
-            response = ScrapeResult::default();
-        }
-
-        match serde_bencode::to_bytes(&response) {
-            Ok(bytes) => (status_code, bytes),
-            Err(e) => {
-                error!("Http tracker {} failed to serialize response, {}", state, e);
-                (StatusCode::INTERNAL_SERVER_ERROR, Vec::with_capacity(0))
-            }
-        }
-    }
-}
-
-#[async_trait]
-impl TrackerListener for HttpServer {
-    async fn accept(&self) -> Option<ServerRequest> {
-        loop {
-            if self.inner.cancellation_token.is_cancelled() {
-                return None;
-            }
-            if let Some(request) = self.inner.queue.lock().await.pop_front() {
-                return Some(request);
-            }
-
-            self.inner.waker.notified().await;
         }
     }
 
-    fn addr(&self) -> &SocketAddr {
-        &self.inner.addr
+    #[async_trait]
+    impl TrackerListener for HttpServer {
+        async fn accept(&self) -> Option<ServerRequest> {
+            loop {
+                if self.inner.cancellation_token.is_cancelled() {
+                    return None;
+                }
+                if let Some(request) = self.inner.queue.lock().await.pop_front() {
+                    return Some(request);
+                }
+
+                self.inner.waker.notified().await;
+            }
+        }
+
+        fn addr(&self) -> &SocketAddr {
+            &self.inner.addr
+        }
+
+        fn metrics(&self) -> &ConnectionMetrics {
+            &self.inner.metrics
+        }
+
+        fn close(&self) {
+            self.inner.cancellation_token.cancel();
+            self.inner.waker.notify_waiters();
+        }
     }
 
-    fn metrics(&self) -> &ConnectionMetrics {
-        &self.inner.metrics
-    }
-
-    fn close(&self) {
-        self.inner.cancellation_token.cancel();
-        self.inner.waker.notify_waiters();
-    }
-}
-
-#[derive(Debug, Display)]
-#[display("{}", handle)]
-struct InnerServer {
-    handle: TrackerHandle,
-    addr: SocketAddr,
-    queue: Mutex<VecDeque<ServerRequest>>,
-    waker: Notify,
-    timeout: Duration,
-    metrics: ConnectionMetrics,
-    cancellation_token: CancellationToken,
-}
-
-impl InnerServer {
-    async fn announce(
-        &self,
+    #[derive(Debug, Display)]
+    #[display("{}", handle)]
+    struct InnerServer {
+        handle: TrackerHandle,
         addr: SocketAddr,
-        params: AnnounceParams,
-    ) -> Result<AnnounceEntryResponse> {
-        let info_hash = InfoHash::try_from_bytes(params.info_hash.as_slice())
-            .map_err(|e| TrackerError::Parse(e.to_string()))?;
-        let peer_id = PeerId::try_from(params.peer_id.as_bytes())
-            .map_err(|e| TrackerError::Parse(format!("failed to parse peer id, {}", e)))?;
-        let (tx, rx) = oneshot::channel();
-        let announcement = Announcement {
-            info_hash,
-            peer_id,
-            peer_port: params.port,
-            event: params.event,
-            bytes_completed: params.downloaded,
-            bytes_remaining: params.left,
-        };
-
-        {
-            let mut queue = self.queue.lock().await;
-            queue.push_back(ServerRequest::Announcement {
-                addr,
-                request: announcement,
-                response: tx,
-            });
-        }
-
-        self.await_response(rx).await
+        queue: Mutex<VecDeque<ServerRequest>>,
+        waker: Notify,
+        timeout: Duration,
+        metrics: ConnectionMetrics,
+        cancellation_token: CancellationToken,
     }
 
-    async fn scrape(&self, info_hashes: Vec<InfoHash>) -> Result<ScrapeResult> {
-        let (tx, rx) = oneshot::channel();
+    impl InnerServer {
+        async fn announce(
+            &self,
+            addr: SocketAddr,
+            params: AnnounceParams,
+        ) -> Result<AnnounceEntryResponse> {
+            let info_hash = InfoHash::try_from_bytes(params.info_hash.as_slice())
+                .map_err(|e| TrackerError::Parse(e.to_string()))?;
+            let peer_id = PeerId::try_from(params.peer_id.as_bytes())
+                .map_err(|e| TrackerError::Parse(format!("failed to parse peer id, {}", e)))?;
+            let (tx, rx) = oneshot::channel();
+            let announcement = Announcement {
+                info_hash,
+                peer_id,
+                peer_port: params.port,
+                event: params.event,
+                bytes_completed: params.downloaded,
+                bytes_remaining: params.left,
+            };
 
-        {
-            let mut queue = self.queue.lock().await;
-            queue.push_back(ServerRequest::Scrape {
-                request: info_hashes,
-                response: tx,
-            });
+            {
+                let mut queue = self.queue.lock().await;
+                queue.push_back(ServerRequest::Announcement {
+                    addr,
+                    request: announcement,
+                    response: tx,
+                });
+            }
+
+            self.await_response(rx).await
         }
 
-        self.await_response(rx).await
-    }
+        async fn scrape(&self, info_hashes: Vec<InfoHash>) -> Result<ScrapeResult> {
+            let (tx, rx) = oneshot::channel();
 
-    /// Waits for a response from the tracker server that manages this listener.
-    ///
-    /// If the tracker server does not respond within the specified timeout,
-    /// an error is returned.
-    async fn await_response<T>(&self, rx: oneshot::Receiver<T>) -> Result<T> {
-        self.waker.notify_waiters();
+            {
+                let mut queue = self.queue.lock().await;
+                queue.push_back(ServerRequest::Scrape {
+                    request: info_hashes,
+                    response: tx,
+                });
+            }
 
-        select! {
-            _ = time::sleep(self.timeout) => Err(TrackerError::Timeout),
-            response = rx => response.map_err(|e| TrackerError::Io(io::Error::new(io::ErrorKind::BrokenPipe, e))),
+            self.await_response(rx).await
+        }
+
+        /// Waits for a response from the tracker server that manages this listener.
+        ///
+        /// If the tracker server does not respond within the specified timeout,
+        /// an error is returned.
+        async fn await_response<T>(&self, rx: oneshot::Receiver<T>) -> Result<T> {
+            self.waker.notify_waiters();
+
+            select! {
+                _ = time::sleep(self.timeout) => Err(TrackerError::Timeout),
+                response = rx => response.map_err(|e| TrackerError::Io(io::Error::new(io::ErrorKind::BrokenPipe, e))),
+            }
         }
     }
 }
@@ -618,10 +631,11 @@ impl FromStr for AnnounceParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     use crate::init_logger;
     use crate::peer::PeerId;
-    use crate::tracker::{AnnounceEvent, TrackerServer};
+    use crate::tracker::{AnnounceEvent, TrackerListener, TrackerServer};
 
     use log::info;
 

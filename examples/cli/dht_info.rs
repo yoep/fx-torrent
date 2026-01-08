@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use crossterm::event::KeyCode;
 use fx_callback::{Callback, Subscription};
 use fx_torrent::dht::{DhtEvent, DhtTracker, Node, NodeState};
-use fx_torrent::format_bytes;
+use fx_torrent::{format_bytes, InfoHash};
 use ratatui::layout::Constraint::{Fill, Length, Percentage};
 use ratatui::layout::{Layout, Rect};
 use ratatui::prelude::{Color, StatefulWidget, Style, Text};
@@ -14,6 +14,7 @@ use ratatui::widgets::{
     Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Sparkline, Table, TableState, Widget,
 };
 use ratatui::Frame;
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -30,7 +31,7 @@ pub struct DhtInfoWidget {
     state: DhtInfoState,
     node_info_widget: DhtNodeInfoWidget,
     add_node_widget: DhtAddNodeWidget,
-    peers_widget: DhtPeerWidget,
+    peers_widget: DhtPeerStorageWidget,
     event_receiver: Subscription<DhtEvent>,
     command_receiver: UnboundedReceiver<DhtInfoCommand>,
 }
@@ -46,7 +47,7 @@ impl DhtInfoWidget {
             state: DhtInfoState::Nodes,
             node_info_widget: DhtNodeInfoWidget::new(nodes),
             add_node_widget: DhtAddNodeWidget::new(command_sender),
-            peers_widget: DhtPeerWidget::new(vec![]),
+            peers_widget: DhtPeerStorageWidget::new(),
             event_receiver,
             command_receiver,
         }
@@ -111,7 +112,11 @@ impl FXWidget for DhtInfoWidget {
             self.handle_command_event(command).await;
         }
 
+        let info_hashes = self.dht.info_hashes().await;
+        self.data.discovered_info_hashes = info_hashes.len() as u64;
+
         self.node_info_widget.tick().await;
+        self.peers_widget.tick(info_hashes).await;
     }
 
     fn on_key_event(&mut self, mut event: FXKeyEvent) {
@@ -176,6 +181,10 @@ impl FXWidget for DhtInfoWidget {
                 self.data.discovered_peers.to_string().into(),
             ]),
             Line::from(vec![
+                Span::from("Discovered info hashes: ").bold(),
+                self.data.discovered_info_hashes.to_string().into(),
+            ]),
+            Line::from(vec![
                 Span::from("Errors: ").bold(),
                 self.data.errors.to_string().into(),
             ]),
@@ -234,6 +243,7 @@ struct DhtData {
     pending_queries: u64,
     errors: u64,
     discovered_peers: u64,
+    discovered_info_hashes: u64,
     bytes_in: Vec<u64>,
     bytes_out: Vec<u64>,
 }
@@ -489,34 +499,41 @@ fn node_state_as_str(state: &NodeState) -> &str {
 }
 
 #[derive(Debug)]
-struct DhtPeerWidget {
-    peers: Vec<SocketAddr>,
+struct DhtPeerStorageWidget {
+    info_hashes: HashMap<InfoHash, PeerStorageData>,
 }
 
-impl DhtPeerWidget {
-    fn new(peers: Vec<SocketAddr>) -> Self {
-        Self { peers }
+impl DhtPeerStorageWidget {
+    fn new() -> Self {
+        Self {
+            info_hashes: HashMap::new(),
+        }
+    }
+
+    async fn tick(&mut self, info_hashes: Vec<InfoHash>) {
+        for info_hash in info_hashes {
+            self.info_hashes
+                .entry(info_hash)
+                .or_insert_with(PeerStorageData::default);
+        }
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
-        let header = vec!["Address", "Seed"]
+        let header = vec!["Info hash", "Peers"]
             .into_iter()
             .map(Cell::from)
             .collect::<Row>()
             .style(info_header_style());
         let rows = self
-            .peers
+            .info_hashes
             .iter()
-            .map(|addr| {
-                let is_seed = "";
-                Row::new(vec![addr.to_string(), is_seed.to_string()])
-            })
+            .map(|(info_hash, data)| Row::new(vec![info_hash.to_string(), data.peers.to_string()]))
             .collect::<Vec<Row>>();
 
         Widget::render(
             Table::new(rows, [Fill(1), Length(6)])
                 .header(header)
-                .block(Block::bordered().title("Discovered peers"))
+                .block(Block::bordered().title("Discovered info hashes"))
                 .row_highlight_style(Style::new().bg(Color::LightYellow).fg(Color::DarkGray))
                 .highlight_spacing(HighlightSpacing::Always),
             area,
@@ -527,4 +544,9 @@ impl DhtPeerWidget {
 
 fn info_header_style() -> Style {
     Style::new().bg(Color::DarkGray).fg(Color::White)
+}
+
+#[derive(Debug, Default)]
+struct PeerStorageData {
+    peers: usize,
 }

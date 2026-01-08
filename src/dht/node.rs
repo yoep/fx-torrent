@@ -96,7 +96,9 @@ impl Node {
                 announce_token: Mutex::new(None),
                 state: Mutex::new(state),
                 last_seen: Mutex::new(Instant::now()),
-                metrics: NodeMetrics::new(),
+                last_indexed: Default::default(),
+                indexing_interval: Default::default(),
+                metrics: Default::default(),
             }),
         }
     }
@@ -166,6 +168,22 @@ impl Node {
         self.inner.update_announce_token(token).await;
     }
 
+    /// Returns the interval announced by the node for scraping info hashes.
+    pub(crate) async fn indexing_interval(&self) -> Option<Duration> {
+        self.inner.indexing_interval.lock().await.clone()
+    }
+
+    /// Update the interval announced by the node for scraping info hashes.
+    pub(crate) async fn update_indexing_interval(&self, interval: Duration) {
+        *self.inner.indexing_interval.lock().await = Some(interval);
+        self.indexed().await;
+    }
+
+    /// Returns the last time we indexed the node.
+    pub(crate) async fn last_indexed(&self) -> Option<Instant> {
+        self.inner.last_indexed.lock().await.clone()
+    }
+
     /// The node has successfully responded to a query.
     pub(crate) async fn confirmed(&self) {
         self.inner.confirmed().await;
@@ -179,6 +197,11 @@ impl Node {
     /// Increase the number of times the node failed to respond to a query.
     pub(crate) async fn failed(&self) {
         self.inner.failed().await;
+    }
+
+    /// Mark the node as successfully indexed.
+    pub(crate) async fn indexed(&self) {
+        *self.inner.last_indexed.lock().await = Some(Instant::now());
     }
 
     /// Get the distance between this node and the target node.
@@ -211,6 +234,10 @@ struct InnerNode {
     state: Mutex<NodeState>,
     /// The last time we received a message from the node
     last_seen: Mutex<Instant>,
+    /// The last time we indexed the node.
+    last_indexed: Mutex<Option<Instant>>,
+    /// The interval announced by the node for scraping info hashes.
+    indexing_interval: Mutex<Option<Duration>>,
     /// The metrics of the node
     metrics: NodeMetrics,
 }
