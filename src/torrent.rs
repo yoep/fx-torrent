@@ -1557,29 +1557,9 @@ impl TorrentContext {
         self.data_pool.wanted_pieces().await.len()
     }
 
-    /// Get if the given bytes have been completed downloading.
-    /// It returns true if all bytes are completed, validated and written to the storage, else false.
+    /// Returns `true` if all bytes are completed, validated, and written to the storage, else `false`.
     pub async fn has_bytes(&self, range: &std::ops::Range<usize>) -> bool {
-        let pieces = self
-            .data_pool
-            .pieces()
-            .await
-            .into_iter()
-            .filter(|e| {
-                let piece_range = e.torrent_range();
-
-                // check if there is any overlap with the given byte range and piece range
-                piece_range.start < range.end && range.start < piece_range.end
-            })
-            .collect::<Vec<_>>();
-
-        for piece in pieces {
-            if !self.data_pool.is_piece_completed(&piece.index).await {
-                return false;
-            }
-        }
-
-        true
+        self.data_pool.has_bytes(range.clone()).await
     }
 
     /// Prioritize the given pieces within this torrent.

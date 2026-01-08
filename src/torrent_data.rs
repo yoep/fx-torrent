@@ -7,8 +7,10 @@ use bit_vec::BitVec;
 use itertools::Itertools;
 use log::warn;
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 /// The data pool of a torrent storing info about pieces and files.
+/// It makes use of a separate loop task to handle operations on the data pool.
 ///
 /// # Example
 ///
@@ -111,16 +113,26 @@ impl DataPool {
     /// Set the pieces of the pool.
     /// This will replace all existing pieces within the pool.
     pub async fn set_pieces(&self, pieces: Vec<Piece>) {
-        self.sender
-            .fire_and_forget(DataPoolCommand::SetPieces { pieces })
+        let _ = self
+            .sender
+            .send(|tx| DataPoolCommand::SetPieces {
+                pieces,
+                response: tx,
+            })
+            .await
             .await;
     }
 
     /// Set the files of the pool.
     /// This will replace all existing files within the pool.
     pub async fn set_files(&self, files: Vec<File>) {
-        self.sender
-            .fire_and_forget(DataPoolCommand::SetFiles { files })
+        let _ = self
+            .sender
+            .send(|tx| DataPoolCommand::SetFiles {
+                files,
+                response: tx,
+            })
+            .await
             .await;
     }
 
@@ -145,7 +157,7 @@ impl DataPool {
         rx.await.unwrap_or_default()
     }
 
-    /// Set the priorities for the given pieces if the torrent.
+    /// Set the priorities for the given pieces of the torrent.
     pub async fn set_piece_priorities(&self, priorities: &[(PieceIndex, PiecePriority)]) {
         self.sender
             .fire_and_forget(DataPoolCommand::SetPiecePriorities {
@@ -154,11 +166,15 @@ impl DataPool {
             .await;
     }
 
+    /// Set the priorities for the given files of the torrent.
     pub async fn set_file_priorities(&self, priorities: &[(FileIndex, FilePriority)]) {
-        self.sender
-            .fire_and_forget(DataPoolCommand::SetFilePriorities {
+        let _ = self
+            .sender
+            .send(|tx| DataPoolCommand::SetFilePriorities {
                 priorities: priorities.to_vec(),
+                response: tx,
             })
+            .await
             .await;
     }
 
@@ -200,9 +216,10 @@ impl DataPool {
     /// Set the completion state of the given piece index.
     pub async fn set_completed(&self, piece: &PieceIndex, completed: bool) {
         self.sender
-            .fire_and_forget(DataPoolCommand::SetPieceCompleted {
+            .send(|tx| DataPoolCommand::SetPieceCompleted {
                 index: *piece,
                 completed,
+                response: tx,
             })
             .await;
     }
@@ -215,6 +232,18 @@ impl DataPool {
                 part: *part,
             })
             .await
+    }
+
+    /// Returns `true` if the given torrent byte range is available (downloaded and validated), else `false`.
+    pub async fn has_bytes(&self, bytes: Range<usize>) -> bool {
+        self.sender
+            .send(|tx| DataPoolCommand::HasBytes {
+                bytes,
+                response: tx,
+            })
+            .await
+            .await
+            .unwrap_or_default()
     }
 
     /// Returns the piece indexes in which the torrent is interested.
@@ -329,9 +358,11 @@ enum DataPoolCommand {
     },
     SetPieces {
         pieces: Vec<Piece>,
+        response: Reply<()>,
     },
     SetFiles {
         files: Vec<File>,
+        response: Reply<()>,
     },
     FindPieceAtOffset {
         offset: usize,
@@ -345,6 +376,7 @@ enum DataPoolCommand {
     },
     SetFilePriorities {
         priorities: Vec<(FileIndex, FilePriority)>,
+        response: Reply<()>,
     },
     ContainsPiece {
         index: PieceIndex,
@@ -357,6 +389,7 @@ enum DataPoolCommand {
     SetPieceCompleted {
         index: PieceIndex,
         completed: bool,
+        response: Reply<()>,
     },
     SetPiecePartCompleted {
         piece: PieceIndex,
@@ -383,6 +416,10 @@ enum DataPoolCommand {
         response: Reply<BitVec>,
     },
     IsCompleted {
+        response: Reply<bool>,
+    },
+    HasBytes {
+        bytes: Range<usize>,
         response: Reply<bool>,
     },
     FileIndexFor {
@@ -435,11 +472,13 @@ impl InnerDataPool {
                 DataPoolCommand::GetFiles { response } => {
                     response.send(self.files.values().cloned().collect());
                 }
-                DataPoolCommand::SetPieces { pieces } => {
+                DataPoolCommand::SetPieces { pieces, response } => {
                     self.set_pieces(pieces);
+                    response.send(());
                 }
-                DataPoolCommand::SetFiles { files } => {
+                DataPoolCommand::SetFiles { files, response } => {
                     self.set_files(files);
+                    response.send(());
                 }
                 DataPoolCommand::FindPieceAtOffset { offset, response } => {
                     response.send(self.find_piece_at_offset(offset));
@@ -450,8 +489,12 @@ impl InnerDataPool {
                 DataPoolCommand::SetPiecePriorities { priorities } => {
                     self.set_piece_priorities(priorities);
                 }
-                DataPoolCommand::SetFilePriorities { priorities } => {
+                DataPoolCommand::SetFilePriorities {
+                    priorities,
+                    response,
+                } => {
                     self.set_file_priorities(priorities);
+                    response.send(());
                 }
                 DataPoolCommand::ContainsPiece { index, response } => {
                     response.send(self.pieces.contains_key(&index));
@@ -459,8 +502,13 @@ impl InnerDataPool {
                 DataPoolCommand::IsPieceCompleted { index, response } => {
                     response.send(self.is_piece_completed(&index));
                 }
-                DataPoolCommand::SetPieceCompleted { index, completed } => {
+                DataPoolCommand::SetPieceCompleted {
+                    index,
+                    completed,
+                    response,
+                } => {
                     self.set_piece_completed(&index, completed);
+                    response.send(());
                 }
                 DataPoolCommand::SetPiecePartCompleted { piece: index, part } => {
                     self.set_part_completed(&index, &part);
@@ -491,6 +539,9 @@ impl InnerDataPool {
                     response,
                 } => {
                     response.send(self.file_index_for(&index));
+                }
+                DataPoolCommand::HasBytes { bytes, response } => {
+                    response.send(self.has_bytes(&bytes));
                 }
                 DataPoolCommand::Close => break,
             }
@@ -666,6 +717,18 @@ impl InnerDataPool {
             .map(|(index, _)| *index)
     }
 
+    fn has_bytes(&self, bytes: &Range<usize>) -> bool {
+        self.pieces
+            .iter()
+            .filter(|(_, piece)| {
+                let piece_range = piece.torrent_range();
+
+                // check if there is any overlap with the given byte range and piece range
+                piece_range.start < bytes.end && bytes.start < piece_range.end
+            })
+            .all(|(index, _)| self.is_piece_completed(index))
+    }
+
     /// Check if the piece is wanted by the torrent.
     /// In such a case, the piece priority should not be [PiecePriority::None]
     /// and the piece should not have been completed yet.
@@ -678,6 +741,8 @@ impl InnerDataPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TorrentFileInfo;
+    use std::ops::Range;
 
     mod is_piece_wanted {
         use super::*;
@@ -824,6 +889,31 @@ mod tests {
         }
     }
 
+    mod pieces {
+        use super::*;
+
+        use crate::init_logger;
+
+        #[tokio::test]
+        async fn test_pieces() {
+            init_logger!();
+            let pieces = vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+                create_piece(3, 1024),
+            ];
+            let pool = DataPool::new();
+
+            // set the pieces of the pool
+            pool.set_pieces(pieces.clone()).await;
+
+            // retrieve the pieces of the pool
+            let result = pool.pieces().await;
+            assert_eq!(pieces, result, "expected the pieces to be retrieved");
+        }
+    }
+
     mod find_piece_at_offset {
         use super::*;
 
@@ -913,7 +1003,128 @@ mod tests {
         }
     }
 
-    fn create_piece(index: usize, length: usize) -> Piece {
+    mod has_bytes {
+        use super::*;
+
+        use crate::init_logger;
+
+        #[tokio::test]
+        async fn test_has_bytes() {
+            init_logger!();
+            let pool = DataPool::from(vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+            ]);
+
+            // set pieces to completed state
+            pool.set_completed(&0, true).await;
+            pool.set_completed(&1, true).await;
+
+            // retrieve bytes available
+            let result = pool.has_bytes(0..2048).await;
+            assert_eq!(true, result, "expected the bytes to be available");
+
+            // retrieve none of the bytes available
+            let result = pool.has_bytes(2049..3094).await;
+            assert_eq!(false, result, "expected the bytes to not be available");
+
+            // retrieve some bytes available
+            let result = pool.has_bytes(2040..2060).await;
+            assert_eq!(false, result, "expected the bytes to not be available");
+        }
+    }
+
+    mod prioritize_file {
+        use super::*;
+
+        use crate::init_logger;
+
+        #[tokio::test]
+        async fn test_set_file_priorities_single_file() {
+            init_logger!();
+            let pieces = vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+                create_piece(3, 1024),
+            ];
+            let files = vec![
+                create_file(0, 0, 2000, 0..2),
+                create_file(1, 2000, 1048, 1..3),
+                create_file(2, 3072, 1048, 3..4),
+            ];
+            let pool = DataPool::new();
+
+            // update the pool data
+            pool.set_pieces(pieces).await;
+            pool.set_files(files).await;
+
+            // prioritize the first file
+            pool.set_file_priorities(&create_file_priority(0)).await;
+            let result = pool.piece_priorities().await;
+            assert_eq!(
+                vec![
+                    (0, PiecePriority::Normal),
+                    (1, PiecePriority::Normal),
+                    (2, PiecePriority::None),
+                    (3, PiecePriority::None),
+                ]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>(),
+                result,
+                "expected the first file to have priority Normal"
+            );
+
+            // prioritize the second file
+            pool.set_file_priorities(&create_file_priority(1)).await;
+            let result = pool.piece_priorities().await;
+            assert_eq!(
+                vec![
+                    (0, PiecePriority::None),
+                    (1, PiecePriority::Normal),
+                    (2, PiecePriority::Normal),
+                    (3, PiecePriority::None),
+                ]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>(),
+                result,
+                "expected the first file to have priority Normal"
+            );
+
+            // prioritize the last file
+            pool.set_file_priorities(&create_file_priority(2)).await;
+            let result = pool.piece_priorities().await;
+            assert_eq!(
+                vec![
+                    (0, PiecePriority::None),
+                    (1, PiecePriority::None),
+                    (2, PiecePriority::None),
+                    (3, PiecePriority::Normal),
+                ]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>(),
+                result,
+                "expected the first file to have priority Normal"
+            );
+        }
+
+        fn create_file_priority(index: FileIndex) -> Vec<(FileIndex, FilePriority)> {
+            (0..3)
+                .into_iter()
+                .map(|i| {
+                    let priority = if i == index {
+                        FilePriority::Normal
+                    } else {
+                        FilePriority::None
+                    };
+                    (i, priority)
+                })
+                .collect()
+        }
+    }
+
+    fn create_piece(index: PieceIndex, length: usize) -> Piece {
         Piece {
             hash: Default::default(),
             index,
@@ -923,6 +1134,30 @@ mod tests {
             parts: vec![],
             completed_parts: Default::default(),
             availability: 1,
+        }
+    }
+
+    fn create_file(
+        index: FileIndex,
+        offset: usize,
+        length: usize,
+        pieces: Range<PieceIndex>,
+    ) -> File {
+        File {
+            index,
+            torrent_path: Default::default(),
+            torrent_offset: offset,
+            info: TorrentFileInfo {
+                length: length as u64,
+                path: None,
+                path_utf8: None,
+                md5sum: None,
+                attr: None,
+                symlink_path: None,
+                sha1: None,
+            },
+            priority: FilePriority::Normal,
+            pieces,
         }
     }
 }

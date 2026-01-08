@@ -74,7 +74,7 @@ impl From<u8> for PiecePriority {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Piece {
     /// The hash information of the piece
     pub hash: InfoHash,
