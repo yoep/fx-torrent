@@ -295,7 +295,7 @@ impl CompactIpv6Addrs {
 }
 
 impl Serialize for CompactIpv6Addrs {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -305,7 +305,7 @@ impl Serialize for CompactIpv6Addrs {
 }
 
 impl<'de> Deserialize<'de> for CompactIpv6Addrs {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -320,7 +320,7 @@ impl<'de> Deserialize<'de> for CompactIpv6Addrs {
                 )
             }
 
-            fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E>
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
             {
@@ -332,14 +332,14 @@ impl<'de> Deserialize<'de> for CompactIpv6Addrs {
                     .map_err(|e| serde::de::Error::custom(e.to_string()))
             }
 
-            fn visit_bytes<E>(self, v: &[u8]) -> std::result::Result<Self::Value, E>
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
             {
                 Self::Value::try_from(v).map_err(|e| serde::de::Error::custom(e.to_string()))
             }
 
-            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
             where
                 A: SeqAccess<'de>,
             {
@@ -366,7 +366,7 @@ impl From<Vec<CompactIpv6Addr>> for CompactIpv6Addrs {
 impl TryFrom<&[u8]> for CompactIpv6Addrs {
     type Error = CompactError;
 
-    fn try_from(bytes: &[u8]) -> std::result::Result<Self, Self::Error> {
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         if bytes.len() % COMPACT_IPV6_ADDR_LEN != 0 {
             return Err(CompactError::InvalidLength);
         }
@@ -472,7 +472,7 @@ impl From<&CompactIpv6Addr> for [u8; COMPACT_IPV6_ADDR_LEN] {
 }
 
 impl Serialize for CompactIpv6Addr {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
@@ -488,7 +488,7 @@ impl Serialize for CompactIpv6Addr {
 }
 
 impl<'de> Deserialize<'de> for CompactIpv6Addr {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -522,7 +522,7 @@ impl<'de> Visitor<'de> for CompactIpv6AddrVisitor {
         write!(f, "expected a byte slice of a compact ipv6 address")
     }
 
-    fn visit_bytes<E>(self, v: &[u8]) -> std::result::Result<Self::Value, E>
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
     where
         E: serde::de::Error,
     {
@@ -547,7 +547,7 @@ impl From<&SocketAddr> for CompactIp {
 }
 
 impl Serialize for CompactIp {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -561,7 +561,7 @@ impl Serialize for CompactIp {
 }
 
 impl<'de> Deserialize<'de> for CompactIp {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -578,7 +578,7 @@ impl<'de> Visitor<'de> for CompactIpVisitor {
         write!(f, "expected a compact ip address as bytes")
     }
 
-    fn visit_bytes<E>(self, bytes: &[u8]) -> std::result::Result<Self::Value, E>
+    fn visit_bytes<E>(self, bytes: &[u8]) -> Result<Self::Value, E>
     where
         E: serde::de::Error,
     {
