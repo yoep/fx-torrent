@@ -116,6 +116,14 @@ impl MenuSettings {
                 ))),
                 SettingsMenuItem::Title("Peer connections".to_string()),
                 SettingsMenuItem::Option(Box::new(ToggleSetting::new(
+                    "Webseeds",
+                    true,
+                    |enabled, sender| {
+                        let _ = sender.send(AppCommand::WebseedsEnabled(enabled));
+                    },
+                    app_sender.clone(),
+                ))),
+                SettingsMenuItem::Option(Box::new(ToggleSetting::new(
                     "TCP",
                     true,
                     |enabled, sender| {

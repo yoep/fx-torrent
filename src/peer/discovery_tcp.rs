@@ -3,7 +3,8 @@ use crate::peer::extension::Extensions;
 use crate::peer::{
     BitTorrentPeer, Error, Peer, PeerEntry, PeerId, PeerStream, ProtocolExtensionFlags, Result,
 };
-use crate::TorrentContext;
+use crate::torrent::InnerTorrent;
+use crate::torrent_data::DataPool;
 use async_trait::async_trait;
 use derive_more::Display;
 use futures::stream::FuturesUnordered;
@@ -81,7 +82,8 @@ impl TcpPeerDiscovery {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         stream: TcpStream,
-        torrent: Arc<TorrentContext>,
+        torrent: InnerTorrent,
+        data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Extensions,
         connection_timeout: Duration,
@@ -92,6 +94,7 @@ impl TcpPeerDiscovery {
                 peer_addr,
                 PeerStream::Tcp(stream),
                 torrent,
+                data_pool,
                 protocol_extensions,
                 extensions,
                 connection_timeout,
@@ -121,7 +124,8 @@ impl PeerDiscovery for TcpPeerDiscovery {
         &self,
         peer_id: PeerId,
         peer_addr: SocketAddr,
-        torrent: Arc<TorrentContext>,
+        torrent: InnerTorrent,
+        data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Extensions,
         connection_timeout: Duration,
@@ -131,7 +135,16 @@ impl PeerDiscovery for TcpPeerDiscovery {
                 Err(Error::Io(io::Error::new(io::ErrorKind::TimedOut, format!("connection with {} timed out", peer_addr))))
             },
             stream = TcpStream::connect(&peer_addr) =>
-                Self::create_peer_from_stream(peer_id, peer_addr, stream?, torrent, protocol_extensions, extensions, connection_timeout).await,
+                Self::create_peer_from_stream(
+                    peer_id,
+                    peer_addr,
+                    stream?,
+                    torrent,
+                    data_pool,
+                    protocol_extensions,
+                    extensions,
+                    connection_timeout
+                ).await,
         }
     }
 
@@ -145,7 +158,7 @@ impl PeerDiscovery for TcpPeerDiscovery {
 }
 
 #[derive(Debug, Display)]
-#[display("{} (port {})", handle, "addr.port()")]
+#[display("{} (port {})", handle, addr.port())]
 struct InnerTcpPeerDiscovery {
     handle: TcpPeerDiscoveryHandle,
     addr: SocketAddr,
@@ -225,7 +238,7 @@ impl InnerTcpPeerDiscovery {
                     return Err(Error::Io(e));
                 }
 
-                trace!("Failed to bind TCP IPv4 socket on {}, {}", ipv6_addr, e)
+                trace!("Failed to bind TCP IPv4 socket on {}, {}", ipv4_addr, e)
             }
         }
 
@@ -254,14 +267,16 @@ mod tests {
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
-            TorrentConfig::default(),
+            TorrentConfig::builder().build(),
             vec![],
             vec![Box::new(listener)]
         );
-        let context = torrent.instance().expect("expected a torrent context");
-        let listener_port = context
+        let listener_port = torrent
             .peer_port()
+            .await
             .expect("expected a torrent peer listener port");
+        let protocol_extensions = torrent.protocol_extensions().await.unwrap();
+        let extensions = torrent.inner.extensions().await.unwrap();
         let dialer = new_tcp_peer_discovery()
             .await
             .expect("expected a new tcp peer dialer");
@@ -270,9 +285,10 @@ mod tests {
             .dial(
                 PeerId::new(),
                 SocketAddr::from((Ipv4Addr::LOCALHOST, listener_port)),
-                context.clone(),
-                context.protocol_extensions(),
-                context.extensions(),
+                torrent.inner.clone(),
+                torrent.inner.data_pool().await.unwrap(),
+                protocol_extensions,
+                extensions,
                 Duration::from_secs(1),
             )
             .await
@@ -280,7 +296,7 @@ mod tests {
         let state = result.state().await;
         assert_ne!(PeerState::Error, state);
 
-        let total_peers = context.peer_pool().active_peer_connections().await;
+        let total_peers = torrent.active_peer_connections().await;
         assert_eq!(
             1, total_peers,
             "expected the connection to have been established with the torrent listener"

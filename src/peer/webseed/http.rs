@@ -3,7 +3,8 @@ use crate::peer::{
     ConnectionDirection, ConnectionProtocol, Error, Metrics, Peer, PeerClientInfo, PeerEvent,
     PeerHandle, PeerId, PeerState, Result,
 };
-use crate::{FileAttributeFlags, PieceIndex, TorrentContext, TorrentFileInfo, TorrentMetadata};
+use crate::torrent::InnerTorrent;
+use crate::{FileAttributeFlags, Piece, PieceIndex, TorrentFileInfo, TorrentMetadata};
 use async_trait::async_trait;
 use bit_vec::BitVec;
 use derive_more::Display;
@@ -39,7 +40,7 @@ pub struct HttpPeer {
 }
 
 impl HttpPeer {
-    pub fn new(url: Url, torrent: Arc<TorrentContext>) -> Result<Self> {
+    pub fn new(url: Url, torrent: InnerTorrent) -> Result<Self> {
         let handle = Handle::new();
         let client = Client::builder()
             .redirect(Policy::limited(3))
@@ -114,7 +115,7 @@ impl Peer for HttpPeer {
     }
 
     async fn remote_piece_bitfield(&self) -> BitVec {
-        let total_pieces = self.inner.torrent.data_pool().num_of_pieces().await;
+        let total_pieces = self.inner.torrent.total_pieces().await;
         BitVec::from_elem(total_pieces, true)
     }
 
@@ -152,7 +153,7 @@ struct HttpPeerContext {
     url: Url,
     addr: SocketAddr,
     metrics: Metrics,
-    torrent: Arc<TorrentContext>,
+    torrent: InnerTorrent,
     callbacks: MultiThreadedCallback<PeerEvent>,
     cancellation_token: CancellationToken,
 }
@@ -181,17 +182,21 @@ impl HttpPeerContext {
             .torrent
             .wanted_request_pieces()
             .await
+            .unwrap_or_default()
             .into_iter()
             .take(3);
-        let metadata = self.torrent.metadata().await;
+        let metadata = match self.torrent.metadata().await {
+            Ok(e) => e,
+            Err(_) => return,
+        };
 
         for piece in wanted_pieces {
             // request a permit and release it after requesting the piece, don't release it while requesting
-            if let Some(_permit) = self.torrent.request_download_permit(&piece).await {
+            if let Some(_permit) = self.torrent.request_download_permit(&piece.index).await {
                 if let Err(e) = self.request_piece(&piece, &metadata).await {
                     warn!(
-                        "Torrent {} failed to request webseed data from {}, {}",
-                        self.torrent, self, e
+                        "Torrent failed to request webseed data from {}, {}",
+                        self, e
                     );
                     break;
                 }
@@ -201,95 +206,88 @@ impl HttpPeerContext {
 
     /// Try to request the given piece.
     /// It returns an error if the piece couldn't be requested from the webseed.
-    async fn request_piece(&self, piece: &PieceIndex, metadata: &TorrentMetadata) -> Result<()> {
-        if let Some(piece) = self.torrent.data_pool().piece(&piece).await {
-            let piece_len = piece.len();
-            let file_index = self
+    async fn request_piece(&self, piece: &Piece, metadata: &TorrentMetadata) -> Result<()> {
+        let piece_len = piece.len();
+        let file_index = self
+            .torrent
+            .file_index_for(&piece.index)
+            .await
+            .ok_or(Error::InvalidPiece(piece.index))?;
+        let mut cursor = 0usize;
+        let mut buffer = vec![0u8; piece_len];
+
+        while cursor < piece_len {
+            let file = self
                 .torrent
-                .data_pool()
-                .file_index_for(&piece.index)
+                .file(&file_index)
                 .await
                 .ok_or(Error::InvalidPiece(piece.index))?;
-            let mut cursor = 0usize;
-            let mut buffer = vec![0u8; piece_len];
+            if file.attributes().contains(FileAttributeFlags::PaddingFile) {
+                cursor += file.len();
+                continue;
+            }
 
-            while cursor < piece_len {
-                let file = self
-                    .torrent
-                    .data_pool()
-                    .file(&file_index)
-                    .await
-                    .ok_or(Error::InvalidPiece(piece.index))?;
-                if file.attributes().contains(FileAttributeFlags::PaddingFile) {
-                    cursor += file.len();
-                    continue;
-                }
+            let url = self.create_request_url(metadata, &file.info)?;
+            let request_len = min(piece.length, file.len());
+            let range_start = piece.offset.saturating_sub(file.torrent_offset);
+            let range_end = range_start.saturating_add(request_len);
 
-                let url = self.create_request_url(metadata, &file.info)?;
-                let request_len = min(piece.length, file.len());
-                let range_start = piece.offset.saturating_sub(file.torrent_offset);
-                let range_end = range_start.saturating_add(request_len);
+            let response = self
+                .client
+                .get(url)
+                .header("Range", format!("bytes={}-{}", range_start, range_end))
+                .send()
+                .await
+                .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+            self.metrics
+                .bytes_in
+                .inc_by(response.content_length().unwrap_or(0));
 
-                let response = self
-                    .client
-                    .get(url)
-                    .header("Range", format!("bytes={}-{}", range_start, range_end))
-                    .send()
+            if response.status().is_success() {
+                let body = response
+                    .bytes()
                     .await
                     .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
-                self.metrics
-                    .bytes_in
-                    .inc_by(response.content_length().unwrap_or(0));
+                self.metrics.bytes_in_useful.inc_by(body.len() as u64);
 
-                if response.status().is_success() {
-                    let body = response
-                        .bytes()
-                        .await
-                        .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
-                    self.metrics.bytes_in_useful.inc_by(body.len() as u64);
+                if body.len() > request_len {
+                    return Err(Error::InvalidLength(request_len as u32, body.len() as u32));
+                }
 
-                    if body.len() > request_len {
-                        return Err(Error::InvalidLength(request_len as u32, body.len() as u32));
-                    }
+                // copy the data into the buffer
+                buffer[cursor..cursor + body.len()].copy_from_slice(&body);
+                cursor += body.len();
+            } else {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "expected status 200, but got {:?} instead",
+                        response.status()
+                    ),
+                )));
+            }
 
-                    // copy the data into the buffer
-                    buffer[cursor..cursor + body.len()].copy_from_slice(&body);
-                    cursor += body.len();
-                } else {
+            // loop over each part that needs to be completed and fetch it from the body
+            for part in piece.parts_to_request() {
+                let data_len = buffer.len();
+                let part_start = part.begin;
+                let part_end = part_start.saturating_add(part.length);
+                if part_end > data_len {
                     return Err(Error::Io(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!(
-                            "expected status 200, but got {:?} instead",
-                            response.status()
+                            "part end {} is out of bound for response data length {}",
+                            part_end, data_len
                         ),
                     )));
                 }
 
-                // loop over each part that needs to be completed and fetch it from the body
-                for part in piece.parts_to_request() {
-                    let data_len = buffer.len();
-                    let part_start = part.begin;
-                    let part_end = part_start.saturating_add(part.length);
-                    if part_end > data_len {
-                        return Err(Error::Io(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "part end {} is out of bound for response data length {}",
-                                part_end, data_len
-                            ),
-                        )));
-                    }
-
-                    let data = &buffer[part_start..part_end];
-                    self.torrent
-                        .piece_part_completed(part.clone(), data.to_vec());
-                }
+                let data = &buffer[part_start..part_end];
+                let _ = self.torrent.piece_part_completed(part, data).await;
             }
-
-            Ok(())
-        } else {
-            Err(Error::InvalidPiece(*piece))
         }
+
+        Ok(())
     }
 
     fn create_request_url(
@@ -369,12 +367,11 @@ mod tests {
             "debian.torrent",
             temp_path,
             TorrentFlags::none(),
-            TorrentConfig::default(),
+            TorrentConfig::builder().build(),
             vec![],
             vec![]
         );
-        let context = torrent.instance().unwrap();
-        let metadata = context.metadata().await;
+        let metadata = torrent.metadata().await.unwrap();
         let file = TorrentFileInfo {
             length: 0,
             path: Some(vec!["README 1.md".to_string()]),
@@ -384,7 +381,7 @@ mod tests {
             symlink_path: None,
             sha1: None,
         };
-        let peer = HttpPeer::new(url, context.clone()).expect("expected an http peer");
+        let peer = HttpPeer::new(url, torrent.inner.clone()).expect("expected an http peer");
 
         let result = peer
             .inner

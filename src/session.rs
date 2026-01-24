@@ -1,7 +1,8 @@
 use crate::errors::Result;
 use crate::operation::{
     TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation,
-    TorrentFileValidationOperation, TorrentMetadataOperation, TorrentTrackersOperation,
+    TorrentFileValidationOperation, TorrentMetadataOperation, TorrentOperation,
+    TorrentOperationFactory, TorrentTrackersOperation,
 };
 #[cfg(feature = "dht")]
 use crate::operation::{TorrentDhtNodesOperation, TorrentDhtPeersOperation};
@@ -13,8 +14,7 @@ use crate::tracker::TrackerClient;
 use crate::{
     DhtOption, ExtensionFactories, ExtensionFactory, InfoHash, Magnet, NoSessionCache,
     TorrentConfig, TorrentError, TorrentEvent, TorrentFlags, TorrentHandle, TorrentHealth,
-    TorrentMetadata, TorrentOperation, TorrentOperationFactory, DEFAULT_TORRENT_EXTENSIONS,
-    DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
+    TorrentMetadata, DEFAULT_TORRENT_EXTENSIONS, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
 };
 use async_trait::async_trait;
 use derive_more::Display;
@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::io;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,7 +34,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
 
-use crate::torrent_config::DEFAULT_PEER_TIMEOUT;
+use crate::config::SessionConfig;
 #[cfg(test)]
 pub use mock::*;
 
@@ -337,7 +337,6 @@ impl FxTorrentSession {
     ///
     /// * `torrent_info` - The metadata information of the torrent to add.
     /// * `options` - The torrent options to use when adding the torrent.
-    /// * `peer_timeout` - The peer timeout to use when adding the torrent.
     /// * `send_callback_event` - Whether to send a callback event when the torrent is added.
     ///
     /// # Returns
@@ -347,7 +346,6 @@ impl FxTorrentSession {
         &self,
         torrent_info: TorrentMetadata,
         options: TorrentFlags,
-        peer_timeout: Option<Duration>,
         send_callback_event: bool,
     ) -> Result<Torrent> {
         trace!(
@@ -379,14 +377,7 @@ impl FxTorrentSession {
         };
 
         let info_hash = torrent_info.info_hash.clone();
-        let config = {
-            let session_config = self.inner.config.read().await;
-            TorrentConfig::builder()
-                .client_name(session_config.client_name.as_str())
-                .path(session_config.path.as_path())
-                .peer_connection_timeout(peer_timeout.unwrap_or(DEFAULT_PEER_TIMEOUT))
-                .build()
-        };
+        let config = self.inner.config.read().await.torrent.clone();
 
         trace!(
             "Session {} is creating new torrent for info hash {}",
@@ -441,11 +432,11 @@ impl Session for FxTorrentSession {
     }
 
     async fn base_path(&self) -> PathBuf {
-        self.inner.config.read().await.path.clone()
+        self.inner.config.read().await.path().to_path_buf()
     }
 
     async fn set_base_path(&self, location: PathBuf) {
-        self.inner.config.write().await.path = location;
+        self.inner.config.write().await.torrent.set_path(location);
     }
 
     async fn find_torrent_by_handle(&self, handle: &TorrentHandle) -> Option<Torrent> {
@@ -474,7 +465,7 @@ impl Session for FxTorrentSession {
                 .options(TorrentFlags::none())
                 .config(
                     TorrentConfig::builder()
-                        .client_name(self.inner.config.read().await.client_name.as_str())
+                        .client_name(self.inner.config.read().await.client_name())
                         .peers_lower_limit(0)
                         .peers_upper_limit(0)
                         .peer_connection_timeout(Duration::from_secs(0))
@@ -505,31 +496,32 @@ impl Session for FxTorrentSession {
     }
 
     fn resolve(&self, uri: &str) -> Result<TorrentMetadata> {
-        trace!("Resolving torrent uri {}", uri);
-        Magnet::from_str(uri)
-            .map_err(Into::<TorrentError>::into)
-            .and_then(|e| TorrentMetadata::try_from(e))
-            .map(|e| Ok::<TorrentMetadata, TorrentError>(e))
-            .unwrap_or_else(|_| {
-                PathBuf::from_str(uri)
-                    .map_err(|e| TorrentError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))
-                    .and_then(|filepath| {
-                        std::fs::OpenOptions::new()
-                            .create(false)
-                            .read(true)
-                            .open(filepath)
-                            .map_err(|e| TorrentError::Io(e))
-                    })
-                    .and_then(|mut file| {
-                        let mut buffer = vec![];
-                        if let Err(e) = file.read_to_end(&mut buffer) {
-                            return Err(TorrentError::Io(e));
-                        }
+        if Magnet::has_magnet_scheme(uri) {
+            trace!("Resolving torrent magnet uri {}", uri);
+            Magnet::from_str(uri)
+                .map_err(Into::<TorrentError>::into)
+                .and_then(|e| TorrentMetadata::try_from(e))
+        } else {
+            trace!("Resolving torrent path uri {}", uri);
+            PathBuf::from_str(uri)
+                .map_err(|e| TorrentError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))
+                .and_then(|filepath| {
+                    std::fs::OpenOptions::new()
+                        .create(false)
+                        .read(true)
+                        .open(filepath)
+                        .map_err(|e| TorrentError::Io(e))
+                })
+                .and_then(|mut file| {
+                    let mut buffer = vec![];
+                    if let Err(e) = file.read_to_end(&mut buffer) {
+                        return Err(TorrentError::Io(e));
+                    }
 
-                        Ok(buffer)
-                    })
-                    .and_then(|bytes| TorrentMetadata::try_from(bytes.as_slice()))
-            })
+                    Ok(buffer)
+                })
+                .and_then(|bytes| TorrentMetadata::try_from(bytes.as_slice()))
+        }
     }
 
     async fn fetch_magnet(&self, magnet_uri: &str, timeout: Duration) -> Result<TorrentMetadata> {
@@ -547,12 +539,7 @@ impl Session for FxTorrentSession {
         }
 
         let torrent = self
-            .find_or_add_torrent(
-                torrent_info,
-                TorrentFlags::Metadata,
-                Some(Duration::from_secs(3)),
-                false,
-            )
+            .find_or_add_torrent(torrent_info, TorrentFlags::Metadata, false)
             .await?;
 
         // check if the torrent metadata needs to be fetched, or is already known
@@ -584,8 +571,7 @@ impl Session for FxTorrentSession {
         torrent_info: TorrentMetadata,
         options: TorrentFlags,
     ) -> Result<Torrent> {
-        self.find_or_add_torrent(torrent_info, options, None, true)
-            .await
+        self.find_or_add_torrent(torrent_info, options, true).await
     }
 
     async fn remove_torrent(&self, handle: &TorrentHandle) {
@@ -649,16 +635,13 @@ impl Drop for FxTorrentSession {
 /// ```
 #[derive(Default)]
 pub struct FxTorrentSessionBuilder {
-    path: Option<PathBuf>,
-    client_name: Option<String>,
+    config: Option<SessionConfig>,
     protocol_extensions: Option<ProtocolExtensionFlags>,
     extension_factories: Option<ExtensionFactories>,
     operation_factories: Option<Vec<TorrentOperationFactory>>,
     storage: Option<Arc<SessionStorageFactory>>,
     session_cache: Option<Box<dyn SessionCache>>,
     dht: Option<DhtOption>,
-    enable_tcp_peer: Option<bool>,
-    enable_utp_peer: Option<bool>,
 }
 
 impl FxTorrentSessionBuilder {
@@ -667,17 +650,9 @@ impl FxTorrentSessionBuilder {
         Self::default()
     }
 
-    /// Set the path of the torrent session.
-    /// This is the base path in which all torrents will be stored.
-    pub fn path<P: AsRef<Path>>(&mut self, base_path: P) -> &mut Self {
-        self.path = Some(base_path.as_ref().to_path_buf());
-        self
-    }
-
-    /// Set the client name for the session.
-    /// This is the name of the client that is exchanged with peers that support `LTEP`.
-    pub fn client_name<S: AsRef<str>>(&mut self, client_name: S) -> &mut Self {
-        self.client_name = Some(client_name.as_ref().to_string());
+    /// Set the configuration of the session.
+    pub fn config(&mut self, config: SessionConfig) -> &mut Self {
+        self.config = Some(config);
         self
     }
 
@@ -748,30 +723,6 @@ impl FxTorrentSessionBuilder {
         self
     }
 
-    /// Enables the TCP peer connections for the session.
-    pub fn enable_tcp_peer(&mut self) -> &mut Self {
-        self.enable_tcp_peer = Some(true);
-        self
-    }
-
-    /// Disables the TCP peer connections for the session.
-    pub fn disable_tcp_peer(&mut self) -> &mut Self {
-        self.enable_tcp_peer = Some(false);
-        self
-    }
-
-    /// Enables the UTP peer connections for the session.
-    pub fn enable_utp_peer(&mut self) -> &mut Self {
-        self.enable_utp_peer = Some(true);
-        self
-    }
-
-    /// Disables the UTP peer connections for the session.
-    pub fn disable_utp_peer(&mut self) -> &mut Self {
-        self.enable_utp_peer = Some(false);
-        self
-    }
-
     /// Create a new torrent session from this builder.
     /// The only required field within this builder is the base path for the torrent storage.
     ///
@@ -779,16 +730,10 @@ impl FxTorrentSessionBuilder {
     ///
     /// It returns an error when one of the required is not set.
     pub fn build(&mut self) -> Result<FxTorrentSession> {
-        let config = SessionConfig {
-            client_name: self.client_name.take().filter(|e| !e.is_empty()).ok_or(
-                TorrentError::InvalidSession("client name is required".to_string()),
-            )?,
-            path: self.path.take().ok_or(TorrentError::InvalidSession(
-                "base path is required".to_string(),
-            ))?,
-            enable_tcp_peer: self.enable_tcp_peer.take().unwrap_or(true),
-            enable_utp_peer: self.enable_utp_peer.take().unwrap_or(true),
-        };
+        let config = self
+            .config
+            .take()
+            .unwrap_or_else(|| SessionConfig::builder().build());
         let protocol_extensions = self
             .protocol_extensions
             .unwrap_or_else(DEFAULT_TORRENT_PROTOCOL_EXTENSIONS);
@@ -799,15 +744,17 @@ impl FxTorrentSessionBuilder {
         let torrent_operations = self.operation_factories.take().unwrap_or_else(|| {
             // FIXME: this is currently a duplicate list, consolidate with the torrent request operations
             vec![
-                || Box::new(TorrentTrackersOperation::new()),
+                TorrentOperationFactory::new(|| Box::new(TorrentTrackersOperation::new())),
                 #[cfg(feature = "dht")]
-                || Box::new(TorrentDhtNodesOperation::new()),
+                TorrentOperationFactory::new(|| Box::new(TorrentDhtNodesOperation::new())),
                 #[cfg(feature = "dht")]
-                || Box::new(TorrentDhtPeersOperation::new()),
-                || Box::new(TorrentConnectPeersOperation::new()),
-                || Box::new(TorrentMetadataOperation::new()),
-                || Box::new(TorrentCreatePiecesAndFilesOperation::new()),
-                || Box::new(TorrentFileValidationOperation::new()),
+                TorrentOperationFactory::new(|| Box::new(TorrentDhtPeersOperation::new())),
+                TorrentOperationFactory::new(|| Box::new(TorrentConnectPeersOperation::new(true))),
+                TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new())),
+                TorrentOperationFactory::new(|| {
+                    Box::new(TorrentCreatePiecesAndFilesOperation::new())
+                }),
+                TorrentOperationFactory::new(|| Box::new(TorrentFileValidationOperation::new())),
             ]
         });
         let storage = self.storage.take().unwrap_or_else(|| {
@@ -840,8 +787,7 @@ impl FxTorrentSessionBuilder {
 impl Debug for FxTorrentSessionBuilder {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut d = f.debug_struct("FxTorrentSessionBuilder");
-        d.field("path", &self.path)
-            .field("client_name", &self.client_name)
+        d.field("config", &self.config)
             .field("protocol_extensions", &self.protocol_extensions)
             .field("extensions", &self.extension_factories)
             .field("operation_factories", &self.operation_factories)
@@ -850,15 +796,6 @@ impl Debug for FxTorrentSessionBuilder {
         d.field("dht", &self.dht);
         d.finish()
     }
-}
-
-/// The configuration of a torrent session.
-#[derive(Debug, Clone)]
-pub struct SessionConfig {
-    pub client_name: String,
-    pub path: PathBuf,
-    pub enable_tcp_peer: bool,
-    pub enable_utp_peer: bool,
 }
 
 #[derive(Debug)]
@@ -923,7 +860,7 @@ impl InnerSession {
 
     /// Get the torrent processing operation.
     fn torrent_operations(&self) -> Vec<Box<dyn TorrentOperation>> {
-        self.torrent_operations.iter().map(|e| e()).collect()
+        self.torrent_operations.iter().map(|e| e.create()).collect()
     }
 
     async fn find_torrent_by_handle(&self, handle: &TorrentHandle) -> Option<Torrent> {
@@ -1096,6 +1033,7 @@ pub mod tests {
     use crate::TorrentHealthState;
     use crate::{create_torrent, timeout};
     use log::info;
+    use std::net::Ipv4Addr;
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::sync::mpsc::unbounded_channel;
@@ -1119,27 +1057,56 @@ pub mod tests {
         assert_ne!(None, result);
     }
 
-    #[ignore]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_session_fetch_magnet() {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let uri = "magnet:?xt=EADAF0EFEA39406914414D359E0EA16416409BD7&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
-        let _torrent_with_metadata = create_torrent!(
+        let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
+        let source_torrent = create_torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::Metadata,
-            TorrentConfig::default()
+            TorrentConfig::builder().build(),
+            vec![]
         );
+        let source_port = source_torrent.peer_port().await.unwrap();
+        let session = FxTorrentSession::builder()
+            .config(
+                SessionConfig::builder()
+                    .client_name("fetch magnet test")
+                    .path(temp_path)
+                    .build(),
+            )
+            .extensions(DEFAULT_TORRENT_EXTENSIONS())
+            .operations(vec![
+                TorrentOperationFactory::new(|| Box::new(TorrentConnectPeersOperation::new(true))),
+                TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new())),
+                TorrentOperationFactory::new(|| {
+                    Box::new(TorrentCreatePiecesAndFilesOperation::new())
+                }),
+            ])
+            .build()
+            .unwrap();
 
-        let session = create_session(temp_path).await;
+        // initially, add the torrent without any flags
+        let target_torrent = session
+            .add_torrent_from_uri(uri, TorrentFlags::none())
+            .await
+            .unwrap();
 
+        // add the source torrent to the peer pool of the target
+        target_torrent
+            .add_peer((Ipv4Addr::LOCALHOST, source_port).into())
+            .await
+            .unwrap();
+
+        // now fetch the magnet torrent from the same uri
+        // this will reuse the same target torrent and attach the TorrentFlags::Metadata
         let result = session
             .fetch_magnet(uri, Duration::from_secs(40))
             .await
             .unwrap();
-
         assert_ne!(
             None, result.info,
             "expected the metadata to have been present"
@@ -1232,7 +1199,10 @@ pub mod tests {
             .expect("expected a torrent handle");
 
         let event = select! {
-            _ = tokio::time::sleep(Duration::from_millis(500)) => panic!("receive event timed out"),
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                assert!(false, "receive event timed out");
+                return;
+            },
             event = rx.recv() => event.unwrap(),
         };
         assert_eq!(event, SessionEvent::TorrentAdded(torrent.handle()));
@@ -1281,8 +1251,12 @@ pub mod tests {
 
     async fn create_session(temp_path: &str) -> FxTorrentSession {
         FxTorrentSession::builder()
-            .path(temp_path)
-            .client_name("test")
+            .config(
+                SessionConfig::builder()
+                    .client_name("test")
+                    .path(temp_path)
+                    .build(),
+            )
             .extensions(DEFAULT_TORRENT_EXTENSIONS())
             .build()
             .expect("expected a session to have been created")

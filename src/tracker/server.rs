@@ -100,7 +100,7 @@ impl TrackerServer {
 
         let main_inner = inner.clone();
         tokio::spawn(async move {
-            main_inner.start(listeners).await;
+            main_inner.run(listeners).await;
         });
 
         Ok(Self { inner })
@@ -154,7 +154,7 @@ struct InnerServer {
 }
 
 impl InnerServer {
-    async fn start(&self, listeners: Vec<Box<dyn TrackerListener>>) {
+    async fn run(&self, listeners: Vec<Box<dyn TrackerListener>>) {
         loop {
             let mut futures =
                 FuturesUnordered::from_iter(listeners.iter().map(|e| e.accept())).fuse();

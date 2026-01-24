@@ -27,24 +27,28 @@ A `Torrent` can be created from a magnet link, torrent file, or passing the raw 
 _create a new session with torrent_
 
 ```rust
-use fx_torrent::torrents::{FxTorrentSession, TorrentFlags};
+use fx_torrent::torrents::{FxTorrentSession, SessionConfig, TorrentFlags};
 
 // The fx-torrent crate makes use of async tokio runtimes
 // this requires that new sessions and torrents need to be created within an async context
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
     let session = FxTorrentSession::builder()
-        .base_path("/torrent/location/directory")
-        .client_name("MyClient")
+        .config(
+            SessionConfig::builder()
+                .base_path("/torrent/location/directory")
+                .client_name("MyClient")
+                .build(),
+        )
         .build()
         .unwrap();
 
     // Create a torrent from a magnet link
     let magnet_torrent = session.session.add_torrent_from_uri("magnet:?XXX", TorrentFlags::default()).await;
-    
+
     // Create a torrent from a torrent file
     let file_torrent = session.session.add_torrent_from_uri("/tmp/example.torrent", TorrentFlags::default()).await;
-    
+
     Ok(())
 }
 ```

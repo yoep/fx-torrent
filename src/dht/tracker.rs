@@ -104,7 +104,7 @@ impl DhtTracker {
 
         // start the context in a separate task
         tokio::spawn(async move {
-            context.start(observer, traversal, command_receiver).await;
+            context.run(observer, traversal, command_receiver).await;
         });
 
         Ok(Self {
@@ -748,7 +748,7 @@ impl TrackerContext {
                 sender,
                 cancellation_token: reader_cancellation_token,
             };
-            reader.start().await;
+            reader.run().await;
         });
 
         Self {
@@ -765,9 +765,9 @@ impl TrackerContext {
         }
     }
 
-    /// Start the main event loop of the context.
+    /// Run the task loop of the context.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    pub(crate) async fn start(
+    pub(crate) async fn run(
         &mut self,
         mut observer: Observer,
         mut traversal: TraversalAlgorithm,
@@ -802,7 +802,7 @@ impl TrackerContext {
                 _ = stats_interval.tick() => event = Event::StatsTick,
             }
 
-            self.run(event, &mut observer, &mut traversal, &mut peers)
+            self.run_step(event, &mut observer, &mut traversal, &mut peers)
                 .await
         }
         debug!("{} main loop ended", self);
@@ -810,7 +810,7 @@ impl TrackerContext {
 
     /// Run a single event loop iteration.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    pub(crate) async fn run(
+    pub(crate) async fn run_step(
         &mut self,
         event: Event,
         observer: &mut Observer,
@@ -855,7 +855,10 @@ impl TrackerContext {
                     .handle_incoming_message(message, addr, traversal, peers)
                     .await
                 {
-                    warn!("{} failed to process incoming message, {}", self, e);
+                    warn!(
+                        "{} failed to process incoming message from {}, {}",
+                        self, addr, e
+                    );
                     self.metrics.errors.inc();
                 }
             }
@@ -967,7 +970,7 @@ impl TrackerContext {
                         }
                     }
                 } else {
-                    warn!(
+                    debug!(
                         "{} received response for unknown request, invalid transaction {}",
                         self, key
                     );
@@ -2230,7 +2233,7 @@ struct NodeReader {
 impl NodeReader {
     /// Start the main reader loop of a node server.
     /// This will handle incoming packets and parse them before delivering them to the node server.
-    async fn start(&self) {
+    async fn run(&self) {
         loop {
             let mut buffer = [0u8; MAX_PACKET_SIZE];
             select! {
@@ -2427,7 +2430,7 @@ mod tests {
                 .unwrap()
                 .expect("expected a message");
             incoming
-                .run(
+                .run_step(
                     Event::Incoming(message),
                     &mut observer,
                     &mut traversal,
@@ -2459,7 +2462,7 @@ mod tests {
             // process the incoming node task
             tokio::spawn(async move {
                 let (_sender, receiver) = channel!(1);
-                incoming.start(observer, traversal, receiver).await;
+                incoming.run(observer, traversal, receiver).await;
             });
 
             // request the node info from the nearby node
@@ -2660,7 +2663,7 @@ mod tests {
 
             // run the indexer
             source
-                .run(
+                .run_step(
                     Event::IndexInfoHashesTick,
                     &mut observer,
                     &mut traversal,
@@ -2674,7 +2677,7 @@ mod tests {
                 select! {
                     _ = &mut timeout => assert!(false, "timed out waiting for the info hash to be indexed"),
                     Some(message) = source.receiver.recv() => {
-                        source.run(Event::Incoming(message), &mut observer, &mut traversal, &mut storage).await;
+                        source.run_step(Event::Incoming(message), &mut observer, &mut traversal, &mut storage).await;
                         if storage.info_hashes().count() > 0 {
                             break storage.info_hashes().cloned().collect::<Vec<_>>();
                         }

@@ -1,7 +1,9 @@
 use crate::errors::Result;
+use crate::operation::{TorrentOperation, TorrentOperationResult};
+use crate::peer::PeerDiscovery;
 use crate::{
     File, InfoHash, Piece, PieceError, PieceIndex, TorrentContext, TorrentError, TorrentFileInfo,
-    TorrentMetadataInfo, TorrentOperation, TorrentOperationResult, TorrentState,
+    TorrentMetadataInfo, TorrentState,
 };
 use async_trait::async_trait;
 use log::{debug, trace, warn};
@@ -19,9 +21,8 @@ impl TorrentCreatePiecesAndFilesOperation {
 
     /// Create the pieces information for the torrent.
     /// This operation can only be done when the metadata of the torrent is known.
-    async fn create_pieces(&self, torrent: &TorrentContext) -> bool {
-        torrent.update_state(TorrentState::Initializing).await;
-
+    async fn create_pieces(&self, torrent: &mut TorrentContext) -> bool {
+        torrent.update_state(TorrentState::Initializing);
         match self.try_create_pieces(torrent).await {
             Ok(pieces) => {
                 trace!(
@@ -45,26 +46,23 @@ impl TorrentCreatePiecesAndFilesOperation {
     /// # Returns
     ///
     /// Returns the pieces result for the torrent if available, else the error.
-    async fn try_create_pieces(&self, data: &TorrentContext) -> Result<Vec<Piece>> {
-        let info_hash: InfoHash;
-        let num_pieces: usize;
-        let metadata: TorrentMetadataInfo;
-
-        {
-            let mutex = data.metadata().await;
-            info_hash = mutex.info_hash.clone();
-            metadata = mutex
+    async fn try_create_pieces(&self, context: &TorrentContext) -> Result<Vec<Piece>> {
+        let info_hash = context.metadata().info_hash.clone();
+        let metadata =
+            context
+                .metadata()
                 .info
-                .clone()
+                .as_ref()
                 .ok_or(PieceError::UnableToDeterminePieces(
                     "metadata is unavailable".to_string(),
                 ))?;
-            num_pieces = mutex
+        let num_pieces =
+            context
+                .metadata()
                 .total_pieces()
                 .ok_or(PieceError::UnableToDeterminePieces(
-                    "failed to calculate number of pieces".to_string(),
+                    "metadata is unavailable".to_string(),
                 ))?;
-        }
 
         let sha1_pieces = if info_hash.has_v1() {
             metadata.sha1_pieces()
@@ -113,7 +111,7 @@ impl TorrentCreatePiecesAndFilesOperation {
                 let total_files = files.len();
                 torrent.update_files(files).await;
                 debug!(
-                    "Torrent {} created a total of {} files",
+                    "Torrent {} created a total of {} file(s)",
                     torrent, total_files
                 );
                 true
@@ -128,11 +126,14 @@ impl TorrentCreatePiecesAndFilesOperation {
     /// Try to create the file information of the torrent.
     /// This operation doesn't store the created files within this torrent.
     async fn try_create_files(&self, torrent: &TorrentContext) -> Result<Vec<File>> {
-        let info = torrent.metadata_lock().read().await;
-        let is_v2_metadata: bool = info.info_hash.has_v2();
-        let metadata = info.info.as_ref().ok_or(TorrentError::InvalidMetadata(
-            "metadata is missing".to_string(),
-        ))?;
+        let is_v2_metadata: bool = torrent.metadata().info_hash.has_v2();
+        let metadata = torrent
+            .metadata()
+            .info
+            .as_ref()
+            .ok_or(TorrentError::InvalidMetadata(
+                "metadata is missing".to_string(),
+            ))?;
 
         let mut offset = 0usize;
         let mut files = vec![];
@@ -175,6 +176,11 @@ impl TorrentCreatePiecesAndFilesOperation {
             pieces: file_piece_start..file_piece_end + 1, // as the range is exclusive, add 1 to the end range
         }
     }
+
+    async fn update_state(&self, context: &mut TorrentContext) {
+        let state = context.determine_state().await;
+        context.update_state(state);
+    }
 }
 
 #[async_trait]
@@ -184,7 +190,11 @@ impl TorrentOperation for TorrentCreatePiecesAndFilesOperation {
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    async fn execute(&self, torrent: &Arc<TorrentContext>) -> TorrentOperationResult {
+    async fn execute(
+        &mut self,
+        torrent: &mut TorrentContext,
+        _: &[Arc<dyn PeerDiscovery>],
+    ) -> TorrentOperationResult {
         // check if the pieces have already been created
         // if so, continue the chain
         if torrent.data_pool().num_of_pieces().await > 0 {
@@ -192,8 +202,9 @@ impl TorrentOperation for TorrentCreatePiecesAndFilesOperation {
         }
 
         // try to create the pieces and files
-        if self.create_pieces(&torrent).await {
+        if self.create_pieces(torrent).await {
             if self.create_files(&torrent).await {
+                self.update_state(torrent).await;
                 return TorrentOperationResult::Continue;
             }
         }
@@ -205,36 +216,33 @@ impl TorrentOperation for TorrentCreatePiecesAndFilesOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent;
     use crate::init_logger;
     use tempfile::tempdir;
 
     mod create_pieces {
         use super::*;
+        use crate::create_torrent_context;
 
         #[tokio::test]
         async fn test_execute_create_pieces() {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let (mut context, _) = create_torrent_context!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
-                TorrentConfig::default(),
-                vec![],
+                TorrentConfig::builder().build(),
                 vec![]
             );
-            let inner = torrent.instance().unwrap();
-            let operation =
-                Box::new(TorrentCreatePiecesAndFilesOperation::new()) as Box<dyn TorrentOperation>;
+            let mut operation = TorrentCreatePiecesAndFilesOperation::new();
 
-            let result = operation.execute(&inner).await;
+            let result = operation.execute(&mut context, vec![].as_slice()).await;
 
             assert_eq!(TorrentOperationResult::Continue, result);
             assert_eq!(
                 15237,
-                torrent.total_pieces().await,
+                context.data_pool().num_of_pieces().await,
                 "expected the pieces to have been created"
             );
         }
@@ -244,17 +252,15 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let (mut context, _) = create_torrent_context!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
-                TorrentConfig::default(),
-                vec![],
+                TorrentConfig::builder().build(),
                 vec![]
             );
-            let context = torrent.instance().unwrap();
-            let info_hash = context.metadata().await.info_hash.clone();
-            let operation = TorrentCreatePiecesAndFilesOperation::new();
+            let info_hash = context.metadata().info_hash.clone();
+            let mut operation = TorrentCreatePiecesAndFilesOperation::new();
 
             // insert the initial data within the pool
             context
@@ -280,12 +286,12 @@ mod tests {
                 .await;
 
             // execute the operation
-            let result = operation.execute(&context).await;
+            let result = operation.execute(&mut context, vec![].as_slice()).await;
 
             assert_eq!(TorrentOperationResult::Continue, result);
             assert_eq!(
                 1,
-                torrent.total_pieces().await,
+                context.data_pool().num_of_pieces().await,
                 "expected the pieces to not have been updated"
             );
         }
@@ -293,32 +299,31 @@ mod tests {
 
     mod create_files {
         use super::*;
+        use crate::create_torrent_context;
 
         #[tokio::test]
         async fn test_execute() {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let (mut context, _) = create_torrent_context!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
-                TorrentConfig::default(),
-                vec![],
+                TorrentConfig::builder().build(),
                 vec![]
             );
-            let context = torrent.instance().unwrap();
-            let create_pieces = TorrentCreatePiecesAndFilesOperation::new();
-            let operation = TorrentCreatePiecesAndFilesOperation::new();
+            let mut create_pieces = TorrentCreatePiecesAndFilesOperation::new();
+            let mut operation = TorrentCreatePiecesAndFilesOperation::new();
 
-            let result = create_pieces.execute(&context).await;
+            let result = create_pieces.execute(&mut context, vec![].as_slice()).await;
             assert_eq!(
                 TorrentOperationResult::Continue,
                 result,
                 "expected the pieces to have been created"
             );
 
-            let result = operation.execute(&context).await;
+            let result = operation.execute(&mut context, vec![].as_slice()).await;
             assert_eq!(
                 TorrentOperationResult::Continue,
                 result,
@@ -337,18 +342,16 @@ mod tests {
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
             let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
-            let torrent = create_torrent!(
+            let (mut context, _) = create_torrent_context!(
                 uri,
                 temp_path,
                 TorrentFlags::none(),
-                TorrentConfig::default(),
-                vec![],
+                TorrentConfig::builder().build(),
                 vec![]
             );
-            let context = torrent.instance().unwrap();
-            let operation = TorrentCreatePiecesAndFilesOperation::new();
+            let mut operation = TorrentCreatePiecesAndFilesOperation::new();
 
-            let result = operation.execute(&context).await;
+            let result = operation.execute(&mut context, vec![].as_slice()).await;
 
             assert_eq!(
                 TorrentOperationResult::Stop,
@@ -362,20 +365,20 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let (mut context, _) = create_torrent_context!(
                 "multifile.torrent",
                 temp_path,
                 TorrentFlags::none(),
-                TorrentConfig::default(),
-                vec![],
+                TorrentConfig::builder().build(),
                 vec![]
             );
-            let pieces_operation = TorrentCreatePiecesAndFilesOperation::new();
+            let mut pieces_operation = TorrentCreatePiecesAndFilesOperation::new();
             let operation = TorrentCreatePiecesAndFilesOperation::new();
-            let context = torrent.instance().unwrap();
 
             // create the torrent pieces
-            let result = pieces_operation.execute(&context).await;
+            let result = pieces_operation
+                .execute(&mut context, vec![].as_slice())
+                .await;
             assert_eq!(
                 TorrentOperationResult::Continue,
                 result,
@@ -418,17 +421,15 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let (context, _) = create_torrent_context!(
                 "multifile.torrent",
                 temp_path,
                 TorrentFlags::none(),
-                TorrentConfig::default(),
-                vec![],
+                TorrentConfig::builder().build(),
                 vec![]
             );
-            let context = torrent.instance().unwrap();
-            let metadata = context.metadata().await;
-            let metadata_info = metadata
+            let metadata_info = context
+                .metadata()
                 .info
                 .as_ref()
                 .expect("expected the metadata info to be present");

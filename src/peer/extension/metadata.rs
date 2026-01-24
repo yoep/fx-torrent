@@ -1,12 +1,12 @@
 use crate::peer::extension::{Extension, ExtensionNumber};
 use crate::peer::protocol::Message;
 use crate::peer::{extension, PeerContext, PeerEvent};
-use std::fmt::{Debug, Formatter};
-
 use crate::{PieceIndex, TorrentMetadataInfo};
 use async_trait::async_trait;
 use log::{debug, error, trace, warn};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt::{Debug, Formatter};
+use std::io;
 use std::io::Cursor;
 use tokio::sync::RwLock;
 use tokio_util::bytes::Buf;
@@ -75,7 +75,11 @@ impl MetadataExtension {
         peer: &'a PeerContext,
     ) -> extension::Result<()> {
         // retrieve the current known metadata
-        let metadata = peer.metadata().await.info;
+        let metadata = peer
+            .metadata()
+            .await
+            .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))?
+            .info;
 
         if let Some(metadata) = metadata {
             Self::send_metadata_piece(&metadata, piece, peer).await?;
@@ -93,7 +97,7 @@ impl MetadataExtension {
                 data: vec![],
             };
             let payload = serde_bencode::to_bytes(&message)
-                .map_err(|e| extension::Error::Io(e.to_string()))?;
+                .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
 
             trace!(
                 "Peer {} sending torrent metadata reject, {:?}",
@@ -102,7 +106,7 @@ impl MetadataExtension {
             );
             peer.send(Message::ExtendedPayload(1, payload))
                 .await
-                .map_err(|e| extension::Error::Io(e.to_string()))?;
+                .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
         }
 
         Ok(())
@@ -154,7 +158,7 @@ impl MetadataExtension {
                 debug!("Peer {} completed metadata requests, {:?}", peer, metadata);
 
                 // update the metadata of the underlying torrent through the peer
-                peer.update_metadata(metadata).await;
+                peer.set_torrent_metadata(metadata).await;
                 // make sure the metadata_buffer is released before trying to clear it
                 self.clear_buffer().await;
             } else if self.should_request_metadata(&peer).await {
@@ -197,7 +201,7 @@ impl MetadataExtension {
         );
         peer.send(Message::ExtendedPayload(extension_number, payload))
             .await
-            .map_err(|e| extension::Error::Io(format!("{}", e)))
+            .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))
     }
 
     /// Try to find the metadata extensions number of the remote peer.
@@ -217,7 +221,16 @@ impl MetadataExtension {
 
     /// Check if the metadata should be requested for the torrent.
     async fn should_request_metadata<'a>(&'a self, peer: &'a PeerContext) -> bool {
-        peer.metadata().await.info.is_none()
+        match peer.metadata().await {
+            Ok(metadata) => metadata.info.is_none(),
+            Err(e) => {
+                warn!(
+                    "Peer {} failed to retrieve the torrent metadata, {}",
+                    peer, e
+                );
+                false
+            }
+        }
     }
 
     async fn on_extended_handshake(&self, peer: &PeerContext) {
@@ -225,7 +238,10 @@ impl MetadataExtension {
             && self.should_request_metadata(peer).await
         {
             if let Err(e) = self.request_metadata(0, peer).await {
-                error!("Peer {} failed to request metadata, {}", peer, e);
+                error!(
+                    "Peer {} failed to retrieve the torrent metadata, {}",
+                    peer, e
+                );
             }
         }
     }
@@ -263,7 +279,7 @@ impl MetadataExtension {
         trace!("Sending torrent metadata to peer {}, {:?}", peer, message);
         peer.send(Message::ExtendedPayload(1, payload))
             .await
-            .map_err(|e| extension::Error::Io(e.to_string()))?;
+            .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
         Ok(())
     }
 

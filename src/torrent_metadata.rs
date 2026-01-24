@@ -704,12 +704,9 @@ impl TorrentMetadata {
             .collect()
     }
 
-    /// Get the total number of pieces which are in the torrent.
-    /// This can only be calculated if the metadata is known and will return [None] when not it's available.
+    /// Returns the total number of pieces in the torrent, or [None] if the [TorrentMetadataInfo] is unknown.
     ///
-    /// # Returns
-    ///
-    /// Returns the total number of pieces for the torrent.
+    /// This can only be calculated if the [TorrentMetadataInfo] is known.
     pub fn total_pieces(&self) -> Option<usize> {
         self.info
             .as_ref()

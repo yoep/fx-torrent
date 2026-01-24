@@ -352,11 +352,13 @@ impl Drop for DiskStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operation::TorrentCreatePiecesAndFilesOperation;
+    use crate::create_torrent_context;
+    use crate::init_logger;
+    use crate::operation::{
+        TorrentCreatePiecesAndFilesOperation, TorrentOperation, TorrentOperationResult,
+    };
     use crate::tests::read_test_file_to_bytes;
-    use crate::{create_torrent, init_logger, TorrentOperationResult};
-    use crate::{TorrentContext, TorrentOperation};
-    use std::sync::Arc;
+    use crate::torrent::TorrentContext;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -365,23 +367,18 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let data = read_test_file_to_bytes("piece-1_30.iso");
-        let torrent = create_torrent!(
+        let (mut context, _) = create_torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().path(temp_path).build(),
-            vec![],
             vec![]
         );
-        let context = &torrent.instance().unwrap();
-        let storage = DiskStorage::new(
-            context.metadata_lock().read().await.info_hash.clone(),
-            temp_path,
-            context.data_pool().clone(),
-        );
+        let data_pool = context.data_pool().clone();
+        let storage = DiskStorage::new(context.metadata().info_hash.clone(), temp_path, data_pool);
 
         // create pieces & files
-        create_pieces_and_files(context).await;
+        create_pieces_and_files(&mut context).await;
 
         // write the piece data
         {
@@ -433,23 +430,18 @@ mod tests {
         let temp_path = temp_dir.path().to_str().unwrap();
         let piece: PieceIndex = 0;
         let data = read_test_file_to_bytes("piece-1.iso");
-        let torrent = create_torrent!(
+        let (mut context, _) = create_torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().path(temp_path).build(),
-            vec![],
             vec![]
         );
-        let context = &torrent.instance().unwrap();
-        let storage = DiskStorage::new(
-            context.metadata_lock().read().await.info_hash.clone(),
-            temp_path,
-            context.data_pool().clone(),
-        );
+        let data_pool = context.data_pool().clone();
+        let storage = DiskStorage::new(context.metadata().info_hash.clone(), temp_path, data_pool);
 
         // create pieces & files
-        create_pieces_and_files(context).await;
+        create_pieces_and_files(&mut context).await;
 
         // write the piece data
         {
@@ -484,9 +476,9 @@ mod tests {
         }
     }
 
-    async fn create_pieces_and_files(context: &Arc<TorrentContext>) {
-        let operation = TorrentCreatePiecesAndFilesOperation::new();
-        let result = operation.execute(context).await;
+    async fn create_pieces_and_files(context: &mut TorrentContext) {
+        let mut operation = TorrentCreatePiecesAndFilesOperation::new();
+        let result = operation.execute(context, vec![].as_slice()).await;
         assert_eq!(TorrentOperationResult::Continue, result);
     }
 }

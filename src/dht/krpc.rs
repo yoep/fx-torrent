@@ -364,7 +364,7 @@ impl<'de> Deserialize<'de> for ErrorMessage {
                 201 => Ok(ErrorMessage::Generic(msg)),
                 202 => Ok(ErrorMessage::Server(msg)),
                 203 => Ok(ErrorMessage::Protocol(msg)),
-                404 => Ok(ErrorMessage::Method(msg)),
+                204 => Ok(ErrorMessage::Method(msg)),
                 _ => Err(de::Error::custom(format!("Unknown error code {}", code))),
             }
         } else {
@@ -1101,6 +1101,29 @@ mod tests {
                 serde_bencode::from_str::<Message>(payload).expect("expected a valid message");
 
             assert_eq!(expected_result, result);
+        }
+
+        #[test]
+        fn test_error_message_deserialize() {
+            let message = ErrorMessage::Generic("lorem".to_string());
+            let bytes = serde_bencode::to_bytes(&message).unwrap();
+            let result = serde_bencode::from_bytes::<ErrorMessage>(bytes.as_slice()).unwrap();
+            assert_eq!(message, result);
+
+            let message = ErrorMessage::Protocol("ipsum".to_string());
+            let bytes = serde_bencode::to_bytes(&message).unwrap();
+            let result = serde_bencode::from_bytes::<ErrorMessage>(bytes.as_slice()).unwrap();
+            assert_eq!(message, result);
+
+            let message = ErrorMessage::Server("dolor".to_string());
+            let bytes = serde_bencode::to_bytes(&message).unwrap();
+            let result = serde_bencode::from_bytes::<ErrorMessage>(bytes.as_slice()).unwrap();
+            assert_eq!(message, result);
+
+            let message = ErrorMessage::Method("esta".to_string());
+            let bytes = serde_bencode::to_bytes(&message).unwrap();
+            let result = serde_bencode::from_bytes::<ErrorMessage>(bytes.as_slice()).unwrap();
+            assert_eq!(message, result);
         }
     }
 

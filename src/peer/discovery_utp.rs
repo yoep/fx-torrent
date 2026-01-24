@@ -4,7 +4,8 @@ use crate::peer::{
     BitTorrentPeer, Error, Peer, PeerDiscovery, PeerEntry, PeerId, PeerStream,
     ProtocolExtensionFlags, Result,
 };
-use crate::TorrentContext;
+use crate::torrent::InnerTorrent;
+use crate::torrent_data::DataPool;
 use async_trait::async_trait;
 use derive_more::Display;
 use futures::stream::FuturesUnordered;
@@ -93,7 +94,8 @@ impl PeerDiscovery for UtpPeerDiscovery {
         &self,
         peer_id: PeerId,
         peer_addr: SocketAddr,
-        torrent: Arc<TorrentContext>,
+        torrent: InnerTorrent,
+        data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Extensions,
         connection_timeout: Duration,
@@ -113,6 +115,7 @@ impl PeerDiscovery for UtpPeerDiscovery {
                     peer_addr,
                     PeerStream::Utp(stream),
                     torrent,
+                    data_pool,
                     protocol_extensions,
                     extensions,
                     connection_timeout,
@@ -153,7 +156,7 @@ impl Drop for UtpPeerDiscovery {
 }
 
 #[derive(Debug, Display)]
-#[display("{} (port {})", handle, "addr.port()")]
+#[display("{} (port {})", handle, addr.port())]
 struct InnerUtpPeerDiscovery {
     handle: UtpPeerDiscoveryHandle,
     addr: SocketAddr,
@@ -270,11 +273,12 @@ mod tests {
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
-            TorrentConfig::default(),
+            TorrentConfig::builder().build(),
             vec![],
             vec![Box::new(listener.clone())]
         );
-        let context = torrent.instance().unwrap();
+        let protocol_extensions = torrent.protocol_extensions().await.unwrap();
+        let extensions = torrent.inner.extensions().await.unwrap();
 
         let dialer = UtpPeerDiscovery::new()
             .await
@@ -283,9 +287,10 @@ mod tests {
             .dial(
                 PeerId::new(),
                 SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
-                context.clone(),
-                context.protocol_extensions(),
-                context.extensions(),
+                torrent.inner.clone(),
+                torrent.inner.data_pool().await.unwrap(),
+                protocol_extensions,
+                extensions,
                 Duration::from_secs(2),
             )
             .await

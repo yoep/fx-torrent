@@ -2,7 +2,7 @@
 
 prerequisites: ## Install the Cargo requirements for testing
 	@echo Installing Cargo plugins
-	@cargo install cargo-nextest
+	@cargo install cargo-nextest --locked
 	@cargo install cargo-llvm-cov
 
 test: prerequisites ## Test the cargo project

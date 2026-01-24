@@ -1,5 +1,5 @@
 use chrono::Local;
-use log::{Level, Log, Metadata, Record};
+use log::{error, Level, Log, Metadata, Record};
 use std::collections::VecDeque;
 use std::io;
 use std::io::Write;
@@ -78,7 +78,7 @@ impl AppLogger {
 
         tokio::spawn(async move {
             let mut logfile_writer = AppLogfileWriter::new();
-            logfile_writer.start(log_receiver).await;
+            logfile_writer.run(log_receiver).await;
         });
 
         Self { inner }
@@ -217,12 +217,17 @@ impl AppLogfileWriter {
         Self {}
     }
 
-    async fn start(&mut self, mut log_receiver: UnboundedReceiver<LogEntry>) {
-        if let Ok(mut file) = Self::create_logfile().await {
-            while let Some(log) = log_receiver.recv().await {
-                let mut buf = Vec::new();
-                let _ = writeln!(buf, "{}", log.text);
-                let _ = file.write_all(&buf).await;
+    async fn run(&mut self, mut log_receiver: UnboundedReceiver<LogEntry>) {
+        match Self::create_logfile().await {
+            Ok(mut file) => {
+                while let Some(log) = log_receiver.recv().await {
+                    let mut buf = Vec::new();
+                    let _ = writeln!(buf, "{}", log.text);
+                    let _ = file.write_all(&buf).await;
+                }
+            }
+            Err(e) => {
+                error!("Failed to run the log file writer, {}", e);
             }
         }
     }

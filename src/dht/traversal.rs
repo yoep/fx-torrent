@@ -233,7 +233,7 @@ mod tests {
             let observer = Observer::new(sender.clone());
             let traversal = TraversalAlgorithm::new(8, vec![], sender);
 
-            target.start(observer, traversal, receiver).await;
+            target.run(observer, traversal, receiver).await;
         });
 
         // run the traversal algorithm
@@ -253,7 +253,7 @@ mod tests {
                     break result;
                 },
                 Some(message) = source.receiver.recv() => {
-                    source.run(Event::Incoming(message), &mut observer, &mut traversal, &mut peers).await;
+                    source.run_step(Event::Incoming(message), &mut observer, &mut traversal, &mut peers).await;
                 }
             }
         }

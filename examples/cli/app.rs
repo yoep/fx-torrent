@@ -12,11 +12,10 @@ use fx_torrent::dht::DhtTracker;
 use fx_torrent::operation::{
     TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation, TorrentDhtNodesOperation,
     TorrentDhtPeersOperation, TorrentFileValidationOperation, TorrentMetadataOperation,
-    TorrentTrackersOperation,
+    TorrentOperationFactory, TorrentStatsOperation, TorrentTrackersOperation,
 };
 use fx_torrent::{
-    DhtOption, FxSessionCache, FxTorrentSession, Session, SessionEvent, TorrentFlags,
-    TorrentOperationFactory,
+    DhtOption, FxSessionCache, FxTorrentSession, Session, SessionConfig, SessionEvent, TorrentFlags,
 };
 use log::{error, warn};
 use ratatui::layout::Constraint::{Length, Min};
@@ -187,6 +186,7 @@ impl App {
             AppCommand::AddTorrentUri(uri) => self.add_torrent_uri(uri.as_str()).await,
             AppCommand::DhtEnabled(enabled) => self.update_dht(enabled).await,
             AppCommand::TrackerEnabled(enabled) => self.update_trackers(enabled).await,
+            AppCommand::WebseedsEnabled(enabled) => self.update_webseeds(enabled).await,
             AppCommand::TcpPeerEnabled(enabled) => self.update_tcp_peer_connections(enabled).await,
             AppCommand::UtpPeerEnabled(enabled) => self.update_utp_peer_connections(enabled).await,
             AppCommand::Storage(location) => self.update_storage(location).await,
@@ -327,6 +327,11 @@ impl App {
         self.recreate_session().await;
     }
 
+    async fn update_webseeds(&mut self, enabled: bool) {
+        self.settings.webseeds_enabled = enabled;
+        self.recreate_session().await;
+    }
+
     async fn update_tcp_peer_connections(&mut self, enabled: bool) {
         self.settings.tcp_peer_enabled = enabled;
         self.recreate_session().await;
@@ -441,11 +446,15 @@ impl App {
     }
 
     async fn create_session(settings: &AppSettings) -> io::Result<FxTorrentSession> {
+        let webseeds_enabled = settings.webseeds_enabled;
         let mut operations: Vec<TorrentOperationFactory> = vec![
-            || Box::new(TorrentConnectPeersOperation::new()),
-            || Box::new(TorrentMetadataOperation::new()),
-            || Box::new(TorrentCreatePiecesAndFilesOperation::new()),
-            || Box::new(TorrentFileValidationOperation::new()),
+            TorrentOperationFactory::new(|| Box::new(TorrentStatsOperation::new())),
+            TorrentOperationFactory::new(move || {
+                Box::new(TorrentConnectPeersOperation::new(webseeds_enabled))
+            }),
+            TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new())),
+            TorrentOperationFactory::new(|| Box::new(TorrentCreatePiecesAndFilesOperation::new())),
+            TorrentOperationFactory::new(|| Box::new(TorrentFileValidationOperation::new())),
         ];
         let mut operation_index = 0;
 
@@ -453,36 +462,31 @@ impl App {
         if settings.trackers_enabled {
             operations.insert(
                 operation_index,
-                || Box::new(TorrentTrackersOperation::new()),
+                TorrentOperationFactory::new(|| Box::new(TorrentTrackersOperation::new())),
             );
             operation_index += 1;
         }
         if settings.dht_enabled {
             operations.insert(
                 operation_index,
-                || Box::new(TorrentDhtNodesOperation::new()),
+                TorrentOperationFactory::new(|| Box::new(TorrentDhtNodesOperation::new())),
             );
             operation_index += 1;
             operations.insert(
                 operation_index,
-                || Box::new(TorrentDhtPeersOperation::new()),
+                TorrentOperationFactory::new(|| Box::new(TorrentDhtPeersOperation::new())),
             );
         }
 
-        let mut builder = FxTorrentSession::builder();
-
-        match settings.tcp_peer_enabled {
-            true => builder.enable_tcp_peer(),
-            false => builder.disable_tcp_peer(),
-        };
-        match settings.utp_peer_enabled {
-            true => builder.enable_utp_peer(),
-            false => builder.disable_utp_peer(),
-        };
-
-        builder
-            .client_name(APP_CLIENT_NAME)
-            .path(&settings.storage)
+        FxTorrentSession::builder()
+            .config(
+                SessionConfig::builder()
+                    .client_name(APP_CLIENT_NAME)
+                    .path(&settings.storage)
+                    .enable_tcp_peer(settings.tcp_peer_enabled)
+                    .enable_utp_peer(settings.utp_peer_enabled)
+                    .build(),
+            )
             .session_cache(FxSessionCache::new(SESSION_CACHE_LIMIT))
             .operations(operations)
             .dht(if settings.dht_enabled {
@@ -509,6 +513,8 @@ pub enum AppCommand {
     DhtEnabled(bool),
     /// Set if trackers are enabled
     TrackerEnabled(bool),
+    /// Set if webseeds are enabled
+    WebseedsEnabled(bool),
     /// Set if tcp peer connections are enabled
     TcpPeerEnabled(bool),
     /// Set if utp peer connections are enabled
@@ -534,6 +540,7 @@ struct AppSettings {
     trackers_enabled: bool,
     tcp_peer_enabled: bool,
     utp_peer_enabled: bool,
+    webseeds_enabled: bool,
     torrent_flags: TorrentFlags,
 }
 
@@ -545,6 +552,7 @@ impl Default for AppSettings {
             trackers_enabled: true,
             tcp_peer_enabled: true,
             utp_peer_enabled: true,
+            webseeds_enabled: true,
             torrent_flags: DEFAULT_TORRENT_FLAGS(),
         }
     }

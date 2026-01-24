@@ -1,7 +1,7 @@
 use crate::channel::{ChannelReceiver, ChannelSender, Reply};
 use crate::{
     channel, File, FileAttributeFlags, FileIndex, FilePriority, PartIndex, Piece, PieceIndex,
-    PiecePriority,
+    PiecePart, PiecePriority,
 };
 use bit_vec::BitVec;
 use itertools::Itertools;
@@ -138,23 +138,36 @@ impl DataPool {
 
     /// Returns the piece which contains the given torrent offset.
     pub async fn find_piece_at_offset(&self, offset: usize) -> Option<Piece> {
-        let rx = self
-            .sender
+        self.sender
             .send(|tx| DataPoolCommand::FindPieceAtOffset {
                 offset,
                 response: tx,
             })
-            .await;
-        rx.await.unwrap_or_default()
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Returns the piece part matching the given offset within the piece, if found, else [None].
+    pub async fn find_piece_part(&self, piece: &PieceIndex, offset: usize) -> Option<PiecePart> {
+        self.sender
+            .send(|tx| DataPoolCommand::FindPiecePart {
+                piece: *piece,
+                offset,
+                response: tx,
+            })
+            .await
+            .await
+            .unwrap_or_default()
     }
 
     /// Returns the piece priorities for the torrent.
     pub async fn piece_priorities(&self) -> BTreeMap<PieceIndex, PiecePriority> {
-        let rx = self
-            .sender
+        self.sender
             .send(|tx| DataPoolCommand::PiecePriorities { response: tx })
-            .await;
-        rx.await.unwrap_or_default()
+            .await
+            .await
+            .unwrap_or_default()
     }
 
     /// Set the priorities for the given pieces of the torrent.
@@ -190,15 +203,28 @@ impl DataPool {
         rx.await.unwrap_or_default()
     }
 
-    /// Check if the torrent has downloaded all wanted pieces.
-    /// This means that every piece with anything but a [PiecePriority::None] has
-    /// been downloaded and validated their data.
+    /// Returns `true` if all wanted pieces have been downloaded and validated, else `false`.
+    ///
+    /// Every piece with anything but a [PiecePriority::None] has
+    /// been downloaded and validated their data in this case.
     pub async fn is_completed(&self) -> bool {
-        let rx = self
-            .sender
+        self.sender
             .send(|tx| DataPoolCommand::IsCompleted { response: tx })
-            .await;
-        rx.await.unwrap_or_default()
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Returns `true` if the torrent has reached the end game, else `false`.
+    ///
+    /// The end game is reached when the last 3 percent, counted with a precision of 2 decimals,
+    /// of the pieces are left to be completed.
+    pub async fn is_end_game(&self) -> bool {
+        self.sender
+            .send(|tx| DataPoolCommand::IsEndGame { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
     }
 
     /// Returns `true` if the given piece has completed downloading, else `false`.
@@ -368,6 +394,11 @@ enum DataPoolCommand {
         offset: usize,
         response: Reply<Option<Piece>>,
     },
+    FindPiecePart {
+        piece: PieceIndex,
+        offset: usize,
+        response: Reply<Option<PiecePart>>,
+    },
     PiecePriorities {
         response: Reply<BTreeMap<PieceIndex, PiecePriority>>,
     },
@@ -416,6 +447,9 @@ enum DataPoolCommand {
         response: Reply<BitVec>,
     },
     IsCompleted {
+        response: Reply<bool>,
+    },
+    IsEndGame {
         response: Reply<bool>,
     },
     HasBytes {
@@ -483,6 +517,19 @@ impl InnerDataPool {
                 DataPoolCommand::FindPieceAtOffset { offset, response } => {
                     response.send(self.find_piece_at_offset(offset));
                 }
+                DataPoolCommand::FindPiecePart {
+                    piece,
+                    offset,
+                    response,
+                } => response.send(self.pieces.iter().find(|(idx, _)| *idx == &piece).and_then(
+                    |(_, piece)| {
+                        piece
+                            .parts
+                            .iter()
+                            .find(|part| part.begin == offset)
+                            .cloned()
+                    },
+                )),
                 DataPoolCommand::PiecePriorities { response } => {
                     response.send(self.piece_priorities());
                 }
@@ -533,6 +580,9 @@ impl InnerDataPool {
                 }
                 DataPoolCommand::IsCompleted { response } => {
                     response.send(self.is_completed());
+                }
+                DataPoolCommand::IsEndGame { response } => {
+                    response.send(self.is_end_game());
                 }
                 DataPoolCommand::FileIndexFor {
                     piece: index,
@@ -727,6 +777,21 @@ impl InnerDataPool {
                 piece_range.start < bytes.end && bytes.start < piece_range.end
             })
             .all(|(index, _)| self.is_piece_completed(index))
+    }
+
+    fn is_end_game(&self) -> bool {
+        let interested_pieces = self.interested_pieces().len();
+        if interested_pieces == 0 {
+            return true;
+        }
+
+        let total_completed_pieces = self.completed_pieces.count_ones();
+        // if only 3 percent, counted with a precision of 2 decimals, of the pieces are left to be completed
+        // then we enter the end-game phase
+        let percentage_completed_pieces =
+            ((total_completed_pieces as f32 / interested_pieces as f32) * 10_000.0).round() / 100.0;
+
+        percentage_completed_pieces >= 97.0
     }
 
     /// Check if the piece is wanted by the torrent.
@@ -1121,6 +1186,59 @@ mod tests {
                     (i, priority)
                 })
                 .collect()
+        }
+    }
+
+    mod is_end_game {
+        use super::*;
+        use crate::init_logger;
+
+        #[tokio::test]
+        async fn test_end_game_not_reached() {
+            init_logger!();
+            let pieces = vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+                create_piece(3, 1024),
+            ];
+            let data_pool = DataPool::from(pieces);
+
+            data_pool.set_completed(&0, true).await;
+
+            let result = data_pool.is_end_game().await;
+            assert_eq!(
+                false, result,
+                "expected the torrent to not be in end-game phase yet"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_end_game_reached() {
+            init_logger!();
+            let pieces = (0..100)
+                .into_iter()
+                .map(|i| create_piece(i, 256))
+                .collect::<Vec<_>>();
+            let data_pool = DataPool::from(pieces);
+
+            // complete 96 percent
+            for i in 0..96 {
+                data_pool.set_completed(&i, true).await;
+            }
+            let result = data_pool.is_end_game().await;
+            assert_eq!(
+                false, result,
+                "expected the torrent to not be in end-game phase yet"
+            );
+
+            // complete 97 percent
+            data_pool.set_completed(&96, true).await;
+            let result = data_pool.is_end_game().await;
+            assert_eq!(
+                true, result,
+                "expected the torrent to be in the end-game phase"
+            );
         }
     }
 

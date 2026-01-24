@@ -1,15 +1,13 @@
 use crate::peer::extension::Extensions;
 use crate::peer::{Peer, PeerId, PeerStream, ProtocolExtensionFlags, Result};
-use crate::TorrentContext;
-
+use crate::torrent::InnerTorrent;
+use crate::torrent_data::DataPool;
 use async_trait::async_trait;
-use std::fmt::Debug;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
-
 #[cfg(test)]
 pub use mock::*;
+use std::fmt::Debug;
+use std::net::SocketAddr;
+use std::time::Duration;
 
 /// A received peer entry incoming connection.
 #[derive(Debug)]
@@ -44,7 +42,8 @@ pub trait PeerDiscovery: Debug + Send + Sync {
     ///
     /// * `peer_id` - The unique peer identifier of the torrent.
     /// * `peer_addr` - The address of the peer to dial.
-    /// * `torrent` - The torrent context of the peer connection.
+    /// * `torrent` - The torrent to use for the connection.
+    /// * `data_pool` - The torrent data pool to use for the connection.
     /// * `protocol_extensions` - The peer protocol extensions that should be enabled for the connection. (BEP4)
     /// * `extensions` - The peer extensions that should be activated for the connection. (BEP10)
     /// * `connection_timeout` - The timeout of a peer connection.
@@ -56,7 +55,8 @@ pub trait PeerDiscovery: Debug + Send + Sync {
         &self,
         peer_id: PeerId,
         peer_addr: SocketAddr,
-        torrent: Arc<TorrentContext>,
+        torrent: InnerTorrent,
+        data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Extensions,
         connection_timeout: Duration,
@@ -92,7 +92,8 @@ pub mod mock {
                 &self,
                 peer_id: PeerId,
                 peer_addr: SocketAddr,
-                torrent: Arc<TorrentContext>,
+                torrent: InnerTorrent,
+                data_pool: DataPool,
                 protocol_extensions: ProtocolExtensionFlags,
                 extensions: Extensions,
                 connection_timeout: Duration,

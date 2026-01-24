@@ -801,9 +801,6 @@ impl TorrentPeersWidget {
                     PeerEvent::StateChanged(state) => {
                         peer_data.state = *state;
                     }
-                    PeerEvent::RemoteAvailablePieces(_) => {
-                        peer_data.is_seed = peer_data.peer.is_seed().await;
-                    }
                     PeerEvent::Stats(metrics) => {
                         peer_data.available_pieces = metrics.available_pieces.get();
                         peer_data.client_interested = metrics.client_interested.get();
@@ -814,6 +811,7 @@ impl TorrentPeersWidget {
                         peer_data.bytes_in_total = metrics.bytes_in.total();
                         peer_data.bytes_out = metrics.bytes_out.rate();
                         peer_data.bytes_out_total = metrics.bytes_out.total();
+                        peer_data.is_seed = peer_data.peer.is_seed().await;
                     }
                     _ => {}
                 }
