@@ -196,6 +196,14 @@ impl Magnet {
         Ok(())
     }
 
+    /// Verify if the given uri contains the magnet scheme.
+    /// It returns `true` if the uri has the magnet scheme, `false` otherwise.
+    pub fn has_magnet_scheme<S: AsRef<str>>(uri: S) -> bool {
+        Url::parse(uri.as_ref())
+            .map(|e| e.scheme() == MAGNET_SCHEME)
+            .unwrap_or(false)
+    }
+
     /// Check if the given uri contains an encoded `&` as `&amp`.
     fn contains_encoded_ampersand(uri: &str) -> bool {
         uri.contains("&amp;")

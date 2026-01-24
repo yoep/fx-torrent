@@ -103,10 +103,11 @@ impl Storage for MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operation::TorrentCreatePiecesAndFilesOperation;
+    use crate::operation::{
+        TorrentCreatePiecesAndFilesOperation, TorrentOperation, TorrentOperationResult,
+    };
     use crate::tests::read_test_file_to_bytes;
-    use crate::{create_torrent, init_logger};
-    use crate::{TorrentOperation, TorrentOperationResult};
+    use crate::{create_torrent_context, init_logger};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -142,16 +143,14 @@ mod tests {
         let temp_path = temp_dir.path().to_str().unwrap();
         let piece: PieceIndex = 0;
         let data = read_test_file_to_bytes("piece-1.iso");
-        let torrent = create_torrent!(
+        let (mut context, _) = create_torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().path(temp_path).build(),
-            vec![],
             vec![]
         );
-        let operation = TorrentCreatePiecesAndFilesOperation::new();
-        let context = &torrent.instance().unwrap();
+        let mut operation = TorrentCreatePiecesAndFilesOperation::new();
         let storage = MemoryStorage::new();
 
         // write the piece data
@@ -163,7 +162,7 @@ mod tests {
         );
 
         // create the pieces
-        let result = operation.execute(context).await;
+        let result = operation.execute(&mut context, vec![].as_slice()).await;
         assert_eq!(
             TorrentOperationResult::Continue,
             result,

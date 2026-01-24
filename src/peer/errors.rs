@@ -67,15 +67,21 @@ impl PartialEq for Error {
     }
 }
 
+impl From<crate::TorrentError> for Error {
+    fn from(error: crate::TorrentError) -> Self {
+        Self::Io(io::Error::new(io::ErrorKind::Other, error))
+    }
+}
+
 impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
-        Error::Io(error)
+        Self::Io(error)
     }
 }
 
 impl From<Elapsed> for Error {
     fn from(error: Elapsed) -> Self {
-        Error::Io(io::Error::new(io::ErrorKind::TimedOut, error))
+        Self::Io(io::Error::new(io::ErrorKind::TimedOut, error))
     }
 }
 

@@ -1,5 +1,7 @@
 use crate::dht::Error;
-use crate::{TorrentContext, TorrentOperation, TorrentOperationResult};
+use crate::operation::{TorrentOperation, TorrentOperationResult};
+use crate::peer::PeerDiscovery;
+use crate::TorrentContext;
 use async_trait::async_trait;
 use log::{debug, trace};
 use std::sync::Arc;
@@ -25,10 +27,10 @@ impl TorrentDhtPeersOperation {
         }
     }
 
-    async fn retrieve_peers(&self, context: &Arc<TorrentContext>) {
+    async fn retrieve_peers(&self, context: &mut TorrentContext) {
         let dht = context.dht();
         if let Some(dht) = dht.inner.as_ref() {
-            let info_hash = context.metadata_lock().read().await.info_hash.clone();
+            let info_hash = context.metadata().info_hash.clone();
 
             // FIXME: spawn this on a separate task, as it's blocking the torrent loop
             let result = timeout(
@@ -41,7 +43,7 @@ impl TorrentDhtPeersOperation {
             match result {
                 Ok(peers) => {
                     debug!("Torrent {} discovered {} DHT peers", context, peers.len());
-                    context.add_peer_addresses(peers).await;
+                    context.add_peer_addresses(peers);
                 }
                 Err(err) => {
                     debug!("Torrent {} failed to retrieve peers, {}", context, err);
@@ -65,7 +67,11 @@ impl TorrentOperation for TorrentDhtPeersOperation {
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    async fn execute(&self, torrent: &Arc<TorrentContext>) -> TorrentOperationResult {
+    async fn execute(
+        &mut self,
+        torrent: &mut TorrentContext,
+        _: &[Arc<dyn PeerDiscovery>],
+    ) -> TorrentOperationResult {
         let elapsed = if let Some(last_executed) = self.last_executed.lock().await.as_ref() {
             last_executed.elapsed()
         } else {
@@ -84,8 +90,7 @@ impl TorrentOperation for TorrentDhtPeersOperation {
 mod tests {
     use super::*;
     use crate::dht::DhtTracker;
-    use crate::storage::MemoryStorage;
-    use crate::{create_torrent, init_logger};
+    use crate::{create_torrent_context, init_logger};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -99,21 +104,18 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let torrent = create_torrent!(
+        let (mut context, _) = create_torrent_context!(
             uri,
             temp_path,
             TorrentFlags::none(),
-            TorrentConfig::default(),
+            TorrentConfig::builder().build(),
             vec![],
-            vec![],
-            |_| Box::new(MemoryStorage::new()),
             Some(dht)
         );
-        let context = torrent.instance().unwrap();
-        let operation = TorrentDhtPeersOperation::new();
+        let mut operation = TorrentDhtPeersOperation::new();
 
         // execute the operation
-        let result = operation.execute(&context).await;
+        let result = operation.execute(&mut context, vec![].as_slice()).await;
         assert_eq!(TorrentOperationResult::Continue, result);
 
         // check if the last_executed has been set

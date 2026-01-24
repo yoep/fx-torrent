@@ -1,5 +1,6 @@
-use crate::{TorrentContext, TorrentOperation, TorrentState};
-use crate::{TorrentFlags, TorrentOperationResult};
+use crate::operation::{TorrentOperation, TorrentOperationResult};
+use crate::peer::PeerDiscovery;
+use crate::{TorrentContext, TorrentFlags, TorrentState};
 use async_trait::async_trait;
 use log::trace;
 use std::sync::Arc;
@@ -30,7 +31,7 @@ impl TorrentMetadataOperation {
             return true;
         }
 
-        if torrent.metadata().await.info.is_some() {
+        if torrent.metadata().info.is_some() {
             self.info.lock().await.metadata_present = true;
             return true;
         }
@@ -39,8 +40,7 @@ impl TorrentMetadataOperation {
     }
 
     async fn is_metadata_retrieval_enabled(&self, torrent: &TorrentContext) -> bool {
-        let options = torrent.options_owned().await;
-        options.contains(TorrentFlags::Metadata)
+        torrent.options().contains(TorrentFlags::Metadata)
     }
 }
 
@@ -51,7 +51,11 @@ impl TorrentOperation for TorrentMetadataOperation {
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    async fn execute(&self, torrent: &Arc<TorrentContext>) -> TorrentOperationResult {
+    async fn execute(
+        &mut self,
+        torrent: &mut TorrentContext,
+        _: &[Arc<dyn PeerDiscovery>],
+    ) -> TorrentOperationResult {
         let is_metadata_known = self.is_metadata_known(&torrent).await;
 
         if is_metadata_known {
@@ -63,7 +67,7 @@ impl TorrentOperation for TorrentMetadataOperation {
             && !self.info.lock().await.requesting_metadata
         {
             // update the state of the torrent
-            torrent.update_state(TorrentState::RetrievingMetadata).await;
+            torrent.update_state(TorrentState::RetrievingMetadata);
 
             // check if there have been any peers discovered yet
             // if not, we want to retrieve the peers from trackers
@@ -88,7 +92,7 @@ struct MetadataInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent;
+    use crate::create_torrent_context;
     use crate::init_logger;
     use tempfile::tempdir;
 
@@ -97,18 +101,16 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let torrent = create_torrent!(
+        let (mut context, _) = create_torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
-            TorrentConfig::default(),
-            vec![],
+            TorrentConfig::builder().build(),
             vec![]
         );
-        let context = torrent.instance().unwrap();
-        let operation = TorrentMetadataOperation::new();
+        let mut operation = TorrentMetadataOperation::new();
 
-        let result = operation.execute(&context).await;
+        let result = operation.execute(&mut context, vec![].as_slice()).await;
 
         assert_eq!(TorrentOperationResult::Continue, result);
     }
@@ -119,18 +121,16 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
-        let torrent = create_torrent!(
+        let (mut context, _) = create_torrent_context!(
             uri,
             temp_path,
             TorrentFlags::none(),
-            TorrentConfig::default(),
-            vec![],
+            TorrentConfig::builder().build(),
             vec![]
         );
-        let context = torrent.instance().unwrap();
-        let operation = TorrentMetadataOperation::new();
+        let mut operation = TorrentMetadataOperation::new();
 
-        let result = operation.execute(&context).await;
+        let result = operation.execute(&mut context, vec![].as_slice()).await;
 
         assert_eq!(TorrentOperationResult::Stop, result);
     }

@@ -55,7 +55,7 @@ impl Into<[u8; 8]> for ProtocolExtensionFlags {
 
 impl From<[u8; 8]> for ProtocolExtensionFlags {
     fn from(bits: [u8; 8]) -> Self {
-        let mut flags = Self::None;
+        let mut flags = Self::none();
 
         if bits[0] & EXTENSION_BIT_AZUREUS == EXTENSION_BIT_AZUREUS {
             flags |= Self::Azureus;
@@ -86,7 +86,6 @@ impl From<[u8; 8]> for ProtocolExtensionFlags {
             return flags;
         }
 
-        flags &= !Self::None;
         flags
     }
 }

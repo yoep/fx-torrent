@@ -112,13 +112,11 @@ impl PexExtension {
         }
     }
 
-    fn subscribe_to_torrent(&self, peer: &PeerContext) {
-        let torrent = peer.torrent();
+    async fn subscribe_to_torrent(&self, peer: &PeerContext) {
         let pool = self.pool.clone();
 
         if let Some(extension_number) = peer.find_client_extension_number(EXTENSION_NAME_PEX) {
-            let mut receiver = torrent.subscribe();
-
+            let mut receiver = peer.torrent().subscribe();
             let event_sender = peer.event_sender().clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(90));
@@ -163,12 +161,12 @@ impl Extension for PexExtension {
 
         let discovered_peers = message.discovered_peers();
         if discovered_peers.len() > 0 {
-            peer.invoke_event(PeerEvent::PeersDiscovered(discovered_peers));
+            peer.torrent().add_peers(discovered_peers).await;
         }
 
         let dropped_peers = message.dropped_peers();
         if dropped_peers.len() > 0 {
-            peer.invoke_event(PeerEvent::PeersDropped(dropped_peers));
+            peer.torrent().decrease_peer_priority(dropped_peers).await;
         }
 
         Ok(())
@@ -176,7 +174,7 @@ impl Extension for PexExtension {
 
     async fn on<'a>(&'a self, event: &'a PeerEvent, peer: &'a PeerContext) {
         if let PeerEvent::ExtendedHandshakeCompleted = event {
-            self.subscribe_to_torrent(peer)
+            self.subscribe_to_torrent(peer).await
         }
     }
 }

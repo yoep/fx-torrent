@@ -1,20 +1,13 @@
+use futures::FutureExt;
 use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
-use std::result;
 use std::task::{Context, Poll};
-use thiserror::Error;
+use std::{io, result};
 use tokio::sync::{mpsc, oneshot};
 
 /// The result type of channel operations.
-pub type Result<T> = result::Result<T, ChannelError>;
-
-/// An error which can occur during a channel operation.
-#[derive(Debug, Error)]
-pub enum ChannelError {
-    #[error("the channel has been closed")]
-    Closed,
-}
+pub type Result<T> = result::Result<T, io::Error>;
 
 /// The channel sending half for sending messages between torrent tasks.
 #[derive(Debug)]
@@ -23,6 +16,15 @@ pub struct ChannelSender<T> {
 }
 
 impl<T> ChannelSender<T> {
+    /// Returns `true` if the channel has been closed.
+    /// In this case, the channel will no longer accept any messages.
+    pub fn is_closed(&self) -> bool {
+        match &self.inner {
+            InnerSenderChannel::Bounded(e) => e.is_closed(),
+            InnerSenderChannel::Unbounded(e) => e.is_closed(),
+        }
+    }
+
     /// Send the given message closure to the channel.
     ///
     /// The `M` message mapper accepts a reply sender to send the result of the channel operation.
@@ -62,6 +64,11 @@ impl<T> ChannelReceiver<T> {
     /// Receives the next value from the channel.
     pub async fn recv(&mut self) -> Option<T> {
         self.inner.recv().await
+    }
+
+    /// Receives the next value from the channel, returning immediately if no value is available.
+    pub fn try_recv(&mut self) -> Option<T> {
+        self.inner.recv().now_or_never().flatten()
     }
 }
 
@@ -122,7 +129,7 @@ impl<T, E> Response<T, E> {
 impl<T, E> Future for Response<T, E>
 where
     E: Unpin,
-    ChannelError: Into<E>,
+    io::Error: Into<E>,
 {
     type Output = result::Result<T, E>;
 
@@ -131,7 +138,7 @@ where
     }
 }
 
-impl<T> From<oneshot::Receiver<T>> for Response<T, ChannelError> {
+impl<T> From<oneshot::Receiver<T>> for Response<T, io::Error> {
     fn from(rx: oneshot::Receiver<T>) -> Self {
         Self {
             inner: InnerResponse::PendingMapper(rx),
@@ -154,10 +161,16 @@ enum InnerResponse<T, E> {
     Closed,
 }
 
+impl<T, E> InnerResponse<T, E> {
+    fn closed() -> io::Error {
+        io::Error::new(io::ErrorKind::Interrupted, "channel closed")
+    }
+}
+
 impl<T, E> Future for InnerResponse<T, E>
 where
     E: Unpin,
-    ChannelError: Into<E>,
+    io::Error: Into<E>,
 {
     type Output = result::Result<T, E>;
 
@@ -166,17 +179,17 @@ where
         match this {
             InnerResponse::Pending(rx) => Pin::new(rx)
                 .poll(cx)
-                .map(|res| res.unwrap_or_else(|_| Err(ChannelError::Closed.into()))),
+                .map(|res| res.unwrap_or_else(|_| Err(Self::closed().into()))),
             InnerResponse::PendingMapper(rx) => Pin::new(rx).poll(cx).map(|res| match res {
                 Ok(v) => Ok(v),
-                Err(_) => Err(ChannelError::Closed.into()),
+                Err(_) => Err(Self::closed().into()),
             }),
             InnerResponse::Err(e) => {
-                let err = e.take().unwrap_or_else(|| ChannelError::Closed.into());
+                let err = e.take().unwrap_or_else(|| Self::closed().into());
                 *this = InnerResponse::Closed;
                 Poll::Ready(Err(err))
             }
-            InnerResponse::Closed => Poll::Ready(Err(ChannelError::Closed.into())),
+            InnerResponse::Closed => Poll::Ready(Err(Self::closed().into())),
         }
     }
 }
@@ -223,9 +236,13 @@ enum InnerSenderChannel<T> {
 impl<T> InnerSenderChannel<T> {
     async fn send(&self, value: T) -> Result<()> {
         match self {
-            Self::Bounded(sender) => sender.send(value).await.map_err(|_| ChannelError::Closed),
-            Self::Unbounded(sender) => sender.send(value).map_err(|_| ChannelError::Closed),
+            Self::Bounded(sender) => sender.send(value).await.map_err(|_| Self::closed()),
+            Self::Unbounded(sender) => sender.send(value).map_err(|_| Self::closed()),
         }
+    }
+
+    fn closed() -> io::Error {
+        io::Error::new(io::ErrorKind::Interrupted, "channel closed")
     }
 }
 
@@ -411,7 +428,7 @@ mod tests {
         });
     }
 
-    async fn validate_response<E: Debug + From<ChannelError> + Unpin>(
+    async fn validate_response<E: Debug + From<io::Error> + Unpin>(
         expected_arg_value: u32,
         response: Response<bool, E>,
         mut receiver: ChannelReceiver<TestCommand>,
