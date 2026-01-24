@@ -3099,7 +3099,7 @@ mod tests {
                     let pieces = incoming_context.data_pool.pieces().await.into_iter()
                         .filter(|e| e.availability() > 0)
                         .collect::<Vec<_>>();
-                    if !pieces.is_empty() {
+                    if pieces.len() == 3 {
                         return pieces;
                     }
                 }
