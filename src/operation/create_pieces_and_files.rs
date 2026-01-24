@@ -176,6 +176,11 @@ impl TorrentCreatePiecesAndFilesOperation {
             pieces: file_piece_start..file_piece_end + 1, // as the range is exclusive, add 1 to the end range
         }
     }
+
+    async fn update_state(&self, context: &mut TorrentContext) {
+        let state = context.determine_state().await;
+        context.update_state(state);
+    }
 }
 
 #[async_trait]
@@ -199,6 +204,7 @@ impl TorrentOperation for TorrentCreatePiecesAndFilesOperation {
         // try to create the pieces and files
         if self.create_pieces(torrent).await {
             if self.create_files(&torrent).await {
+                self.update_state(torrent).await;
                 return TorrentOperationResult::Continue;
             }
         }

@@ -3889,7 +3889,6 @@ mod tests {
             TorrentFlags::UploadMode | TorrentFlags::SeedMode,
             TorrentConfig::builder().build(),
             vec![
-                Box::new(TorrentStatsOperation::new()),
                 Box::new(TorrentCreatePiecesAndFilesOperation::new()),
                 Box::new(TorrentFileValidationOperation::new())
             ],
@@ -4084,6 +4083,8 @@ mod tests {
 
         let mut receiver = context.subscribe();
 
+        // reset the state to Initializing
+        context.update_state(TorrentState::Initializing);
         let result = context.is_download_allowed();
         assert_eq!(false, result, "expected downloading to not be allowed");
 

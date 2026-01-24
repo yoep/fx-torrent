@@ -238,7 +238,7 @@ impl InnerTcpPeerDiscovery {
                     return Err(Error::Io(e));
                 }
 
-                trace!("Failed to bind TCP IPv4 socket on {}, {}", ipv6_addr, e)
+                trace!("Failed to bind TCP IPv4 socket on {}, {}", ipv4_addr, e)
             }
         }
 

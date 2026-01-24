@@ -3223,7 +3223,9 @@ mod tests {
             TorrentFlags::UploadMode,
             TorrentConfig::builder().build(),
             vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())],
-            vec![Box::new(TcpPeerDiscovery::new().await.unwrap())]
+            vec![Box::new(TcpPeerDiscovery::new().await.unwrap())],
+            |_| Box::new(MemoryStorage::new()),
+            None
         );
         let (tx, rx) = channel!();
         let target_torrent = create_torrent!(
@@ -3235,7 +3237,9 @@ mod tests {
                 Box::new(TorrentCreatePiecesAndFilesOperation::new()),
                 Box::new(TorrentStateOperation { receiver: rx }),
             ],
-            vec![Box::new(TcpPeerDiscovery::new().await.unwrap())]
+            vec![Box::new(TcpPeerDiscovery::new().await.unwrap())],
+            |_| Box::new(MemoryStorage::new()),
+            None
         );
 
         // wait for the pieces/files to have been created
