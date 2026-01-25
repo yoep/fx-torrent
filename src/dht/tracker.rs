@@ -3,8 +3,8 @@ use crate::dht::compact::{CompactIPv4Node, CompactIPv4Nodes, CompactIPv6Node, Co
 use crate::dht::krpc::{
     AnnouncePeerRequest, AnnouncePeerResponse, ErrorMessage, FindNodeRequest, FindNodeResponse,
     GetPeersRequest, GetPeersResponse, Message, MessagePayload, PingMessage, QueryMessage,
-    ResponseMessage, ResponsePayload, SampleInfoHashesRequest, SampleInfoHashesResponse, Version,
-    WantFamily,
+    ResponseMessage, ResponsePayload, SampleInfoHashesRequest, SampleInfoHashesResponse,
+    TransactionId, Version, WantFamily,
 };
 use crate::dht::observer::Observer;
 use crate::dht::peers::PeerStorage;
@@ -712,7 +712,7 @@ pub(crate) enum Event {
 #[display("DHT node server [{}]", socket_addr.port())]
 pub(crate) struct TrackerContext {
     /// The current transaction ID of the node server
-    transaction_id: u16,
+    transaction_id: u32,
     /// The underlying socket used by the server
     socket: Arc<UdpSocket>,
     /// The address on which the server is listening
@@ -889,14 +889,16 @@ impl TrackerContext {
         trace!(
             "{} received message (transaction {}) from {}, {:?}",
             self,
-            message.transaction_id(),
+            message
+                .transaction_id_as_str()
+                .unwrap_or_else(|| message.transaction_id_as_u32().to_string()),
             addr,
             message
         );
         let node_id = message.id().cloned();
-        let transaction_id = message.transaction_id();
+        let transaction_id = message.transaction_id;
         let key = TransactionKey {
-            id: transaction_id,
+            id: transaction_id.clone(),
             addr,
         };
 
@@ -999,7 +1001,7 @@ impl TrackerContext {
     #[cfg_attr(feature = "tracing", instrument(skip(self, peers)))]
     async fn on_announce_peer_request(
         &self,
-        transaction_id: u16,
+        transaction_id: TransactionId,
         addr: &SocketAddr,
         request: AnnouncePeerRequest,
         peers: &mut PeerStorage,
@@ -1100,7 +1102,7 @@ impl TrackerContext {
     #[cfg_attr(feature = "tracing", instrument(skip(self, peers)))]
     async fn on_sample_info_hashes_request(
         &self,
-        transaction_id: u16,
+        transaction_id: TransactionId,
         request: SampleInfoHashesRequest,
         addr: &SocketAddr,
         peers: &PeerStorage,
@@ -1192,7 +1194,11 @@ impl TrackerContext {
     /// * `transaction_id` - The transaction id of the query.
     /// * `addr`- The source address of the node.
     #[cfg_attr(feature = "tracing", instrument(err(level = Level::INFO)))]
-    async fn on_ping_request(&self, transaction_id: u16, addr: &SocketAddr) -> Result<()> {
+    async fn on_ping_request(
+        &self,
+        transaction_id: TransactionId,
+        addr: &SocketAddr,
+    ) -> Result<()> {
         self.send_response(
             transaction_id,
             ResponseMessage::Ping {
@@ -1257,7 +1263,7 @@ impl TrackerContext {
     #[cfg_attr(feature = "tracing", instrument)]
     async fn on_find_node_request(
         &self,
-        transaction_id: u16,
+        transaction_id: TransactionId,
         addr: &SocketAddr,
         request: FindNodeRequest,
     ) -> Result<()> {
@@ -1351,7 +1357,7 @@ impl TrackerContext {
     #[cfg_attr(feature = "tracing", instrument(skip(self, peers)))]
     async fn on_get_peers_request(
         &self,
-        transaction_id: u16,
+        transaction_id: TransactionId,
         addr: &SocketAddr,
         request: GetPeersRequest,
         peers: &PeerStorage,
@@ -1839,7 +1845,7 @@ impl TrackerContext {
         let name = query.name().to_string();
         let id = self.next_transaction_id();
         let message = match Message::builder()
-            .transaction_id(id)
+            .transaction_id(id.clone())
             .payload(MessagePayload::Query(query))
             .build()
         {
@@ -1888,7 +1894,7 @@ impl TrackerContext {
     /// It returns an error if the response failed to send.
     async fn send_response(
         &self,
-        transaction_id: u16,
+        transaction_id: TransactionId,
         message: ResponseMessage,
         addr: &SocketAddr,
     ) -> Result<()> {
@@ -1912,7 +1918,7 @@ impl TrackerContext {
     /// * `addr` - The node address to send the response to.
     async fn send_error(
         &self,
-        transaction_id: u16,
+        transaction_id: TransactionId,
         error: ErrorMessage,
         addr: &SocketAddr,
     ) -> Result<()> {
@@ -1938,7 +1944,9 @@ impl TrackerContext {
             "{} is sending message ({} bytes, transaction {}) to {}, {:?}",
             self,
             bytes.len(),
-            message.transaction_id(),
+            message
+                .transaction_id_as_str()
+                .unwrap_or_else(|| message.transaction_id_as_u32().to_string()),
             addr,
             message
         );
@@ -2109,11 +2117,12 @@ impl TrackerContext {
     }
 
     /// Get the next transaction ID for sending a new message.
-    /// The transaction ID within the server will be automatically wrapped when [u16::MAX] has been reached.
-    fn next_transaction_id(&mut self) -> u16 {
+    /// The transaction ID within the server will be automatically wrapped when [u32::MAX] has been reached.
+    fn next_transaction_id(&mut self) -> TransactionId {
         let new = self.transaction_id.wrapping_add(1);
         self.transaction_id = new;
-        new
+        let id = format!("{:02x}", new);
+        id.into_bytes().into()
     }
 
     fn resolve_as_err(request_type: Option<PendingRequestType>, err: Error) {
@@ -2302,7 +2311,7 @@ enum PendingRequestType {
 #[derive(Debug, Display, Clone, PartialEq, Eq, Hash)]
 #[display("{}[{}]", addr, id)]
 struct TransactionKey {
-    pub id: u16,
+    pub id: TransactionId,
     pub addr: SocketAddr,
 }
 
