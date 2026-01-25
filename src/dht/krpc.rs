@@ -18,7 +18,50 @@ const MESSAGE_ANNOUNCE: &str = "announce_peer";
 const MESSAGE_SAMPLE_INFO_HASHES: &str = "sample_infohashes";
 
 /// The unique transaction ID of a message.
-pub type TransactionId = [u8; 2];
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TransactionId {
+    #[serde(with = "serde_bytes")]
+    id: Vec<u8>,
+}
+
+impl TransactionId {
+    /// Returns the UTF-8 representation of the transaction ID.
+    /// This might return [None] if the sender is not using a text string.
+    pub fn as_str(&self) -> Option<String> {
+        String::from_utf8(self.id.clone()).ok()
+    }
+
+    /// Returns the BigEndian representation of the transaction ID.
+    pub fn as_u32(&self) -> u32 {
+        let mut bytes = [0u8; 4];
+        let len = self.id.len().min(4);
+        bytes[..len].copy_from_slice(&self.id[..len]);
+        u32::from_be_bytes(bytes)
+    }
+}
+
+impl From<&[u8]> for TransactionId {
+    fn from(bytes: &[u8]) -> Self {
+        Self { id: bytes.to_vec() }
+    }
+}
+
+impl From<Vec<u8>> for TransactionId {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self { id: bytes }
+    }
+}
+
+impl Display for TransactionId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            self.as_str().unwrap_or_else(|| self.as_u32().to_string())
+        )
+    }
+}
 
 /// The query request message.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -580,8 +623,8 @@ impl From<&str> for Version {
 /// The KRPC message communication between nodes.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
-    #[serde(rename = "t", with = "serde_bytes")]
-    pub transaction_id_bytes: TransactionId,
+    #[serde(rename = "t")]
+    pub transaction_id: TransactionId,
     #[serde(default, rename = "v", skip_serializing_if = "Option::is_none")]
     pub version: Option<Version>,
     #[serde(flatten)]
@@ -612,15 +655,21 @@ impl Message {
         }
     }
 
-    /// Returns the [u16] representation of the transaction ID.
-    pub fn transaction_id(&self) -> u16 {
-        u16::from_be_bytes(self.transaction_id_bytes)
+    /// Returns the UTF-8 representation of the transaction ID.
+    /// This might return [None] if the sender is not using a text string.
+    pub fn transaction_id_as_str(&self) -> Option<String> {
+        self.transaction_id.as_str()
+    }
+
+    /// Returns the BigEndian representation of the transaction ID.
+    pub fn transaction_id_as_u32(&self) -> u32 {
+        self.transaction_id.as_u32()
     }
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct MessageBuilder {
-    transaction_id: Option<Vec<u8>>,
+    transaction_id: Option<TransactionId>,
     version: Option<Version>,
     payload: Option<MessagePayload>,
     ip: Option<CompactIpAddr>,
@@ -635,16 +684,16 @@ impl MessageBuilder {
     }
 
     /// Set the transaction of the message.
-    pub fn transaction_id(&mut self, id: u16) -> &mut Self {
-        self.transaction_id = Some(id.to_be_bytes().to_vec());
+    pub fn transaction_id(&mut self, id: TransactionId) -> &mut Self {
+        self.transaction_id = Some(id);
         self
     }
 
     /// Set the underlying transaction ID bytes.
     /// This is useful for testing purposes.
     #[cfg(test)]
-    fn transaction_id_bytes(&mut self, id: &[u8]) -> &mut Self {
-        self.transaction_id = Some(id.to_vec());
+    fn transaction_id_bytes<T: AsRef<[u8]>>(&mut self, id: T) -> &mut Self {
+        self.transaction_id = Some(id.as_ref().into());
         self
     }
 
@@ -683,16 +732,13 @@ impl MessageBuilder {
     /// The transaction ID and message type are required fields.
     /// When one of the required fields was not provided, it will return an error.
     pub fn build(&mut self) -> Result<Message> {
-        let transaction_id_value = self
+        let transaction_id_bytes = self
             .transaction_id
             .take()
             .ok_or(Error::InvalidMessage("missing transaction id".to_string()))?;
 
         Ok(Message {
-            transaction_id_bytes: transaction_id_value
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::InvalidTransactionId)?,
+            transaction_id: transaction_id_bytes,
             version: self.version.take(),
             payload: self
                 .payload
@@ -814,6 +860,31 @@ mod serde_implied_port {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod transaction_id {
+        use super::*;
+
+        #[test]
+        fn test_as_str() {
+            let id = format!("{:02x}", 1);
+
+            let transaction_id = TransactionId::from(id.as_bytes());
+
+            assert_eq!(transaction_id.as_str(), Some(id));
+        }
+
+        #[test]
+        fn test_as_u32() {
+            let id = format!("{:02x}", 1).as_bytes().to_vec();
+            let mut bytes = [0u8; 4];
+            bytes[..id.len()].copy_from_slice(&id[..id.len()]);
+            let expected_result = u32::from_be_bytes(bytes);
+
+            let transaction_id = TransactionId::from(id.clone());
+
+            assert_eq!(transaction_id.as_u32(), expected_result);
+        }
+    }
 
     mod ping {
         use super::*;
