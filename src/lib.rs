@@ -745,12 +745,7 @@ pub mod tests {
 
         pub async fn wait_for_torrent_pieces(torrent: &Torrent) {
             let mut receiver = torrent.subscribe();
-            if torrent
-                .pieces()
-                .await
-                .and_then(|e| if e.is_empty() { None } else { Some(()) })
-                .is_some()
-            {
+            if torrent.pieces().await.filter(|e| !e.is_empty()).is_some() {
                 return;
             }
 

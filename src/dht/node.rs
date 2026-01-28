@@ -223,6 +223,12 @@ impl PartialEq for Node {
     }
 }
 
+impl From<NodeKey> for Node {
+    fn from(key: NodeKey) -> Self {
+        Self::new(key.id, key.addr)
+    }
+}
+
 #[derive(Debug)]
 struct InnerNode {
     key: NodeKey,

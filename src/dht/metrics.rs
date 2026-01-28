@@ -7,7 +7,7 @@ pub struct DhtMetrics {
     pub nodes: Gauge,
     pub pending_queries: Gauge,
     pub errors: Counter,
-    pub discovered_peers: Counter,
+    pub discovered_peers: Gauge,
     pub bytes_in: Counter,
     pub bytes_out: Counter,
 }

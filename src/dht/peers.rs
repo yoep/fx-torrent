@@ -27,6 +27,11 @@ impl PeerStorage {
             .unwrap_or_default()
     }
 
+    /// Returns the total number of peers stored in the storage.
+    pub fn peers_len(&self) -> usize {
+        self.peers.values().map(|e| e.len()).sum()
+    }
+
     /// Updates the peer information for the given info hash.
     pub fn update_peer(&mut self, info_hash: InfoHash, addr: SocketAddr, seed: bool) {
         let entry = self.peers.entry(info_hash).or_default();
@@ -101,6 +106,9 @@ mod tests {
             "expected peer {} to be present within the storage",
             addr
         );
+
+        let result = storage.peers_len();
+        assert_eq!(1, result, "expected the storage to contain one peer");
     }
 
     #[test]

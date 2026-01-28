@@ -302,8 +302,8 @@ pub struct GetPeersResponse {
     pub id: NodeId,
     #[serde(with = "serde_bytes")]
     pub token: Vec<u8>,
-    #[serde(default, with = "serde_bytes", skip_serializing_if = "Option::is_none")]
-    pub values: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<CompactIpAddr>>,
     #[serde(default, skip_serializing_if = "CompactIPv4Nodes::is_empty")]
     pub nodes: CompactIPv4Nodes,
     #[serde(default, skip_serializing_if = "CompactIPv6Nodes::is_empty")]

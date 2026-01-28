@@ -26,6 +26,11 @@ impl DhtOption {
     pub fn set(&mut self, dht: DhtTracker) {
         self.inner = Some(dht);
     }
+
+    /// Returns `true` when no DHT tracker is set.
+    pub fn is_none(&self) -> bool {
+        self.inner.is_none()
+    }
 }
 
 #[cfg(not(feature = "dht"))]
@@ -33,6 +38,11 @@ impl DhtOption {
     /// Create a new DHT option with no tracker.
     pub fn none() -> Self {
         Self { _private: () }
+    }
+
+    /// Always returns `true` as the `dht` feature has been disabled.
+    pub fn is_none(&self) -> bool {
+        true
     }
 }
 
@@ -46,5 +56,29 @@ impl Default for DhtOption {
 impl From<Option<DhtTracker>> for DhtOption {
     fn from(dht: Option<DhtTracker>) -> Self {
         Self { inner: dht }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_none() {
+        let dht = DhtOption::none();
+
+        let result = dht.is_none();
+
+        assert_eq!(true, result);
+    }
+
+    #[tokio::test]
+    async fn test_from_tracker() {
+        let tracker = DhtTracker::builder().build().await.unwrap();
+        let dht = DhtOption::from(Some(tracker));
+
+        let result = dht.is_none();
+
+        assert_eq!(false, result, "expected the DHT option to be present");
     }
 }

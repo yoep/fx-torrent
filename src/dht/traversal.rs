@@ -39,7 +39,7 @@ impl TraversalAlgorithm {
                 .map(|addr| PendingQuery { id: None, addr })
                 .collect(),
             sender,
-            permits: Arc::new(Semaphore::new(bucket_size)),
+            permits: Arc::new(Semaphore::new(bucket_size * 2)),
             limit: bucket_size * 160, // = bucket size * max routing table buckets
         }
     }

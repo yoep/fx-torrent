@@ -27,53 +27,49 @@ impl TorrentDhtNodesOperation {
     async fn connect_dht_nodes(&mut self, context: &TorrentContext) {
         let handle = context.handle();
         let metadata = context.metadata();
+        let dht = match context.dht().inner.as_ref() {
+            None => return,
+            Some(dht) => dht.clone(),
+        };
 
-        if let Some(dht) = context.dht().inner.clone() {
-            if let Some(nodes) = metadata.nodes.clone() {
-                trace!(
-                    "Torrent {} is trying to add {} DHT node(s)",
-                    context,
-                    nodes.len()
-                );
+        if let Some(nodes) = metadata.nodes.clone() {
+            trace!(
+                "Torrent {} is trying to add {} DHT node(s)",
+                context,
+                nodes.len()
+            );
 
-                tokio::spawn(async move {
-                    let mut futures: Vec<_> = vec![];
-                    for node in nodes.iter() {
-                        // try to parse the host of the node as an IP address
-                        // if it fails, we assume it's a DNS name and try to resolve it
-                        match node.socket_addr() {
-                            Ok(addr) => futures.push(dht.ping(addr)),
-                            Err(_) => {
-                                if let Ok(addrs) =
-                                    lookup_host(format!("{}:{}", node.host.as_str(), node.port))
-                                        .await
-                                {
-                                    for addr in addrs {
-                                        futures.push(dht.ping(addr));
-                                    }
+            tokio::spawn(async move {
+                let mut futures: Vec<_> = vec![];
+                for node in nodes.iter() {
+                    // try to parse the host of the node as an IP address
+                    // if it fails, we assume it's a DNS name and try to resolve it
+                    match node.socket_addr() {
+                        Ok(addr) => futures.push(dht.ping(addr)),
+                        Err(_) => {
+                            if let Ok(addrs) =
+                                lookup_host(format!("{}:{}", node.host.as_str(), node.port)).await
+                            {
+                                for addr in addrs {
+                                    futures.push(dht.ping(addr));
                                 }
                             }
                         }
                     }
+                }
 
-                    let pinged_nodes = futures::future::join_all(futures)
-                        .await
-                        .into_iter()
-                        .filter(|e| e.is_ok())
-                        .count();
-                    debug!(
-                        "Torrent {} pinged a total of {} DHT nodes",
-                        handle, pinged_nodes
-                    );
-                });
-            } else {
-                debug!("Torrent {} does not have any DHT nodes", context);
-            }
+                let pinged_nodes = futures::future::join_all(futures)
+                    .await
+                    .into_iter()
+                    .filter(|e| e.is_ok())
+                    .count();
+                debug!(
+                    "Torrent {} pinged a total of {} DHT nodes",
+                    handle, pinged_nodes
+                );
+            });
         } else {
-            trace!(
-                "Torrent {} is unable to connect to DHT network, no DHT tracker available",
-                context
-            );
+            debug!("Torrent {} does not have any DHT nodes", context);
         }
 
         self.initialized = true;
