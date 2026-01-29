@@ -507,4 +507,19 @@ mod tests {
             assert_eq!(NodeState::Bad, result);
         }
     }
+
+    mod node_from {
+        use super::*;
+
+        #[test]
+        fn test_from_node_key() {
+            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 10081));
+            let id = NodeId::from_ip(&addr.ip());
+            let key = NodeKey { id, addr };
+
+            let result = Node::from(key);
+
+            assert_eq!(result.id(), &id);
+        }
+    }
 }

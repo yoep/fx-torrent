@@ -147,5 +147,88 @@ mod tests {
         // check if the last_executed has been set
         let result = &operation.last_executed;
         assert_ne!(&None, result, "expected `last_executed` to have been set");
+
+        // check if the in-flight operation has been set
+        let result = operation.in_flight.len();
+        assert_eq!(1, result, "expected `in_flight` to have one operation");
+
+        // run the operation again
+        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        assert_eq!(TorrentOperationResult::Continue, result);
+    }
+
+    mod should_retrieve_peers {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_dht_none() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
+            let (context, _) = create_torrent_context!(
+                uri,
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![],
+                None
+            );
+            let mut operation = TorrentDhtPeersOperation::new();
+
+            let result = operation.should_retrieve_peers(&context).await;
+            assert_eq!(
+                false, result,
+                "expected `should_retrieve_peers` to return false"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_last_executed() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
+            let dht = DhtTracker::builder()
+                .default_routing_nodes()
+                .build()
+                .await
+                .unwrap();
+            let (context, _) = create_torrent_context!(
+                uri,
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![],
+                Some(dht)
+            );
+            let mut operation = TorrentDhtPeersOperation::new();
+
+            // when the operation has not been executed yet, it should return true
+            operation.last_executed = None;
+            let result = operation.should_retrieve_peers(&context).await;
+            assert_eq!(
+                true, result,
+                "expected `should_retrieve_peers` to return true"
+            );
+
+            // when the operation has been executed longer than RETRIEVE_SHORT_INTERVAL, it should return true
+            operation.last_executed =
+                Some(Instant::now() - RETRIEVE_SHORT_INTERVAL - Duration::from_secs(1));
+            let result = operation.should_retrieve_peers(&context).await;
+            assert_eq!(
+                true, result,
+                "expected `should_retrieve_peers` to return true"
+            );
+
+            // when the operation has been executed shorter than RETRIEVE_SHORT_INTERVAL, it should return false
+            operation.last_executed =
+                Some(Instant::now() - RETRIEVE_SHORT_INTERVAL + Duration::from_secs(1));
+            let result = operation.should_retrieve_peers(&context).await;
+            assert_eq!(
+                false, result,
+                "expected `should_retrieve_peers` to return false"
+            );
+        }
     }
 }
