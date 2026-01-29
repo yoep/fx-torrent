@@ -15,11 +15,9 @@ use crate::dht::{
     DEFAULT_ROUTING_NODE_SERVERS,
 };
 use crate::metrics::Metric;
-use crate::{
-    channel, CompactIpAddr, CompactIpv4Addr, CompactIpv4Addrs, CompactIpv6Addr, CompactIpv6Addrs,
-    InfoHash,
-};
+use crate::{channel, CompactIpAddr, CompactIpv4Addr, CompactIpv6Addr, InfoHash};
 use derive_more::Display;
+use futures::StreamExt;
 use fx_callback::{Callback, MultiThreadedCallback, Subscriber, Subscription};
 use itertools::Itertools;
 use log::{debug, trace, warn};
@@ -305,29 +303,28 @@ impl DhtTracker {
     }
 
     /// Returns the peer addresses for the given torrent info hash from a specific node within the network.
+    ///
+    /// Use `n_depth` to determine the depth of the search within the network.
     #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
     pub async fn get_peers_from(
         &self,
         info_hash: &InfoHash,
         node: &NodeKey,
+        n_depth: usize,
     ) -> Result<Vec<SocketAddr>> {
-        self.sender
-            .send(|tx| TrackerCommand::GetPeers {
-                node: *node,
-                info_hash: info_hash.clone(),
-                response: tx,
-            })
-            .await
-            .await
+        self.internal_get_peers(info_hash, node, n_depth).await
     }
 
     /// Returns the peer addresses for the given torrent info hash within the network.
     /// This function waits for a response from one oe more nodes within the routing table.
     /// Each queried node is limited to the given timeout.
+    ///
+    /// Use `n_depth` to determine the depth of the search within the network.
     #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
     pub async fn get_peers(
         &self,
         info_hash: &InfoHash,
+        n_depth: usize,
         timeout: Duration,
     ) -> Result<Vec<SocketAddr>> {
         let nodes = self
@@ -337,18 +334,9 @@ impl DhtTracker {
             .await?;
 
         let futures = nodes.iter().map(|node| async {
-            let response = self
-                .sender
-                .send(|tx| TrackerCommand::GetPeers {
-                    node: *node,
-                    info_hash: info_hash.clone(),
-                    response: tx,
-                })
-                .await;
-
             select! {
                 _ = time::sleep(timeout) => Err(Error::Timeout),
-                result = response => result,
+                result = self.internal_get_peers(info_hash, node, n_depth) => result,
             }
         });
 
@@ -449,6 +437,83 @@ impl DhtTracker {
     /// Close the DHT node server.
     pub fn close(&self) {
         self.cancellation_token.cancel();
+    }
+
+    /// Retrieve peers starting from `node` going `depth_left` hops deep.
+    async fn internal_get_peers(
+        &self,
+        info_hash: &InfoHash,
+        node: &NodeKey,
+        depth_left: usize,
+    ) -> Result<Vec<SocketAddr>> {
+        const MAX_IN_FLIGHT: usize = 5;
+        let result = self.do_get_peers(info_hash, node).await?;
+        let mut peers: HashSet<SocketAddr> = HashSet::from_iter(result.peers);
+
+        if depth_left == 0 || result.nodes.is_empty() {
+            return Ok(peers.into_iter().collect());
+        }
+
+        let result = futures::stream::iter(result.nodes.into_iter())
+            .map(|node| async move {
+                let ping: Result<NodeKey> = self.ping(node.addr).await;
+                if ping.is_err() {
+                    return vec![];
+                }
+
+                match self.do_get_peers(info_hash, &node).await {
+                    Err(_) => vec![],
+                    Ok(result) => {
+                        let mut peers = result.peers;
+                        if depth_left == 0 {
+                            return peers;
+                        }
+
+                        let futures = result
+                            .nodes
+                            .iter()
+                            .map(|node| async {
+                                self.internal_get_peers(
+                                    info_hash,
+                                    node,
+                                    depth_left.saturating_sub(1),
+                                )
+                                .await
+                            })
+                            .collect::<Vec<_>>();
+                        let mut result = futures::future::join_all(futures)
+                            .await
+                            .into_iter()
+                            .filter_map(|e| e.ok())
+                            .concat();
+                        peers.append(&mut result);
+
+                        peers
+                    }
+                }
+            })
+            .buffer_unordered(MAX_IN_FLIGHT)
+            .collect::<Vec<_>>()
+            .await
+            .concat();
+
+        for peer in result {
+            peers.insert(peer);
+        }
+
+        Ok(peers.into_iter().collect())
+    }
+
+    /// Retrieve the peers from the given node for the [InfoHash].
+    async fn do_get_peers(&self, info_hash: &InfoHash, node: &NodeKey) -> Result<GetPeersResult> {
+        self.sender
+            .send(|tx| TrackerCommand::GetPeers {
+                node: *node,
+                info_hash: info_hash.clone(),
+                response: tx,
+            })
+            .await
+            .await
     }
 
     /// Create a new UDP socket.
@@ -577,6 +642,12 @@ impl DhtTrackerBuilder {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct GetPeersResult {
+    pub peers: Vec<SocketAddr>,
+    pub nodes: Vec<NodeKey>,
+}
+
 /// The internal DHT tracker commands executed on the main loop of the [TrackerContext].
 pub(crate) enum TrackerCommand {
     Id {
@@ -596,7 +667,7 @@ pub(crate) enum TrackerCommand {
     GetPeers {
         node: NodeKey,
         info_hash: InfoHash,
-        response: Reply<Result<Vec<SocketAddr>>>,
+        response: Reply<Result<GetPeersResult>>,
     },
     /// Announce the given peer to the DHT network.
     AnnouncePeer {
@@ -868,8 +939,8 @@ impl TrackerContext {
                 addr,
             } => {
                 warn!(
-                    "{} failed to read incoming message from {}, {}",
-                    self, addr, error
+                    "{} failed to read incoming message (len {}) from {}, {}",
+                    self, payload_len, addr, error
                 );
                 self.metrics.bytes_in.inc_by(payload_len as u64);
                 self.metrics.errors.inc();
@@ -952,6 +1023,7 @@ impl TrackerContext {
                                 pending_request,
                                 response,
                                 traversal,
+                                peers,
                             )
                             .await;
                         }
@@ -1399,8 +1471,7 @@ impl TrackerContext {
                 .peers(&request.info_hash)
                 .filter(|e| e.addr.is_ipv4() == self.socket_addr.is_ipv4())
                 .map(|e| CompactIpAddr::from(e.addr))
-                .map(|e| e.as_bytes())
-                .concat(),
+                .collect::<Vec<_>>(),
         )
         .filter(|e| !e.is_empty());
 
@@ -1430,6 +1501,7 @@ impl TrackerContext {
         pending_request: PendingRequest,
         response: GetPeersResponse,
         traversal: &mut TraversalAlgorithm,
+        peer_storage: &mut PeerStorage,
     ) {
         if !response.id.verify_id(&addr.ip()) {
             debug!("{} detected spoofed get_peers from {}", self, key);
@@ -1446,42 +1518,31 @@ impl TrackerContext {
             return;
         }
 
+        let peers: Vec<SocketAddr> = response
+            .values
+            .iter()
+            .flatten()
+            .map(|e| SocketAddr::from(e))
+            .collect();
+
         let nodes = Self::collect_nodes(&response.nodes, &response.nodes6);
-        for node in nodes {
+        for node in nodes.iter() {
             traversal.add_node(Some(node.id), node.addr);
         }
 
-        let peers: Vec<SocketAddr> = if let Some(values) = response.values {
-            match addr.ip() {
-                IpAddr::V4(_) => match CompactIpv4Addrs::try_from(values.as_slice()) {
-                    Ok(addrs) => addrs.into_iter().map(|e| e.into()).collect::<Vec<_>>(),
-                    Err(e) => {
-                        Self::resolve_as_err(
-                            pending_request.request_type,
-                            Error::Parse(e.to_string()),
-                        );
-                        return;
-                    }
-                },
-                IpAddr::V6(_) => match CompactIpv6Addrs::try_from(values.as_slice()) {
-                    Ok(addrs) => addrs.into_iter().map(|e| e.into()).collect::<Vec<_>>(),
-                    Err(e) => {
-                        Self::resolve_as_err(
-                            pending_request.request_type,
-                            Error::Parse(e.to_string()),
-                        );
-                        return;
-                    }
-                },
-            }
-        } else {
-            vec![]
-        };
-
-        self.metrics.discovered_peers.inc_by(peers.len() as u64);
         match pending_request.request_type {
-            Some(PendingRequestType::GetPeers(tx)) => {
-                let _ = tx.send(Ok(peers));
+            Some(PendingRequestType::GetPeers {
+                info_hash,
+                response,
+            }) => {
+                for peer in &peers {
+                    peer_storage.update_peer(info_hash.clone(), *peer, false);
+                }
+
+                self.metrics
+                    .discovered_peers
+                    .set(peer_storage.peers_len() as u64);
+                let _ = response.send(Ok(GetPeersResult { peers, nodes }));
             }
             Some(_) => Self::resolve_as_err(
                 pending_request.request_type,
@@ -1553,10 +1614,14 @@ impl TrackerContext {
                 node,
                 info_hash,
                 response,
-            } => match self.routing_table.find_node_by_key(&node).cloned() {
-                None => response.send(Err(Error::InvalidNodeId)),
-                Some(node) => self.get_peers(info_hash, &node, response).await,
-            },
+            } => {
+                let node = self
+                    .routing_table
+                    .find_node_by_key(&node)
+                    .cloned()
+                    .unwrap_or_else(|| Node::from(node));
+                self.get_peers(info_hash, &node, response).await
+            }
             TrackerCommand::AnnouncePeer {
                 info_hash,
                 peer_addr,
@@ -1683,18 +1748,21 @@ impl TrackerContext {
         &mut self,
         info_hash: InfoHash,
         node: &Node,
-        response: Reply<Result<Vec<SocketAddr>>>,
+        response: Reply<Result<GetPeersResult>>,
     ) {
         self.send_query(
             QueryMessage::GetPeers {
                 request: GetPeersRequest {
                     id: self.routing_table.id,
-                    info_hash,
+                    info_hash: info_hash.clone(),
                     want: Default::default(),
                 },
             },
             node.addr(),
-            Some(PendingRequestType::GetPeers(response.take())),
+            Some(PendingRequestType::GetPeers {
+                info_hash,
+                response: response.take(),
+            }),
             || node.failed(),
         )
         .await
@@ -2137,8 +2205,8 @@ impl TrackerContext {
                 PendingRequestType::AnnouncePeer(tx) => {
                     let _ = tx.send(Err(err));
                 }
-                PendingRequestType::GetPeers(tx) => {
-                    let _ = tx.send(Err(err));
+                PendingRequestType::GetPeers { response, .. } => {
+                    let _ = response.send(Err(err));
                 }
                 PendingRequestType::ScrapeInfoHashes(tx) => {
                     let _ = tx.send(Err(err));
@@ -2304,7 +2372,10 @@ enum PendingRequestType {
     Ping(oneshot::Sender<Result<NodeKey>>),
     FindNode(oneshot::Sender<Result<Vec<NodeKey>>>),
     AnnouncePeer(oneshot::Sender<Result<()>>),
-    GetPeers(oneshot::Sender<Result<Vec<SocketAddr>>>),
+    GetPeers {
+        info_hash: InfoHash,
+        response: oneshot::Sender<Result<GetPeersResult>>,
+    },
     ScrapeInfoHashes(oneshot::Sender<Result<Vec<InfoHash>>>),
 }
 
@@ -2500,7 +2571,7 @@ mod tests {
             assert_eq!(result, Ok(()), "expected the node to be added successfully");
 
             let result = outgoing
-                .get_peers(&info_hash, Duration::from_secs(2))
+                .get_peers(&info_hash, 2, Duration::from_secs(2))
                 .await
                 .expect("expected to get peers");
             assert_eq!(
@@ -2519,7 +2590,7 @@ mod tests {
             let source_addr = (Ipv4Addr::LOCALHOST, source.port()).into();
 
             let source_key = target.ping(source_addr).await.unwrap();
-            let result = target.get_peers_from(&info_hash, &source_key).await;
+            let result = target.get_peers_from(&info_hash, &source_key, 1).await;
             assert!(
                 result.is_ok(),
                 "expected the peers to have been queried, but got {:?}",
@@ -2546,7 +2617,7 @@ mod tests {
             // request peers from the target node
             // this will set the initial announce token in the source tracker for the target node
             let target_key = source.ping(target_addr).await.unwrap();
-            let result = source.get_peers_from(&info_hash, &target_key).await;
+            let result = source.get_peers_from(&info_hash, &target_key, 1).await;
             assert!(
                 result.is_ok(),
                 "expected the peers to have been queried, but got {:?}",
@@ -2583,7 +2654,7 @@ mod tests {
             // request peers from the target node
             // this will set the initial announce token in the source tracker for the target node
             let target_key = source.ping(target_addr).await.unwrap();
-            let result = source.get_peers_from(&info_hash, &target_key).await;
+            let result = source.get_peers_from(&info_hash, &target_key, 1).await;
             assert!(
                 result.is_ok(),
                 "expected the peers to have been queried, but got {:?}",
@@ -2657,7 +2728,7 @@ mod tests {
             // announce the peer addr to the target node through the announcer
             let target_key = announcer.ping(target_addr).await.unwrap();
             let _ = announcer
-                .get_peers_from(&info_hash, &target_key)
+                .get_peers_from(&info_hash, &target_key, 1)
                 .await
                 .unwrap();
             let _ = announcer

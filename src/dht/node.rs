@@ -223,6 +223,12 @@ impl PartialEq for Node {
     }
 }
 
+impl From<NodeKey> for Node {
+    fn from(key: NodeKey) -> Self {
+        Self::new(key.id, key.addr)
+    }
+}
+
 #[derive(Debug)]
 struct InnerNode {
     key: NodeKey,
@@ -499,6 +505,21 @@ mod tests {
             metrics.tick(Duration::from_secs(1));
             let result = NodeState::calculate(Duration::from_secs(5 * 60), &metrics);
             assert_eq!(NodeState::Bad, result);
+        }
+    }
+
+    mod node_from {
+        use super::*;
+
+        #[test]
+        fn test_from_node_key() {
+            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 10081));
+            let id = NodeId::from_ip(&addr.ip());
+            let key = NodeKey { id, addr };
+
+            let result = Node::from(key);
+
+            assert_eq!(result.id(), &id);
         }
     }
 }

@@ -68,7 +68,7 @@ impl DhtInfoWidget {
                 self.data.total_nodes = metrics.nodes.get();
                 self.data.pending_queries = metrics.pending_queries.get();
                 self.data.errors = metrics.errors.total();
-                self.data.discovered_peers = metrics.discovered_peers.total();
+                self.data.discovered_peers = metrics.discovered_peers.get();
 
                 self.data.bytes_in.push(metrics.bytes_in.get());
                 if self.data.bytes_in.len() >= PERFORMANCE_HISTORY {

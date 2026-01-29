@@ -1,62 +1,89 @@
 use crate::dht::Error;
 use crate::operation::{TorrentOperation, TorrentOperationResult};
 use crate::peer::PeerDiscovery;
-use crate::TorrentContext;
+use crate::{InnerTorrent, TorrentContext};
 use async_trait::async_trait;
-use log::{debug, trace};
+use futures::future::BoxFuture;
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
+use log::debug;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
-use tokio::time::timeout;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
 const RETRIEVE_INTERVAL: Duration = Duration::from_secs(90);
-const RETRIEVE_TIMEOUT: Duration = Duration::from_secs(1); // FIXME: increase once the operation is spawned on a separate task
+const RETRIEVE_SHORT_INTERVAL: Duration = Duration::from_secs(30);
+const RETRIEVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Retrieve potential peer addresses for the torrent through the DHT network.
 #[derive(Debug)]
 pub struct TorrentDhtPeersOperation {
-    last_executed: Mutex<Option<Instant>>,
+    last_executed: Option<Instant>,
+    in_flight: FuturesUnordered<BoxFuture<'static, ()>>,
 }
 
 impl TorrentDhtPeersOperation {
     pub fn new() -> Self {
         Self {
             last_executed: Default::default(),
+            in_flight: Default::default(),
         }
     }
 
-    async fn retrieve_peers(&self, context: &mut TorrentContext) {
-        let dht = context.dht();
-        if let Some(dht) = dht.inner.as_ref() {
-            let info_hash = context.metadata().info_hash.clone();
+    /// Poll the currently in-flight DHT operations for completion.
+    fn poll_in_flight(&mut self) {
+        while self.in_flight.next().now_or_never().flatten().is_some() {}
+    }
 
-            // FIXME: spawn this on a separate task, as it's blocking the torrent loop
-            let result = timeout(
-                RETRIEVE_TIMEOUT,
-                dht.get_peers(&info_hash, RETRIEVE_TIMEOUT),
-            )
-            .await
-            .map_err(|_| Error::Timeout)
-            .flatten();
+    /// Returns `true` when new peers should be requested from the DHT network, else `false`.
+    async fn should_retrieve_peers(&self, context: &TorrentContext) -> bool {
+        if context.dht().is_none() {
+            return false;
+        }
+        let elapsed = match self.last_executed.as_ref() {
+            None => return true,
+            Some(last_executed) => last_executed.elapsed(),
+        };
+        let active_peer_connections = context.active_peer_connections().await;
+
+        if active_peer_connections > 0 {
+            elapsed >= RETRIEVE_INTERVAL
+        } else {
+            elapsed >= RETRIEVE_SHORT_INTERVAL
+        }
+    }
+
+    /// Retrieve peers from the DHT network for the torrent context.
+    fn retrieve_peers(&mut self, context: &mut TorrentContext) {
+        let dht = match context.dht().inner.as_ref() {
+            None => return,
+            Some(dht) => dht.clone(),
+        };
+
+        let info_hash = context.metadata().info_hash.clone();
+        let torrent = InnerTorrent::new(
+            context.handle(),
+            context.command_sender().clone(),
+            context.callbacks().clone(),
+        );
+        self.in_flight.push(Box::pin(async move {
+            let result = dht
+                .get_peers(&info_hash, 3, RETRIEVE_TIMEOUT)
+                .await
+                .map_err(|_| Error::Timeout);
             match result {
                 Ok(peers) => {
-                    debug!("Torrent {} discovered {} DHT peers", context, peers.len());
-                    context.add_peer_addresses(peers);
+                    debug!("Torrent {} discovered {} DHT peers", torrent, peers.len());
+                    torrent.add_peers(peers).await;
                 }
                 Err(err) => {
-                    debug!("Torrent {} failed to retrieve peers, {}", context, err);
+                    debug!("Torrent {} failed to retrieve peers, {}", torrent, err);
                 }
             }
-        } else {
-            trace!(
-                "Torrent {} is unable to retrieve DHT peers, no DHT tracker available",
-                context
-            );
-        }
+        }));
 
-        *self.last_executed.lock().await = Some(Instant::now());
+        self.last_executed = Some(Instant::now());
     }
 }
 
@@ -69,22 +96,21 @@ impl TorrentOperation for TorrentDhtPeersOperation {
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn execute(
         &mut self,
-        torrent: &mut TorrentContext,
+        context: &mut TorrentContext,
         _: &[Arc<dyn PeerDiscovery>],
     ) -> TorrentOperationResult {
-        let elapsed = if let Some(last_executed) = self.last_executed.lock().await.as_ref() {
-            last_executed.elapsed()
-        } else {
-            Duration::from_secs(60 * 60)
-        };
+        self.poll_in_flight();
 
-        if elapsed >= RETRIEVE_INTERVAL {
-            self.retrieve_peers(torrent).await;
+        if self.should_retrieve_peers(context).await {
+            self.retrieve_peers(context);
         }
 
         TorrentOperationResult::Continue
     }
 }
+
+unsafe impl Send for TorrentDhtPeersOperation {}
+unsafe impl Sync for TorrentDhtPeersOperation {}
 
 #[cfg(test)]
 mod tests {
@@ -119,7 +145,90 @@ mod tests {
         assert_eq!(TorrentOperationResult::Continue, result);
 
         // check if the last_executed has been set
-        let result = operation.last_executed.lock().await;
-        assert_ne!(None, *result, "expected `last_executed` to have been set");
+        let result = &operation.last_executed;
+        assert_ne!(&None, result, "expected `last_executed` to have been set");
+
+        // check if the in-flight operation has been set
+        let result = operation.in_flight.len();
+        assert_eq!(1, result, "expected `in_flight` to have one operation");
+
+        // run the operation again
+        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        assert_eq!(TorrentOperationResult::Continue, result);
+    }
+
+    mod should_retrieve_peers {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_dht_none() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
+            let (context, _) = create_torrent_context!(
+                uri,
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![],
+                None
+            );
+            let mut operation = TorrentDhtPeersOperation::new();
+
+            let result = operation.should_retrieve_peers(&context).await;
+            assert_eq!(
+                false, result,
+                "expected `should_retrieve_peers` to return false"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_last_executed() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
+            let dht = DhtTracker::builder()
+                .default_routing_nodes()
+                .build()
+                .await
+                .unwrap();
+            let (context, _) = create_torrent_context!(
+                uri,
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![],
+                Some(dht)
+            );
+            let mut operation = TorrentDhtPeersOperation::new();
+
+            // when the operation has not been executed yet, it should return true
+            operation.last_executed = None;
+            let result = operation.should_retrieve_peers(&context).await;
+            assert_eq!(
+                true, result,
+                "expected `should_retrieve_peers` to return true"
+            );
+
+            // when the operation has been executed longer than RETRIEVE_SHORT_INTERVAL, it should return true
+            operation.last_executed =
+                Some(Instant::now() - RETRIEVE_SHORT_INTERVAL - Duration::from_secs(1));
+            let result = operation.should_retrieve_peers(&context).await;
+            assert_eq!(
+                true, result,
+                "expected `should_retrieve_peers` to return true"
+            );
+
+            // when the operation has been executed shorter than RETRIEVE_SHORT_INTERVAL, it should return false
+            operation.last_executed =
+                Some(Instant::now() - RETRIEVE_SHORT_INTERVAL + Duration::from_secs(1));
+            let result = operation.should_retrieve_peers(&context).await;
+            assert_eq!(
+                false, result,
+                "expected `should_retrieve_peers` to return false"
+            );
+        }
     }
 }
