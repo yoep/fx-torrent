@@ -435,23 +435,6 @@ impl<'de> Deserialize<'de> for ErrorMessage {
 
                 Self::Value::try_from((code, msg)).map_err(de::Error::custom)
             }
-
-            fn visit_map<A>(self, mut map: A) -> result::Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let entry = map
-                    .next_entry::<Cow<'de, &str>, (u16, String)>()?
-                    .ok_or_else(|| de::Error::missing_field("e"))?;
-                if entry.0.as_ref() != &"e" {
-                    return Err(de::Error::custom(format!(
-                        "expected field 'e', got '{}'",
-                        entry.0
-                    )));
-                }
-
-                Self::Value::try_from(entry.1).map_err(de::Error::custom)
-            }
         }
 
         deserializer.deserialize_any(ErrorMessageVisitor)
@@ -1392,6 +1375,36 @@ mod tests {
                 .build()
                 .unwrap();
             assert_eq!(expected_result, result);
+        }
+
+        #[test]
+        fn test_code() {
+            let error = ErrorMessage::Generic("A Generic Error Occurred".to_string());
+            assert_eq!(201, error.code());
+
+            let error = ErrorMessage::Server("A Server Error".to_string());
+            assert_eq!(202, error.code());
+
+            let error = ErrorMessage::Protocol("A Protocol Error".to_string());
+            assert_eq!(203, error.code());
+
+            let error = ErrorMessage::Method("Method Unknown".to_string());
+            assert_eq!(204, error.code());
+        }
+
+        #[test]
+        fn test_description() {
+            let error = ErrorMessage::Generic("A Generic Error Occurred".to_string());
+            assert_eq!("A Generic Error Occurred", error.description());
+
+            let error = ErrorMessage::Server("A Server Error".to_string());
+            assert_eq!("A Server Error", error.description());
+
+            let error = ErrorMessage::Protocol("A Protocol Error".to_string());
+            assert_eq!("A Protocol Error", error.description());
+
+            let error = ErrorMessage::Method("Method Unknown".to_string());
+            assert_eq!("Method Unknown", error.description());
         }
     }
 
