@@ -174,7 +174,7 @@ mod tests {
                 vec![],
                 None
             );
-            let mut operation = TorrentDhtPeersOperation::new();
+            let operation = TorrentDhtPeersOperation::new();
 
             let result = operation.should_retrieve_peers(&context).await;
             assert_eq!(

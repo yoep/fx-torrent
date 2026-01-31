@@ -926,7 +926,7 @@ impl TrackerContext {
                     .handle_incoming_message(message, addr, traversal, peers)
                     .await
                 {
-                    warn!(
+                    debug!(
                         "{} failed to process incoming message from {}, {}",
                         self, addr, e
                     );
@@ -962,6 +962,7 @@ impl TrackerContext {
             self,
             message
                 .transaction_id_as_str()
+                .map(|e| e.to_string())
                 .unwrap_or_else(|| message.transaction_id_as_u32().to_string()),
             addr,
             message
@@ -1051,8 +1052,8 @@ impl TrackerContext {
                     self.metrics.errors.inc();
                 }
             }
-            MessagePayload::Error(err) => {
-                self.on_error_response(&key, &addr, err).await;
+            MessagePayload::Error { error } => {
+                self.on_error_response(&key, &addr, error).await;
             }
         }
 
@@ -1992,7 +1993,7 @@ impl TrackerContext {
     ) -> Result<()> {
         let message = Message::builder()
             .transaction_id(transaction_id)
-            .payload(MessagePayload::Error(error))
+            .payload(MessagePayload::error(error))
             .ip((*addr).into())
             .port(addr.port())
             .build()?;
@@ -2014,6 +2015,7 @@ impl TrackerContext {
             bytes.len(),
             message
                 .transaction_id_as_str()
+                .map(|e| e.to_string())
                 .unwrap_or_else(|| message.transaction_id_as_u32().to_string()),
             addr,
             message

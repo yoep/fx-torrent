@@ -2,11 +2,10 @@ use crate::dht::compact::{CompactIPv4Nodes, CompactIPv6Nodes};
 use crate::dht::{Error, NodeId, Result};
 use crate::{CompactIpAddr, InfoHash};
 use bitmask_enum::bitmask;
-use serde::de::SeqAccess;
+use serde::de::{DeserializeOwned, IgnoredAny, MapAccess, SeqAccess};
 use serde::ser::SerializeSeq;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use serde_bencode::value;
-use std::collections::HashMap;
+use std::borrow::Cow;
 use std::fmt::{Display, Formatter};
 use std::result;
 use std::str::FromStr;
@@ -28,8 +27,8 @@ pub struct TransactionId {
 impl TransactionId {
     /// Returns the UTF-8 representation of the transaction ID.
     /// This might return [None] if the sender is not using a text string.
-    pub fn as_str(&self) -> Option<String> {
-        String::from_utf8(self.id.clone()).ok()
+    pub fn as_str(&self) -> Option<&str> {
+        str::from_utf8(&self.id).ok()
     }
 
     /// Returns the BigEndian representation of the transaction ID.
@@ -55,11 +54,11 @@ impl From<Vec<u8>> for TransactionId {
 
 impl Display for TransactionId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            self.as_str().unwrap_or_else(|| self.as_u32().to_string())
-        )
+        if let Some(s) = self.as_str() {
+            f.write_str(s)
+        } else {
+            write!(f, "{}", self.as_u32())
+        }
     }
 }
 
@@ -384,14 +383,29 @@ impl ErrorMessage {
     }
 }
 
+impl TryFrom<(u16, String)> for ErrorMessage {
+    type Error = Error;
+
+    fn try_from(value: (u16, String)) -> Result<Self> {
+        match value.0 {
+            201 => Ok(ErrorMessage::Generic(value.1)),
+            202 => Ok(ErrorMessage::Server(value.1)),
+            203 => Ok(ErrorMessage::Protocol(value.1)),
+            204 => Ok(ErrorMessage::Method(value.1)),
+            _ => Err(Error::InvalidMessage(format!(
+                "unknown error code {}",
+                value.0
+            ))),
+        }
+    }
+}
+
 impl Serialize for ErrorMessage {
     fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let value = (self.code(), self.description());
-
-        HashMap::from([("e".to_string(), value)]).serialize(serializer)
+        (self.code(), self.description()).serialize(serializer)
     }
 }
 
@@ -400,19 +414,47 @@ impl<'de> Deserialize<'de> for ErrorMessage {
     where
         D: Deserializer<'de>,
     {
-        let map = HashMap::<String, (u16, String)>::deserialize(deserializer)?;
+        struct ErrorMessageVisitor;
+        impl<'de> de::Visitor<'de> for ErrorMessageVisitor {
+            type Value = ErrorMessage;
 
-        if let Some((_, (code, msg))) = map.into_iter().next() {
-            match code {
-                201 => Ok(ErrorMessage::Generic(msg)),
-                202 => Ok(ErrorMessage::Server(msg)),
-                203 => Ok(ErrorMessage::Protocol(msg)),
-                204 => Ok(ErrorMessage::Method(msg)),
-                _ => Err(de::Error::custom(format!("Unknown error code {}", code))),
+            fn expecting(&self, f: &mut Formatter) -> std::fmt::Result {
+                write!(f, "expected a sequence of error code and error message")
             }
-        } else {
-            Err(de::Error::custom("expected an error key pair"))
+
+            fn visit_seq<A>(self, mut seq: A) -> result::Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let code: u16 = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                let msg: String = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+
+                Self::Value::try_from((code, msg)).map_err(de::Error::custom)
+            }
+
+            fn visit_map<A>(self, mut map: A) -> result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let entry = map
+                    .next_entry::<Cow<'de, &str>, (u16, String)>()?
+                    .ok_or_else(|| de::Error::missing_field("e"))?;
+                if entry.0.as_ref() != &"e" {
+                    return Err(de::Error::custom(format!(
+                        "expected field 'e', got '{}'",
+                        entry.0
+                    )));
+                }
+
+                Self::Value::try_from(entry.1).map_err(de::Error::custom)
+            }
         }
+
+        deserializer.deserialize_any(ErrorMessageVisitor)
     }
 }
 
@@ -422,7 +464,7 @@ impl<'de> Deserialize<'de> for ErrorMessage {
 pub enum ResponsePayload {
     Raw {
         id: Option<NodeId>,
-        value: value::Value,
+        value: serde_bencode::value::Value,
     },
     Message(ResponseMessage),
 }
@@ -438,56 +480,41 @@ impl ResponsePayload {
 
     /// Parse the response payload into a response message based on the query name.
     pub fn parse(&self, query_name: &str) -> Result<ResponseMessage> {
-        let bytes = match self {
-            ResponsePayload::Message(e) => return Ok(e.clone()),
-            ResponsePayload::Raw { value, .. } => {
-                // extract "r" from the raw value as we're trying to parse a specific message
-                if let value::Value::Dict(e) = value {
-                    match e.get("r".as_bytes()) {
-                        Some(v) => serde_bencode::to_bytes(v)?, // FIXME: this is overhead, but I've no other idea on how to use the Value
-                        _ => {
-                            return Err(Error::InvalidMessage(
-                                "expected the raw value to container 'r'".to_string(),
-                            ))
-                        }
-                    }
-                } else {
-                    return Err(Error::InvalidMessage(
-                        "expected the raw value to be a dict".to_string(),
-                    ));
-                }
-            }
-        };
-
-        Self::try_parse(query_name, bytes)
+        match self {
+            ResponsePayload::Message(e) => Ok(e.clone()),
+            ResponsePayload::Raw { value, .. } => Self::try_parse(query_name, value),
+        }
     }
 
-    fn try_parse(query_name: &str, bytes: Vec<u8>) -> Result<ResponseMessage> {
+    fn try_parse(query_name: &str, value: &serde_bencode::value::Value) -> Result<ResponseMessage> {
         match query_name {
             MESSAGE_PING => Ok(ResponseMessage::Ping {
-                response: serde_bencode::from_bytes(bytes.as_slice())
+                response: decode_bencode_value(value)
                     .map_err(|e| Self::parse_error(query_name, e))?,
             }),
             MESSAGE_FIND_NODE => Ok(ResponseMessage::FindNode {
-                response: serde_bencode::from_bytes(bytes.as_slice())
+                response: decode_bencode_value(value)
                     .map_err(|e| Self::parse_error(query_name, e))?,
             }),
             MESSAGE_GET_PEERS => Ok(ResponseMessage::GetPeers {
-                response: serde_bencode::from_bytes(bytes.as_slice())
+                response: decode_bencode_value(value)
                     .map_err(|e| Self::parse_error(query_name, e))?,
             }),
             MESSAGE_ANNOUNCE => Ok(ResponseMessage::Announce {
-                response: serde_bencode::from_bytes(bytes.as_slice())
+                response: decode_bencode_value(value)
                     .map_err(|e| Self::parse_error(query_name, e))?,
             }),
-            MESSAGE_SAMPLE_INFO_HASHES => match serde_bencode::from_bytes(bytes.as_slice()) {
-                Ok(e) => Ok(ResponseMessage::SampleInfoHashes { response: e }),
-                Err(_) => {
-                    // not all nodes support this query and will handle it as a `find_node`
-                    // so we'll retry again for `find_node`
-                    Self::try_parse(MESSAGE_FIND_NODE, bytes)
+            MESSAGE_SAMPLE_INFO_HASHES => {
+                match decode_bencode_value::<SampleInfoHashesResponse, serde_bencode::Error>(value)
+                {
+                    Ok(e) => Ok(ResponseMessage::SampleInfoHashes { response: e }),
+                    Err(_) => {
+                        // not all nodes support this query and will handle it as a `find_node`
+                        // so we'll retry again for `find_node`
+                        Self::try_parse(MESSAGE_FIND_NODE, value)
+                    }
                 }
-            },
+            }
             _ => Err(Error::InvalidMessage(format!(
                 "unable to parse response payload, unknown query \"{}\"",
                 query_name
@@ -495,11 +522,27 @@ impl ResponsePayload {
         }
     }
 
-    fn parse_error(query_name: &str, err: serde_bencode::error::Error) -> Error {
+    fn parse_error(query_name: &str, err: serde_bencode::Error) -> Error {
         Error::Parse(format!(
             "failed to parse response \"{}\", {}",
             query_name, err
         ))
+    }
+
+    fn from_value(value: serde_bencode::value::Value) -> Self {
+        let id = match &value {
+            serde_bencode::value::Value::Dict(dict) => {
+                dict.get("id".as_bytes()).and_then(|v| match v {
+                    serde_bencode::value::Value::Bytes(bytes) => {
+                        NodeId::try_from(bytes.as_slice()).ok()
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+
+        Self::Raw { id, value }
     }
 }
 
@@ -520,26 +563,12 @@ impl<'de> Deserialize<'de> for ResponsePayload {
     where
         D: Deserializer<'de>,
     {
-        // always decode the raw value when received over the network
-        // this is later deserialized into a ResponseMessage once the original request is known
-        let value = value::Value::deserialize(deserializer)?;
-        let id = match &value {
-            value::Value::Dict(dict) => dict.get("r".as_bytes()).and_then(|e| match e {
-                value::Value::Dict(r) => r.get("id".as_bytes()).and_then(|id| match id {
-                    value::Value::Bytes(bytes) => NodeId::try_from(bytes.as_slice()).ok(),
-                    _ => None,
-                }),
-                _ => None,
-            }),
-            _ => None,
-        };
-
-        Ok(ResponsePayload::Raw { id, value })
+        serde_bencode::value::Value::deserialize(deserializer).map(Self::from_value)
     }
 }
 
 /// The payload data of a message.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize)]
 #[serde(tag = "y")]
 pub enum MessagePayload {
     #[serde(rename = "q")]
@@ -547,7 +576,126 @@ pub enum MessagePayload {
     #[serde(rename = "r")]
     Response(ResponsePayload),
     #[serde(rename = "e")]
-    Error(ErrorMessage),
+    Error {
+        #[serde(rename = "e")]
+        error: ErrorMessage,
+    },
+}
+
+impl MessagePayload {
+    pub fn error(error: ErrorMessage) -> Self {
+        Self::Error { error }
+    }
+}
+
+impl<'de> Deserialize<'de> for MessagePayload {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct MessagePayloadVisitor;
+        impl<'de> de::Visitor<'de> for MessagePayloadVisitor {
+            type Value = MessagePayload;
+
+            fn expecting(&self, f: &mut Formatter) -> std::fmt::Result {
+                write!(f, "expected a dict containing the message payload")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut message_type: Option<Cow<'de, str>> = None;
+                let mut query_type: Option<Cow<'de, str>> = None;
+                let mut query_args: Option<serde_bencode::value::Value> = None;
+                let mut response: Option<ResponsePayload> = None;
+                let mut error: Option<ErrorMessage> = None;
+
+                while let Some(key) = map.next_key::<Cow<'de, str>>()? {
+                    match key.as_ref() {
+                        "y" => {
+                            message_type = Some(map.next_value()?);
+                        }
+                        "q" => {
+                            query_type = Some(map.next_value()?);
+                        }
+                        "a" => {
+                            query_args = Some(map.next_value()?);
+                        }
+                        "r" => {
+                            response = Some(map.next_value()?);
+                        }
+                        "e" => {
+                            error = Some(map.next_value()?);
+                        }
+                        _ => {
+                            let _ = map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+
+                let message_type = message_type.ok_or_else(|| de::Error::missing_field("y"))?;
+                match message_type.as_ref() {
+                    "q" => {
+                        let query_type = query_type.ok_or_else(|| de::Error::missing_field("q"))?;
+                        let query_args = query_args.ok_or_else(|| de::Error::missing_field("a"))?;
+
+                        let query = match query_type.as_ref() {
+                            "ping" => {
+                                let request = decode_bencode_value(&query_args)?;
+                                QueryMessage::Ping { request }
+                            }
+                            "find_node" => {
+                                let request = decode_bencode_value(&query_args)?;
+                                QueryMessage::FindNode { request }
+                            }
+                            "get_peers" => {
+                                let request = decode_bencode_value(&query_args)?;
+                                QueryMessage::GetPeers { request }
+                            }
+                            "announce_peer" => {
+                                let request = decode_bencode_value(&query_args)?;
+                                QueryMessage::AnnouncePeer { request }
+                            }
+                            // BEP51: "sample_infohashes"
+                            "sample_infohashes" => {
+                                let request = decode_bencode_value(&query_args)?;
+                                QueryMessage::SampleInfoHashes { request }
+                            }
+                            _ => {
+                                return Err(de::Error::unknown_variant(
+                                    query_type.as_ref(),
+                                    &[
+                                        "ping",
+                                        "find_node",
+                                        "get_peers",
+                                        "announce",
+                                        "sample_info_hashes",
+                                    ],
+                                ))
+                            }
+                        };
+
+                        Ok(MessagePayload::Query(query))
+                    }
+                    "r" => {
+                        let response = response.ok_or_else(|| de::Error::missing_field("r"))?;
+                        Ok(MessagePayload::Response(response))
+                    }
+                    "e" => {
+                        let error = error.ok_or_else(|| de::Error::missing_field("e"))?;
+                        Ok(MessagePayload::error(error))
+                    }
+                    _ => Err(de::Error::unknown_variant(
+                        message_type.as_ref(),
+                        &["q", "r", "e"],
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(MessagePayloadVisitor)
+    }
 }
 
 /// The version info of the DHT node.
@@ -631,7 +779,7 @@ pub struct Message {
     pub payload: MessagePayload,
     /// The node's external IP.
     /// See BEP42 for more info.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "ip", skip_serializing_if = "Option::is_none")]
     pub ip: Option<CompactIpAddr>,
     /// The node's external port
     #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
@@ -651,13 +799,13 @@ impl Message {
         match &self.payload {
             MessagePayload::Query(q) => Some(q.id()),
             MessagePayload::Response(response_payload) => response_payload.id(),
-            MessagePayload::Error(_) => None,
+            MessagePayload::Error { .. } => None,
         }
     }
 
     /// Returns the UTF-8 representation of the transaction ID.
     /// This might return [None] if the sender is not using a text string.
-    pub fn transaction_id_as_str(&self) -> Option<String> {
+    pub fn transaction_id_as_str(&self) -> Option<&str> {
         self.transaction_id.as_str()
     }
 
@@ -749,6 +897,16 @@ impl MessageBuilder {
             read_only: self.read_only.take().unwrap_or(false),
         })
     }
+}
+
+/// Decode the given bencode Value into a concrete type.
+fn decode_bencode_value<T, E>(value: &serde_bencode::value::Value) -> result::Result<T, E>
+where
+    T: DeserializeOwned,
+    E: de::Error,
+{
+    let bytes = serde_bencode::to_bytes(value).map_err(E::custom)?;
+    serde_bencode::from_bytes(&bytes).map_err(E::custom)
 }
 
 mod serde_info_hash {
@@ -870,7 +1028,7 @@ mod tests {
 
             let transaction_id = TransactionId::from(id.as_bytes());
 
-            assert_eq!(transaction_id.as_str(), Some(id));
+            assert_eq!(transaction_id.as_str(), Some(id.as_str()));
         }
 
         #[test]
@@ -888,6 +1046,7 @@ mod tests {
 
     mod ping {
         use super::*;
+        use serde::de::Error;
 
         #[test]
         fn test_request() {
@@ -902,12 +1061,14 @@ mod tests {
                 .unwrap();
 
             // deserialize the payload
-            let result =
-                serde_bencode::from_str::<Message>(payload).expect("expected a valid message");
+            let result = serde_bencode::from_bytes::<Message>(payload.as_bytes())
+                .expect("expected a valid message");
             assert_eq!(expected_result, result);
 
             // serialize the payload and compare it with the original payload
-            let result = serde_bencode::to_string(&result).unwrap();
+            let result = serde_bencode::to_bytes(&result)
+                .and_then(|e| String::from_utf8(e).map_err(|e| serde_bencode::Error::custom(e)))
+                .unwrap();
             assert_eq!(payload, result.as_str());
         }
 
@@ -927,14 +1088,16 @@ mod tests {
 
             // deserialize the payload
             let result = deserialize_response(
-                serde_bencode::from_str::<Message>(payload).unwrap(),
+                serde_bencode::from_bytes::<Message>(payload.as_bytes()).unwrap(),
                 MESSAGE_PING,
             );
             assert_eq!(Some(&node_id), result.id(), "expected the node id to match");
             assert_eq!(expected_result, result);
 
             // serialize the payload and compare it with the original payload
-            let result = serde_bencode::to_string(&result).unwrap();
+            let result = serde_bencode::to_bytes(&result)
+                .and_then(|e| String::from_utf8(e).map_err(|e| serde_bencode::Error::custom(e)))
+                .unwrap();
             assert_eq!(payload, result.as_str());
         }
     }
@@ -943,6 +1106,7 @@ mod tests {
         use super::*;
         use crate::dht::compact::CompactIPv4Node;
         use crate::CompactIpv4Addr;
+        use serde::de::Error;
         use std::net::Ipv4Addr;
 
         #[test]
@@ -962,12 +1126,14 @@ mod tests {
                 .unwrap();
 
             // deserialize the payload
-            let result =
-                serde_bencode::from_str::<Message>(payload).expect("expected a valid message");
+            let result = serde_bencode::from_bytes::<Message>(payload.as_bytes())
+                .expect("expected a valid message");
             assert_eq!(expected_result, result);
 
             // serialize the payload and compare it with the original payload
-            let result = serde_bencode::to_string(&result).unwrap();
+            let result = serde_bencode::to_bytes(&result)
+                .and_then(|e| String::from_utf8(e).map_err(|e| serde_bencode::Error::custom(e)))
+                .unwrap();
             assert_eq!(payload, result.as_str());
         }
 
@@ -975,7 +1141,6 @@ mod tests {
         fn test_response() {
             // as compact address cannot be printed as UTF8 strings,
             // we're going to use hex representation instead
-            let payload_hex = "64313a7264323a696432303a303132333435363738396162636465666768696a353a6e6f64657332363a71776572747930313233343536373839617a65727f0000011ae1353a746f6b656e31323a746f6b656e6578616d706c6565313a74323a6161313a79313a7265";
             let id = NodeId::try_from("0123456789abcdefghij".as_bytes()).unwrap();
             let token = "tokenexample".as_bytes();
             let expected_result = Message::builder()
@@ -1001,7 +1166,7 @@ mod tests {
                 .unwrap();
 
             // deserialize the payload
-            let bytes = hex::decode(payload_hex).unwrap();
+            let bytes = serde_bencode::to_bytes(&expected_result).unwrap();
             let result = deserialize_response(
                 serde_bencode::from_bytes::<Message>(bytes.as_slice()).unwrap(),
                 MESSAGE_FIND_NODE,
@@ -1010,12 +1175,13 @@ mod tests {
 
             // serialize the payload and compare it with the original payload
             let result = serde_bencode::to_bytes(&result).unwrap();
-            assert_eq!(payload_hex, hex::encode(result.as_slice()));
+            assert_eq!(bytes, result);
         }
     }
 
     mod announce_peer {
         use super::*;
+        use serde::de::Error;
 
         #[test]
         fn test_request() {
@@ -1037,12 +1203,14 @@ mod tests {
                 .unwrap();
 
             // deserialize the payload
-            let result =
-                serde_bencode::from_str::<Message>(payload).expect("expected a valid message");
+            let result = serde_bencode::from_bytes::<Message>(payload.as_bytes())
+                .expect("expected a valid message");
             assert_eq!(expected_result, result);
 
             // serialize the payload and compare it with the original payload
-            let result = serde_bencode::to_string(&result).unwrap();
+            let result = serde_bencode::to_bytes(&result)
+                .and_then(|e| String::from_utf8(e).map_err(|e| serde_bencode::Error::custom(e)))
+                .unwrap();
             assert_eq!(payload, result.as_str());
         }
 
@@ -1069,13 +1237,16 @@ mod tests {
             assert_eq!(expected_result, result);
 
             // serialize the payload and compare it with the original payload
-            let result = serde_bencode::to_string(&result).unwrap();
+            let result = serde_bencode::to_bytes(&result)
+                .and_then(|e| String::from_utf8(e).map_err(|e| serde_bencode::Error::custom(e)))
+                .unwrap();
             assert_eq!(payload, result.as_str());
         }
     }
 
     mod sample_infohashes {
         use super::*;
+        use serde::de::Error;
 
         #[test]
         fn test_request() {
@@ -1091,12 +1262,14 @@ mod tests {
                 .unwrap();
 
             // deserialize the payload
-            let result =
-                serde_bencode::from_str::<Message>(payload).expect("expected a valid message");
+            let result = serde_bencode::from_bytes::<Message>(payload.as_bytes())
+                .expect("expected a valid message");
             assert_eq!(expected_result, result);
 
             // serialize the payload and compare it with the original payload
-            let result = serde_bencode::to_string(&result).unwrap();
+            let result = serde_bencode::to_bytes(&result)
+                .and_then(|e| String::from_utf8(e).map_err(|e| serde_bencode::Error::custom(e)))
+                .unwrap();
             assert_eq!(payload, result.as_str());
         }
 
@@ -1145,7 +1318,7 @@ mod tests {
         fn test_error_serialize() {
             let message = Message::builder()
                 .transaction_id_bytes("aa".as_bytes())
-                .payload(MessagePayload::Error(ErrorMessage::Generic(
+                .payload(MessagePayload::error(ErrorMessage::Generic(
                     "A Generic Error Occurred".to_string(),
                 )))
                 .build()
@@ -1159,11 +1332,11 @@ mod tests {
 
         #[test]
         fn test_error_deserialize() {
-            let payload = "d1:eli201e23:A Generic Error Ocurrede1:t2:aa1:y1:ee";
+            let payload = "d1:eli201e24:A Generic Error Occurrede1:t2:aa1:y1:ee";
             let expected_result = Message::builder()
                 .transaction_id_bytes("aa".as_bytes())
-                .payload(MessagePayload::Error(ErrorMessage::Generic(
-                    "A Generic Error Ocurred".to_string(),
+                .payload(MessagePayload::error(ErrorMessage::Generic(
+                    "A Generic Error Occurred".to_string(),
                 )))
                 .build()
                 .unwrap();
@@ -1176,25 +1349,49 @@ mod tests {
 
         #[test]
         fn test_error_message_deserialize() {
-            let message = ErrorMessage::Generic("lorem".to_string());
-            let bytes = serde_bencode::to_bytes(&message).unwrap();
-            let result = serde_bencode::from_bytes::<ErrorMessage>(bytes.as_slice()).unwrap();
-            assert_eq!(message, result);
+            let payload = "d1:eli201e24:A Generic Error Occurrede1:t2:aa1:y1:ee";
+            let result = serde_bencode::from_str::<Message>(payload).unwrap();
+            let expected_result = Message::builder()
+                .transaction_id_bytes("aa".as_bytes())
+                .payload(MessagePayload::error(ErrorMessage::Generic(
+                    "A Generic Error Occurred".to_string(),
+                )))
+                .build()
+                .unwrap();
+            assert_eq!(expected_result, result);
 
-            let message = ErrorMessage::Protocol("ipsum".to_string());
-            let bytes = serde_bencode::to_bytes(&message).unwrap();
-            let result = serde_bencode::from_bytes::<ErrorMessage>(bytes.as_slice()).unwrap();
-            assert_eq!(message, result);
+            let payload = "d1:eli202e14:A Server Errore1:t2:aa1:y1:ee";
+            let result = serde_bencode::from_str::<Message>(payload).unwrap();
+            let expected_result = Message::builder()
+                .transaction_id_bytes("aa".as_bytes())
+                .payload(MessagePayload::error(ErrorMessage::Server(
+                    "A Server Error".to_string(),
+                )))
+                .build()
+                .unwrap();
+            assert_eq!(expected_result, result);
 
-            let message = ErrorMessage::Server("dolor".to_string());
-            let bytes = serde_bencode::to_bytes(&message).unwrap();
-            let result = serde_bencode::from_bytes::<ErrorMessage>(bytes.as_slice()).unwrap();
-            assert_eq!(message, result);
+            let payload = "d1:eli203e16:A Protocol Errore1:t2:bb1:y1:ee";
+            let result = serde_bencode::from_str::<Message>(payload).unwrap();
+            let expected_result = Message::builder()
+                .transaction_id_bytes("bb".as_bytes())
+                .payload(MessagePayload::error(ErrorMessage::Protocol(
+                    "A Protocol Error".to_string(),
+                )))
+                .build()
+                .unwrap();
+            assert_eq!(expected_result, result);
 
-            let message = ErrorMessage::Method("esta".to_string());
-            let bytes = serde_bencode::to_bytes(&message).unwrap();
-            let result = serde_bencode::from_bytes::<ErrorMessage>(bytes.as_slice()).unwrap();
-            assert_eq!(message, result);
+            let payload = "d1:eli204e14:Method Unknowne1:t2:bb1:y1:ee";
+            let result = serde_bencode::from_str::<Message>(payload).unwrap();
+            let expected_result = Message::builder()
+                .transaction_id_bytes("bb".as_bytes())
+                .payload(MessagePayload::error(ErrorMessage::Method(
+                    "Method Unknown".to_string(),
+                )))
+                .build()
+                .unwrap();
+            assert_eq!(expected_result, result);
         }
     }
 
