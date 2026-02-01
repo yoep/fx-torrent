@@ -21,7 +21,9 @@ const BURST_DURATION: Duration = Duration::from_secs(10);
 
 /// Establishes additional peer connections for the torrent.
 pub struct TorrentConnectPeersOperation {
+    /// Indicates whether webseed connections are enabled for the torrent
     webseeds_enabled: bool,
+    /// The webseed urls to connect to
     webseed_urls: Option<Vec<Url>>,
     /// The maximum amount of in-flight peer connections being established
     max_in_flight: usize,
@@ -304,8 +306,10 @@ impl TorrentOperation for TorrentConnectPeersOperation {
 impl Debug for TorrentConnectPeersOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TorrentConnectPeersOperation")
+            .field("webseeds_enabled", &self.webseeds_enabled)
             .field("webseed_urls", &self.webseed_urls)
             .field("max_in_flight", &self.max_in_flight)
+            .field("bursting_since", &self.bursting_since)
             .finish()
     }
 }

@@ -292,6 +292,13 @@ impl<'de> Deserialize<'de> for WantFamily {
 pub struct GetPeersRequest {
     pub id: NodeId,
     pub info_hash: InfoHash,
+    /// BEP33 - The responding node should try to fill the values list with non-seed items on a best-effort basis.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_seed: bool,
+    /// BEP33 - The responding node has database entries for that info hash,
+    /// then it must add two fields to the "r" dictionary in the response.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scrape: bool,
     #[serde(default, skip_serializing_if = "WantFamily::is_none")]
     pub want: WantFamily,
 }
@@ -299,8 +306,10 @@ pub struct GetPeersRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GetPeersResponse {
     pub id: NodeId,
-    #[serde(with = "serde_bytes")]
-    pub token: Vec<u8>,
+    /// The token for announcing a peer.
+    /// If a node does not return a token, it indicates that it currently cannot accept announces for this info hash.
+    #[serde(default, with = "serde_bytes", skip_serializing_if = "Option::is_none")]
+    pub token: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub values: Option<Vec<CompactIpAddr>>,
     #[serde(default, skip_serializing_if = "CompactIPv4Nodes::is_empty")]
@@ -321,8 +330,9 @@ pub struct AnnouncePeerRequest {
     /// The name of the torrent, if provided
     #[serde(default, rename = "n", skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<bool>,
+    /// BEP33 - The requesting node is seeding the torrent it announces
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1179,7 +1189,7 @@ mod tests {
                         port: 6881,
                         token: "aoeusnth".as_bytes().to_vec(),
                         name: None,
-                        seed: None,
+                        seed: false,
                     },
                 }))
                 .build()

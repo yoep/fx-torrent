@@ -11,8 +11,8 @@ mod metrics;
 mod node;
 mod node_id;
 mod observer;
-mod peers;
 mod routing_table;
+mod storage;
 mod tracker;
 mod traversal;
 

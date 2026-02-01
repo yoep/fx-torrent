@@ -153,7 +153,7 @@ struct PendingQuery {
 mod tests {
     use super::*;
     use crate::dht::observer::Observer;
-    use crate::dht::peers::PeerStorage;
+    use crate::dht::storage::DhtStorage;
     use crate::dht::{DhtEvent, Event};
     use crate::{channel, create_tracker_context, init_logger};
     use fx_callback::Callback;
@@ -230,10 +230,11 @@ mod tests {
         // start the target main loop in a separate task
         tokio::spawn(async move {
             let (sender, receiver) = channel!(1);
+            let storage = DhtStorage::new(16);
             let observer = Observer::new(sender.clone());
             let traversal = TraversalAlgorithm::new(8, vec![], sender);
 
-            target.run(observer, traversal, receiver).await;
+            target.run(storage, observer, traversal, receiver).await;
         });
 
         // run the traversal algorithm
@@ -241,7 +242,7 @@ mod tests {
 
         // process the incoming message
         let mut observer = Observer::new(sender);
-        let mut peers = PeerStorage::new();
+        let mut peers = DhtStorage::new(16);
         let timeout = time::sleep(Duration::from_millis(750));
         tokio::pin!(timeout);
         let result = loop {
