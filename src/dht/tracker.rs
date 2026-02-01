@@ -1,3 +1,4 @@
+use crate::bloom_filter::BloomFilter;
 use crate::channel::{ChannelReceiver, ChannelSender, Reply, Response};
 use crate::dht::compact::{CompactIPv4Node, CompactIPv4Nodes, CompactIPv6Node, CompactIPv6Nodes};
 use crate::dht::krpc::{
@@ -21,6 +22,7 @@ use futures::StreamExt;
 use fx_callback::{Callback, MultiThreadedCallback, Subscriber, Subscription};
 use itertools::Itertools;
 use log::{debug, trace, warn};
+use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::io;
@@ -1443,13 +1445,13 @@ impl TrackerContext {
     /// * `addr`- The source address of the node.
     /// * `request` - The `get_peers` query arguments.
     /// * `peers` - The peer storage of the server.
-    #[cfg_attr(feature = "tracing", instrument(skip(self, peers)))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn on_get_peers_request(
         &self,
         transaction_id: TransactionId,
         addr: &SocketAddr,
         request: GetPeersRequest,
-        peers: &DhtStorage,
+        storage: &DhtStorage,
     ) -> Result<()> {
         let token: NodeToken;
         let (nodes, nodes6) = match self.routing_table.find_node(&request.id) {
@@ -1483,24 +1485,46 @@ impl TrackerContext {
             }
         };
 
-        let values = Some(
-            peers
-                .peers(&request.info_hash)
-                .filter(|e| e.addr.is_ipv4() == self.socket_addr.is_ipv4())
-                .map(|e| CompactIpAddr::from(e.addr))
-                .collect::<Vec<_>>(),
-        )
-        .filter(|e| !e.is_empty());
+        let mut peers = storage
+            .peers(&request.info_hash)
+            .filter(|e| e.addr.is_ipv4() == self.socket_addr.is_ipv4())
+            .collect::<Vec<_>>();
+
+        let mut downloaders = None;
+        let mut seeds = None;
+        if request.scrape {
+            let mut downloaders_bloom_filter = BloomFilter::<256>::new();
+            let mut seeds_bloom_filter = BloomFilter::<256>::new();
+
+            for peer in peers.drain(..) {
+                let ip_hash = Self::hash_ip_addr(&peer.addr);
+                match peer.seed {
+                    true => seeds_bloom_filter.insert(ip_hash),
+                    false => downloaders_bloom_filter.insert(ip_hash),
+                }
+            }
+
+            downloaders = Some(downloaders_bloom_filter);
+            seeds = Some(seeds_bloom_filter);
+        }
 
         self.send_response(
             transaction_id,
             ResponseMessage::GetPeers {
                 response: GetPeersResponse {
                     id: self.routing_table.id,
+                    name: None,
                     token: Some(token.to_vec()),
-                    values,
+                    values: peers
+                        .into_iter()
+                        // BEP33 - If the requester is requesting no seed values, filter out all seeds
+                        .filter(|e| !request.no_seed || !e.seed)
+                        .map(|e| CompactIpAddr::from(e.addr))
+                        .collect::<Vec<_>>(),
                     nodes: nodes.into(),
                     nodes6: nodes6.into(),
+                    downloaders: downloaders.map(|e| e.as_str().to_string()),
+                    seeds: seeds.map(|e| e.as_str().to_string()),
                 },
             },
             &addr,
@@ -1537,7 +1561,6 @@ impl TrackerContext {
         let peers: Vec<SocketAddr> = response
             .values
             .iter()
-            .flatten()
             .map(|e| SocketAddr::from(e))
             .collect();
 
@@ -2309,6 +2332,13 @@ impl TrackerContext {
                 addr: SocketAddr::from(&e.addr),
             }))
             .collect()
+    }
+
+    fn hash_ip_addr(addr: &SocketAddr) -> Vec<u8> {
+        match addr.ip() {
+            IpAddr::V4(ip) => Sha1::digest(ip.octets()).to_vec(),
+            IpAddr::V6(ip) => Sha1::digest(ip.octets()).to_vec(),
+        }
     }
 }
 

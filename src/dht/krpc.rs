@@ -306,16 +306,25 @@ pub struct GetPeersRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GetPeersResponse {
     pub id: NodeId,
+    /// The name of the torrent.
+    #[serde(default, rename = "n", skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The token for announcing a peer.
     /// If a node does not return a token, it indicates that it currently cannot accept announces for this info hash.
     #[serde(default, with = "serde_bytes", skip_serializing_if = "Option::is_none")]
     pub token: Option<Vec<u8>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub values: Option<Vec<CompactIpAddr>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<CompactIpAddr>,
     #[serde(default, skip_serializing_if = "CompactIPv4Nodes::is_empty")]
     pub nodes: CompactIPv4Nodes,
     #[serde(default, skip_serializing_if = "CompactIPv6Nodes::is_empty")]
     pub nodes6: CompactIPv6Nodes,
+    /// BEP33 - Bloom Filter representing all stored peers for the info hash.
+    #[serde(default, rename = "BFpe", skip_serializing_if = "Option::is_none")]
+    pub downloaders: Option<String>,
+    /// BEP33 - Bloom Filter representing all stored seeds for the info hash.
+    #[serde(default, rename = "BFsd", skip_serializing_if = "Option::is_none")]
+    pub seeds: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
