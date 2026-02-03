@@ -19,7 +19,7 @@ _Cargo.toml_
 
 ```toml
 [dependencies]
-fx-torrent = "0.4.0"
+fx-torrent = "0.4.1"
 ```
 
 Next, create a new `FXTorrentSession` which manages one or more torrents.
