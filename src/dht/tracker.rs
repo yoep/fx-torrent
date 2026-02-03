@@ -282,7 +282,7 @@ impl DhtTracker {
     ///      Err(e) => println!("Failed to find nodes: {}", e),
     ///  }
     /// ```
-    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
     pub async fn find_nodes(&self, target_id: &NodeId, timeout: Duration) -> Result<Vec<NodeKey>> {
         let nodes = self
             .sender
@@ -316,7 +316,7 @@ impl DhtTracker {
     /// Returns the peer addresses for the given torrent info hash from a specific node within the network.
     ///
     /// Use `n_depth` to determine the depth of the search within the network.
-    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
     pub async fn get_peers_from(
         &self,
         info_hash: &InfoHash,
@@ -331,7 +331,7 @@ impl DhtTracker {
     /// Each queried node is limited to the given timeout.
     ///
     /// Use `n_depth` to determine the depth of the search within the network.
-    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
     pub async fn get_peers(
         &self,
         info_hash: &InfoHash,
@@ -358,13 +358,65 @@ impl DhtTracker {
             .concat())
     }
 
+    /// Scrape the downloaders and seeders for the given info hash.
+    /// Each queried node is limited to the given timeout.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    pub async fn scrape_peers(
+        &self,
+        info_hash: &InfoHash,
+        timeout: Duration,
+    ) -> Result<ScrapeResult> {
+        let nodes = self
+            .sender
+            .send(|tx| TrackerCommand::GoodSearchNodes { response: tx })
+            .await
+            .await?;
+
+        let futures = nodes.iter().map(|node| async {
+            let response = self
+                .sender
+                .send(|tx| TrackerCommand::GetPeers {
+                    node: *node,
+                    info_hash: info_hash.clone(),
+                    scrape: true,
+                    response: tx,
+                })
+                .await;
+
+            select! {
+                _ = time::sleep(timeout) => Err(Error::Timeout),
+                result = response => result,
+            }
+        });
+
+        let mut scrape_result = ScrapeResult::default();
+        for result in futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            scrape_result.downloaders += result.downloaders;
+            scrape_result.seeders += result.seeders;
+        }
+
+        Ok(scrape_result)
+    }
+
     /// Announce the given peer to the DHT network.
-    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
-    pub async fn announce_peer(&self, info_hash: &InfoHash, peer_addr: &SocketAddr) -> Result<()> {
+    ///
+    /// As defined in BEP33, the `announce_peer` supports indicating if the peer is a seeder.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    pub async fn announce_peer(
+        &self,
+        info_hash: &InfoHash,
+        peer_addr: &SocketAddr,
+        is_seed: bool,
+    ) -> Result<()> {
         self.sender
             .send(|tx| TrackerCommand::AnnouncePeer {
                 info_hash: info_hash.clone(),
                 peer_addr: *peer_addr,
+                is_seed,
                 node: None,
                 response: tx,
             })
@@ -373,17 +425,21 @@ impl DhtTracker {
     }
 
     /// Announce the given peer to a specific node within the network.
+    ///
+    /// As defined in BEP33, the `announce_peer` supports indicating if the peer is a seeder.
     #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
     pub async fn announce_peer_to(
         &self,
         info_hash: &InfoHash,
         peer_addr: &SocketAddr,
+        is_seed: bool,
         node: &NodeKey,
     ) -> Result<()> {
         self.sender
             .send(|tx| TrackerCommand::AnnouncePeer {
                 info_hash: info_hash.clone(),
                 peer_addr: *peer_addr,
+                is_seed,
                 node: Some(*node),
                 response: tx,
             })
@@ -458,7 +514,7 @@ impl DhtTracker {
         depth_left: usize,
     ) -> Result<Vec<SocketAddr>> {
         const MAX_IN_FLIGHT: usize = 5;
-        let result = self.do_get_peers(info_hash, node).await?;
+        let result = self.do_get_peers(info_hash, node, false).await?;
         let mut peers: HashSet<SocketAddr> = HashSet::from_iter(result.peers);
 
         if depth_left == 0 || result.nodes.is_empty() {
@@ -472,7 +528,7 @@ impl DhtTracker {
                     return vec![];
                 }
 
-                match self.do_get_peers(info_hash, &node).await {
+                match self.do_get_peers(info_hash, &node, false).await {
                     Err(_) => vec![],
                     Ok(result) => {
                         let mut peers = result.peers;
@@ -516,11 +572,17 @@ impl DhtTracker {
     }
 
     /// Retrieve the peers from the given node for the [InfoHash].
-    async fn do_get_peers(&self, info_hash: &InfoHash, node: &NodeKey) -> Result<GetPeersResult> {
+    async fn do_get_peers(
+        &self,
+        info_hash: &InfoHash,
+        node: &NodeKey,
+        scrape: bool,
+    ) -> Result<GetPeersResult> {
         self.sender
             .send(|tx| TrackerCommand::GetPeers {
                 node: *node,
                 info_hash: info_hash.clone(),
+                scrape,
                 response: tx,
             })
             .await
@@ -661,10 +723,18 @@ impl DhtTrackerBuilder {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct ScrapeResult {
+    pub downloaders: usize,
+    pub seeders: usize,
+}
+
 #[derive(Debug)]
 pub(crate) struct GetPeersResult {
     pub peers: Vec<SocketAddr>,
     pub nodes: Vec<NodeKey>,
+    pub downloaders: usize,
+    pub seeders: usize,
 }
 
 /// The internal DHT tracker commands executed on the main loop of the [TrackerContext].
@@ -686,12 +756,14 @@ pub(crate) enum TrackerCommand {
     GetPeers {
         node: NodeKey,
         info_hash: InfoHash,
+        scrape: bool,
         response: Reply<Result<GetPeersResult>>,
     },
     /// Announce the given peer to the DHT network.
     AnnouncePeer {
         info_hash: InfoHash,
         peer_addr: SocketAddr,
+        is_seed: bool,
         node: Option<NodeKey>,
         response: Reply<Result<()>>,
     },
@@ -744,17 +816,24 @@ impl Debug for TrackerCommand {
                     target_id
                 )
             }
-            TrackerCommand::GetPeers { info_hash, .. } => {
+            TrackerCommand::GetPeers {
+                info_hash, scrape, ..
+            } => {
                 write!(
                     f,
-                    "TrackerCommand::GetPeers{{ info_hash: {:?} }}",
-                    info_hash
+                    "TrackerCommand::GetPeers{{ info_hash: {:?}, scrape: {:?} }}",
+                    info_hash, scrape
                 )
             }
-            TrackerCommand::AnnouncePeer { info_hash, .. } => write!(
+            TrackerCommand::AnnouncePeer {
+                info_hash,
+                peer_addr,
+                is_seed,
+                ..
+            } => write!(
                 f,
-                "TrackerCommand::AnnouncePeer{{ info_hash: {:?} }}",
-                info_hash
+                "TrackerCommand::AnnouncePeer{{ info_hash: {:?}, peer_addr: {:?}, is_seed: {:?} }}",
+                info_hash, peer_addr, is_seed
             ),
             TrackerCommand::ScrapeInfoHashes { node, .. } => {
                 write!(f, "TrackerCommand::ScrapeInfoHashes{{ node: {:?} }}", node)
@@ -1088,14 +1167,14 @@ impl TrackerContext {
     /// * `transaction_id` - The transaction id of the query.
     /// * `addr`- The source address of the node.
     /// * `request` - The `announce_peer` query arguments.
-    /// * `peers` - The peer storage of the server.
-    #[cfg_attr(feature = "tracing", instrument(skip(self, peers)))]
+    /// * `storage` - The DHT storage of the server.
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn on_announce_peer_request(
         &self,
         transaction_id: TransactionId,
         addr: &SocketAddr,
         request: AnnouncePeerRequest,
-        peers: &mut DhtStorage,
+        storage: &mut DhtStorage,
     ) -> Result<()> {
         if let Some(node) = self.routing_table.find_node(&request.id) {
             // check if the address matches the node
@@ -1130,7 +1209,12 @@ impl TrackerContext {
             addr,
             request.info_hash
         );
-        peers.update_peer(request.info_hash, *addr, request.seed);
+        let peer_addr = if request.implied_port {
+            *addr
+        } else {
+            SocketAddr::new(addr.ip(), request.port)
+        };
+        storage.update_peer(request.info_hash, peer_addr, request.seed);
         self.send_response(
             transaction_id,
             ResponseMessage::Announce {
@@ -1491,21 +1575,21 @@ impl TrackerContext {
             .collect::<Vec<_>>();
 
         let mut downloaders = None;
-        let mut seeds = None;
+        let mut seeders = None;
         if request.scrape {
             let mut downloaders_bloom_filter = BloomFilter::<256>::new();
-            let mut seeds_bloom_filter = BloomFilter::<256>::new();
+            let mut seeders_bloom_filter = BloomFilter::<256>::new();
 
             for peer in peers.drain(..) {
                 let ip_hash = Self::hash_ip_addr(&peer.addr);
                 match peer.seed {
-                    true => seeds_bloom_filter.insert(ip_hash),
+                    true => seeders_bloom_filter.insert(ip_hash),
                     false => downloaders_bloom_filter.insert(ip_hash),
                 }
             }
 
             downloaders = Some(downloaders_bloom_filter);
-            seeds = Some(seeds_bloom_filter);
+            seeders = Some(seeders_bloom_filter);
         }
 
         self.send_response(
@@ -1524,7 +1608,7 @@ impl TrackerContext {
                     nodes: nodes.into(),
                     nodes6: nodes6.into(),
                     downloaders: downloaders.map(|e| e.as_str().to_string()),
-                    seeds: seeds.map(|e| e.as_str().to_string()),
+                    seeds: seeders.map(|e| e.as_str().to_string()),
                 },
             },
             &addr,
@@ -1569,6 +1653,21 @@ impl TrackerContext {
             traversal.add_node(Some(node.id), node.addr);
         }
 
+        let downloaders = response
+            .downloaders
+            .as_ref()
+            .map(|e| e.as_bytes())
+            .and_then(|e| BloomFilter::<256>::try_from(e).ok())
+            .map(|e| e.len())
+            .unwrap_or_default();
+        let seeds = response
+            .seeds
+            .as_ref()
+            .map(|e| e.as_bytes())
+            .and_then(|e| BloomFilter::<256>::try_from(e).ok())
+            .map(|e| e.len())
+            .unwrap_or_default();
+
         match pending_request.request_type {
             Some(PendingRequestType::GetPeers {
                 info_hash,
@@ -1581,7 +1680,12 @@ impl TrackerContext {
                 self.metrics
                     .discovered_peers
                     .set(peer_storage.peers_len() as u64);
-                let _ = response.send(Ok(GetPeersResult { peers, nodes }));
+                let _ = response.send(Ok(GetPeersResult {
+                    peers,
+                    nodes,
+                    downloaders,
+                    seeders: seeds,
+                }));
             }
             Some(_) => Self::resolve_as_err(
                 pending_request.request_type,
@@ -1652,29 +1756,29 @@ impl TrackerContext {
             TrackerCommand::GetPeers {
                 node,
                 info_hash,
+                scrape,
                 response,
             } => {
-                let node = self
-                    .routing_table
-                    .find_node_by_key(&node)
-                    .cloned()
-                    .unwrap_or_else(|| Node::from(node));
-                self.get_peers(info_hash, &node, response).await
+                let node = self.find_node_or_create(&node);
+                self.get_peers(info_hash, &node, false, scrape, response)
+                    .await
             }
             TrackerCommand::AnnouncePeer {
                 info_hash,
                 peer_addr,
+                is_seed,
                 node,
                 response,
             } => match node {
                 None => {
-                    self.announce_peer_to_network(info_hash, &peer_addr).await;
+                    self.announce_peer_to_network(info_hash, &peer_addr, is_seed)
+                        .await;
                     response.send(Ok(()));
                 }
                 Some(node) => match self.routing_table.find_node_by_key(&node).cloned() {
                     None => response.send(Err(Error::InvalidNodeId)),
                     Some(node) => {
-                        self.announce_peer_to(info_hash, &peer_addr, &node, response)
+                        self.announce_peer_to(info_hash, &peer_addr, &node, is_seed, response)
                             .await
                     }
                 },
@@ -1760,7 +1864,7 @@ impl TrackerContext {
         Response::from(rx)
     }
 
-    #[cfg_attr(feature = "tracing", instrument)]
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn find_node_internal(
         &mut self,
         target: NodeId,
@@ -1782,11 +1886,13 @@ impl TrackerContext {
         .await;
     }
 
-    #[cfg_attr(feature = "tracing", instrument)]
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn get_peers(
         &mut self,
         info_hash: InfoHash,
         node: &Node,
+        no_seed: bool,
+        scrape: bool,
         response: Reply<Result<GetPeersResult>>,
     ) {
         self.send_query(
@@ -1794,9 +1900,8 @@ impl TrackerContext {
                 request: GetPeersRequest {
                     id: self.routing_table.id,
                     info_hash: info_hash.clone(),
-                    // TODO: implement BEP33
-                    no_seed: false,
-                    scrape: false,
+                    no_seed,
+                    scrape,
                     want: Default::default(),
                 },
             },
@@ -1810,12 +1915,13 @@ impl TrackerContext {
         .await
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self, node, response)))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn announce_peer_to(
         &mut self,
         info_hash: InfoHash,
         peer_addr: &SocketAddr,
         node: &Node,
+        is_seed: bool,
         response: Reply<Result<()>>,
     ) {
         if let Some(token) = node.announce_token().await {
@@ -1828,7 +1934,7 @@ impl TrackerContext {
                         port: peer_addr.port(),
                         token: token.to_vec(),
                         name: None,
-                        seed: false,
+                        seed: is_seed,
                     },
                 },
                 node.addr(),
@@ -1842,7 +1948,12 @@ impl TrackerContext {
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
-    async fn announce_peer_to_network(&mut self, info_hash: InfoHash, peer_addr: &SocketAddr) {
+    async fn announce_peer_to_network(
+        &mut self,
+        info_hash: InfoHash,
+        peer_addr: &SocketAddr,
+        is_seed: bool,
+    ) {
         for node in self.routing_table.nodes().cloned().collect::<Vec<_>>() {
             if let Some(token) = node.announce_token().await {
                 self.send_query(
@@ -1854,7 +1965,7 @@ impl TrackerContext {
                             port: peer_addr.port(),
                             token: token.to_vec(),
                             name: None,
-                            seed: false,
+                            seed: is_seed,
                         },
                     },
                     node.addr(),
@@ -2088,6 +2199,16 @@ impl TrackerContext {
         Ok(())
     }
 
+    /// Find an existing node within the routing table, or create a temporary new one.
+    ///
+    /// The temporary new node will **not be stored** within the routing table.
+    fn find_node_or_create(&self, node: &NodeKey) -> Node {
+        self.routing_table
+            .find_node_by_key(&node)
+            .cloned()
+            .unwrap_or_else(|| Node::from(*node))
+    }
+
     /// Update the nodes information of the given node.
     async fn update_node(
         &mut self,
@@ -2187,7 +2308,8 @@ impl TrackerContext {
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn do_cleanup_tick(&mut self, storage: &mut DhtStorage) {
         self.cleanup_pending_requests().await;
-        storage.do_cleanup();
+        let removed_peers = storage.do_cleanup();
+        debug!("{} removed {} peers from storage", self, removed_peers);
     }
 
     /// Cleanup pending requests which have not received a response.
@@ -2694,7 +2816,7 @@ mod tests {
             );
 
             // announce the torrent peer to the target node
-            let result = source.announce_peer(&info_hash, &peer_addr).await;
+            let result = source.announce_peer(&info_hash, &peer_addr, false).await;
             verify_announce_peer(&info_hash, &source, &source_id, &target_key, result).await;
         }
 
@@ -2732,7 +2854,7 @@ mod tests {
 
             // announce the torrent peer to the target node
             let result = source
-                .announce_peer_to(&info_hash, &peer_addr, &target_key)
+                .announce_peer_to(&info_hash, &peer_addr, false, &target_key)
                 .await;
             verify_announce_peer(&info_hash, &source, &source_id, &target_key, result).await;
         }
@@ -2763,6 +2885,52 @@ mod tests {
         }
     }
 
+    mod scrape {
+        use super::*;
+        use std::str::FromStr;
+
+        #[tokio::test]
+        async fn test_scrape_peers() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let source = DhtTracker::builder()
+                .node_id(NodeId::new())
+                .build()
+                .await
+                .unwrap();
+            let (announcer, target) = create_node_server_pair!();
+            let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
+
+            // announce the peer addr to the target node through the announcer
+            let peer_addr = (Ipv4Addr::LOCALHOST, 6881).into();
+            announce_peer(&announcer, &target_addr, &info_hash, peer_addr, false).await;
+
+            // add the target to the source node
+            let _ = source.ping(target_addr).await.unwrap();
+
+            // scrape the target
+            let result = source
+                .scrape_peers(&info_hash, Duration::from_millis(750))
+                .await
+                .expect("expected a scrape result");
+            assert_eq!(1, result.downloaders, "expected at least one downloader");
+            assert_eq!(0, result.seeders, "expected no seeders");
+
+            // announce another peer as seed
+            let peer_addr = (Ipv4Addr::LOCALHOST, 6882).into();
+            announce_peer(&announcer, &target_addr, &info_hash, peer_addr, true).await;
+
+            // scrape the target
+            let result = source
+                .scrape_peers(&info_hash, Duration::from_millis(750))
+                .await
+                .expect("expected a scrape result");
+            assert!(result.downloaders >= 1, "expected at least one downloader");
+            assert_eq!(1, result.seeders, "expected at least one seeder");
+        }
+    }
+
     mod scrape_info_hashes {
         use super::*;
         use crate::create_tracker_context;
@@ -2784,15 +2952,7 @@ mod tests {
             let peer_addr = (Ipv4Addr::LOCALHOST, 8080).into();
 
             // announce the peer addr to the target node through the announcer
-            let target_key = announcer.ping(target_addr).await.unwrap();
-            let _ = announcer
-                .get_peers_from(&info_hash, &target_key, 1)
-                .await
-                .unwrap();
-            let _ = announcer
-                .announce_peer(&info_hash, &peer_addr)
-                .await
-                .unwrap();
+            announce_peer(&announcer, &target_addr, &info_hash, peer_addr, false).await;
 
             // add the target to the source node
             source
@@ -2899,5 +3059,26 @@ mod tests {
         }
 
         node_id
+    }
+
+    async fn announce_peer(
+        announcer: &DhtTracker,
+        target_addr: &SocketAddr,
+        info_hash: &InfoHash,
+        peer_addr: SocketAddr,
+        is_seed: bool,
+    ) {
+        let target_key = announcer
+            .ping(*target_addr)
+            .await
+            .expect("expected the target to have been pinged");
+        let _ = announcer
+            .get_peers_from(info_hash, &target_key, 1)
+            .await
+            .expect("expected to have retrieved a token for the target");
+        let _ = announcer
+            .announce_peer_to(info_hash, &peer_addr, is_seed, &target_key)
+            .await
+            .expect("expected the peer to have been announced");
     }
 }

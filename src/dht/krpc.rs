@@ -293,11 +293,19 @@ pub struct GetPeersRequest {
     pub id: NodeId,
     pub info_hash: InfoHash,
     /// BEP33 - The responding node should try to fill the values list with non-seed items on a best-effort basis.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        with = "serde_int_bool"
+    )]
     pub no_seed: bool,
     /// BEP33 - The responding node has database entries for that info hash,
     /// then it must add two fields to the "r" dictionary in the response.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        with = "serde_int_bool"
+    )]
     pub scrape: bool,
     #[serde(default, skip_serializing_if = "WantFamily::is_none")]
     pub want: WantFamily,
@@ -330,7 +338,8 @@ pub struct GetPeersResponse {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnnouncePeerRequest {
     pub id: NodeId,
-    #[serde(with = "serde_implied_port")]
+    /// Indicates if the `port` field should be ignored and the source port of the packet should be used instead.
+    #[serde(with = "serde_int_bool")]
     pub implied_port: bool,
     pub info_hash: InfoHash,
     pub port: u16,
@@ -340,7 +349,11 @@ pub struct AnnouncePeerRequest {
     #[serde(default, rename = "n", skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// BEP33 - The requesting node is seeding the torrent it announces
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        with = "serde_int_bool"
+    )]
     pub seed: bool,
 }
 
@@ -967,7 +980,8 @@ mod serde_info_hash {
     }
 }
 
-mod serde_implied_port {
+/// Serialize a boolean as an integer (0 or 1).
+mod serde_int_bool {
     use super::*;
     use serde::de::Visitor;
 
@@ -975,7 +989,7 @@ mod serde_implied_port {
     where
         S: Serializer,
     {
-        serializer.serialize_u64(*value as u64)
+        serializer.serialize_i64(i64::from(*value))
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> result::Result<bool, D::Error>
@@ -988,6 +1002,13 @@ mod serde_implied_port {
 
             fn expecting(&self, f: &mut Formatter) -> std::fmt::Result {
                 write!(f, "expected an integer representing a boolean value")
+            }
+
+            fn visit_bool<E>(self, v: bool) -> result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(v)
             }
 
             fn visit_i64<E>(self, v: i64) -> result::Result<Self::Value, E>

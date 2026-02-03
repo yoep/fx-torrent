@@ -53,7 +53,8 @@ impl DhtStorage {
 
     /// Updates the peer information for the given info hash.
     pub fn update_peer(&mut self, info_hash: InfoHash, addr: SocketAddr, seed: bool) {
-        if self.torrents_len() >= self.max_torrents {
+        if !self.peers.contains_key(&info_hash) && self.torrents_len() >= self.max_torrents {
+            trace!("DHT storage is full, ignoring info hash {}", info_hash);
             return;
         }
 
@@ -64,6 +65,7 @@ impl DhtStorage {
     /// Register a new info hash entry within the storage.
     pub fn register(&mut self, info_hash: &InfoHash) {
         if self.torrents_len() >= self.max_torrents {
+            trace!("DHT storage is full, ignoring info hash {}", info_hash);
             return;
         }
 
@@ -80,10 +82,14 @@ impl DhtStorage {
 
     /// Purge old peers within the storage.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    pub fn do_cleanup(&mut self) {
+    pub fn do_cleanup(&mut self) -> usize {
+        let mut removed = 0;
         for entry in self.peers.values_mut() {
+            let initial = entry.len();
             entry.retain(|e| e.added.elapsed() <= PEER_ENTRY_EXPIRED_AFTER);
+            removed += initial - entry.len();
         }
+        removed
     }
 }
 
