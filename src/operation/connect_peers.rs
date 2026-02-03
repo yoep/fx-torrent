@@ -84,7 +84,7 @@ impl TorrentConnectPeersOperation {
     /// Update the available in-flight permits from the latest torrent config.
     fn update_max_in_flight(&mut self, context: &TorrentContext) {
         let config_peers_in_flight = context.config().peers_in_flight;
-        if config_peers_in_flight == self.max_in_flight {
+        if config_peers_in_flight == self.max_in_flight || self.bursting_since.is_some() {
             return;
         }
 
@@ -128,15 +128,19 @@ impl TorrentConnectPeersOperation {
         let peer_addrs = context.peer_pool_mut().new_connection_candidates(len);
         if peer_addrs.is_empty() {
             // early exit when not peer addrs are available
+            trace!(
+                "Torrent {} has no peer addresses available to establish peer connections",
+                context
+            );
             return;
         }
 
         debug!(
-            "Creating an additional {} (of wanted {}, remaining {} addresses) peer connections for {}",
+            "Torrent {} is establishing {} (of wanted {}, remaining {} addresses) peer connections",
+            context,
             peer_addrs.len(),
             wanted_connections,
-            context.peer_pool().num_connect_candidates(),
-            context
+            context.peer_pool().num_connect_candidates()
         );
         for addr in peer_addrs {
             self.in_flight.push(Box::pin(
@@ -147,14 +151,17 @@ impl TorrentConnectPeersOperation {
 
     fn create_webseed_peers(&mut self, wanted_connections: &mut usize, context: &TorrentContext) {
         let available_permits = self.max_in_flight.saturating_sub(self.in_flight.len());
-        let len = (*wanted_connections).min(available_permits);
+        let new_connections_len = (*wanted_connections).min(available_permits);
         let webseed_urls = match self.webseed_urls.as_mut() {
-            Some(urls) => urls.drain(0..len.min(urls.len())).collect::<Vec<_>>(),
+            Some(urls) => urls
+                .drain(0..new_connections_len.min(urls.len()))
+                .collect::<Vec<_>>(),
             None => return,
         };
 
         // update the wanted connections
-        *wanted_connections = wanted_connections.saturating_sub(len);
+        let picked_webseed_urls = webseed_urls.len().min(new_connections_len);
+        *wanted_connections = wanted_connections.saturating_sub(picked_webseed_urls);
 
         for url in webseed_urls {
             let torrent = InnerTorrent::new(
@@ -322,28 +329,6 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn test_create_webseed_urls() {
-        init_logger!();
-        let temp_dir = tempdir().unwrap();
-        let temp_path = temp_dir.path().to_str().unwrap();
-        let expected_result = vec![Url::parse("https://archive.org/download/").unwrap()];
-        let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce&ws=https%3A%2F%2Farchive.org%2Fdownload%2F";
-        let (context, _) = create_torrent_context!(
-            uri,
-            temp_path,
-            TorrentFlags::none(),
-            TorrentConfig::builder().build(),
-            vec![]
-        );
-        let mut operation = TorrentConnectPeersOperation::new(true);
-
-        operation.create_webseed_urls(&context).await;
-
-        let result = operation.webseed_urls;
-        assert_eq!(Some(expected_result), result);
-    }
-
-    #[tokio::test]
     async fn test_execute() {
         init_logger!();
         let temp_dir = tempdir().unwrap();
@@ -364,7 +349,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_permits() {
+    async fn test_update_max_in_flight() {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
@@ -385,5 +370,106 @@ mod tests {
             35, operation.max_in_flight,
             "expected the max in flight to have been updated"
         );
+    }
+
+    #[tokio::test]
+    async fn test_burst() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
+        let (context, _) = create_torrent_context!(
+            uri,
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder()
+                .peers_in_flight(20)
+                .peers_upper_limit(200)
+                .build(),
+            vec![]
+        );
+        let mut operation = TorrentConnectPeersOperation::new(true);
+
+        // update the permits from the torrent settings
+        operation.update_max_in_flight(&context);
+        let result = operation.max_in_flight;
+        assert_eq!(20, result);
+
+        // invoke the burst fn
+        operation.burst(&context).await;
+        assert_eq!(
+            200, operation.max_in_flight,
+            "expected the max in flight to have been temporary bursted"
+        );
+        assert_ne!(
+            None, operation.bursting_since,
+            "expected the bursting since to be set"
+        );
+    }
+
+    mod webseed_url {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_create_webseed_urls() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let expected_result = vec![Url::parse("https://archive.org/download/").unwrap()];
+            let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce&ws=https%3A%2F%2Farchive.org%2Fdownload%2F";
+            let (context, _) = create_torrent_context!(
+                uri,
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![],
+                None
+            );
+            let mut operation = TorrentConnectPeersOperation::new(true);
+
+            operation.create_webseed_urls(&context).await;
+
+            let result = operation.webseed_urls;
+            assert_eq!(Some(expected_result), result);
+        }
+
+        #[tokio::test]
+        async fn test_create_webseed_peers() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce&ws=https%3A%2F%2Farchive.org%2Fdownload%2F";
+            let (context, _) = create_torrent_context!(
+                uri,
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().peers_in_flight(50).build(),
+                vec![],
+                None
+            );
+            let mut operation = TorrentConnectPeersOperation::new(true);
+
+            // set the webseed urls
+            operation.webseed_urls = Some(vec![
+                Url::parse("https://test-url-1.com/").unwrap(),
+                Url::parse("https://test-url-2.com/").unwrap(),
+            ]);
+
+            // update the max in-flight
+            operation.update_max_in_flight(&context);
+
+            // create new webseed peers
+            let mut wanted_connections = 100;
+            operation.create_webseed_peers(&mut wanted_connections, &context);
+            assert_eq!(
+                98, wanted_connections,
+                "expected 98 remaining connections to be wanted"
+            );
+            assert_eq!(
+                0,
+                operation.webseed_urls.unwrap().len(),
+                "expected the webseed urls to be consumed"
+            );
+        }
     }
 }

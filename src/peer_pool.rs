@@ -2,7 +2,7 @@ use crate::peer::{Peer, PeerHandle, PeerState};
 use crate::{PeerPriority, TorrentHandle, TorrentPeer};
 use derive_more::Display;
 use itertools::Itertools;
-use log::{debug, trace, warn};
+use log::{debug, warn};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -142,13 +142,16 @@ impl PeerPool {
                 }
             })
             .collect();
+        if addrs.is_empty() {
+            return;
+        }
 
-        trace!(
-            "Adding a total of {} new peer addrs for torrent {}",
-            addrs.len(),
-            self.handle
-        );
+        let total_addresses = addrs.len();
         self.peer_list.extend(addrs);
+        debug!(
+            "Torrent {} added {} new peer addresses to the pool",
+            self.handle, total_addresses
+        );
     }
 
     /// Updates the given peer address to be no longer in use.
