@@ -292,6 +292,21 @@ impl<'de> Deserialize<'de> for WantFamily {
 pub struct GetPeersRequest {
     pub id: NodeId,
     pub info_hash: InfoHash,
+    /// BEP33 - The responding node should try to fill the values list with non-seed items on a best-effort basis.
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        with = "serde_int_bool"
+    )]
+    pub no_seed: bool,
+    /// BEP33 - The responding node has database entries for that info hash,
+    /// then it must add two fields to the "r" dictionary in the response.
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        with = "serde_int_bool"
+    )]
+    pub scrape: bool,
     #[serde(default, skip_serializing_if = "WantFamily::is_none")]
     pub want: WantFamily,
 }
@@ -299,20 +314,32 @@ pub struct GetPeersRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GetPeersResponse {
     pub id: NodeId,
-    #[serde(with = "serde_bytes")]
-    pub token: Vec<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub values: Option<Vec<CompactIpAddr>>,
+    /// The name of the torrent.
+    #[serde(default, rename = "n", skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The token for announcing a peer.
+    /// If a node does not return a token, it indicates that it currently cannot accept announces for this info hash.
+    #[serde(default, with = "serde_bytes", skip_serializing_if = "Option::is_none")]
+    pub token: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<CompactIpAddr>,
     #[serde(default, skip_serializing_if = "CompactIPv4Nodes::is_empty")]
     pub nodes: CompactIPv4Nodes,
     #[serde(default, skip_serializing_if = "CompactIPv6Nodes::is_empty")]
     pub nodes6: CompactIPv6Nodes,
+    /// BEP33 - Bloom Filter representing all stored peers for the info hash.
+    #[serde(default, rename = "BFpe", skip_serializing_if = "Option::is_none")]
+    pub downloaders: Option<String>,
+    /// BEP33 - Bloom Filter representing all stored seeds for the info hash.
+    #[serde(default, rename = "BFsd", skip_serializing_if = "Option::is_none")]
+    pub seeds: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnnouncePeerRequest {
     pub id: NodeId,
-    #[serde(with = "serde_implied_port")]
+    /// Indicates if the `port` field should be ignored and the source port of the packet should be used instead.
+    #[serde(with = "serde_int_bool")]
     pub implied_port: bool,
     pub info_hash: InfoHash,
     pub port: u16,
@@ -321,8 +348,13 @@ pub struct AnnouncePeerRequest {
     /// The name of the torrent, if provided
     #[serde(default, rename = "n", skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<bool>,
+    /// BEP33 - The requesting node is seeding the torrent it announces
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        with = "serde_int_bool"
+    )]
+    pub seed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -948,7 +980,8 @@ mod serde_info_hash {
     }
 }
 
-mod serde_implied_port {
+/// Serialize a boolean as an integer (0 or 1).
+mod serde_int_bool {
     use super::*;
     use serde::de::Visitor;
 
@@ -956,7 +989,7 @@ mod serde_implied_port {
     where
         S: Serializer,
     {
-        serializer.serialize_u64(*value as u64)
+        serializer.serialize_i64(i64::from(*value))
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> result::Result<bool, D::Error>
@@ -969,6 +1002,13 @@ mod serde_implied_port {
 
             fn expecting(&self, f: &mut Formatter) -> std::fmt::Result {
                 write!(f, "expected an integer representing a boolean value")
+            }
+
+            fn visit_bool<E>(self, v: bool) -> result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(v)
             }
 
             fn visit_i64<E>(self, v: i64) -> result::Result<Self::Value, E>
@@ -1179,7 +1219,7 @@ mod tests {
                         port: 6881,
                         token: "aoeusnth".as_bytes().to_vec(),
                         name: None,
-                        seed: None,
+                        seed: false,
                     },
                 }))
                 .build()

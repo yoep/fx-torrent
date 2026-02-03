@@ -80,6 +80,7 @@ pub use torrent_peer::*;
 
 use std::ops::Range;
 
+mod bloom_filter;
 mod channel;
 mod compact;
 mod config;
