@@ -82,7 +82,7 @@ It uses [Ratatui](https://ratatui.rs/) as the terminal UI library.
 - [x] [BEP21](https://www.bittorrent.org/beps/bep_0021.html) - Extension for partial seeds
 - [x] [BEP29](https://www.bittorrent.org/beps/bep_0029.html) - uTorrent transport protocol
 - [x] [BEP32](https://www.bittorrent.org/beps/bep_0032.html) - BitTorrent DHT Extensions for IPv6
-- [ ] [BEP33](https://www.bittorrent.org/beps/bep_0033.html) - DHT scrape
+- [x] [BEP33](https://www.bittorrent.org/beps/bep_0033.html) - DHT scrape
 - [x] [BEP40](https://www.bittorrent.org/beps/bep_0040.html) - Canonical Peer Priority
 - [x] [BEP42](https://www.bittorrent.org/beps/bep_0042.html) - DHT Security extension
 - [ ] [BEP44](https://www.bittorrent.org/beps/bep_0044.html) - Storing arbitrary data in the DHT
