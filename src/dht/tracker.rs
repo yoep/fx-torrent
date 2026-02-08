@@ -90,16 +90,20 @@ impl DhtTracker {
     ///
     /// * `id` - The node ID of the DHT server.
     /// * `max_torrents` - The maximum number of torrents that can be tracked by the DHT server.
+    /// * `info_hash_indexing_enabled` - Whether to enable indexing of info hashes within the DHT network.
+    /// * `info_hash_indexing_interval` - The interval at which to index info hashes within the DHT network.
     /// * `routing_nodes` - The routing nodes to use to bootstrap the DHT network.
     pub async fn new(
         id: NodeId,
         max_torrents: usize,
+        info_hash_indexing_enabled: bool,
+        info_hash_indexing_interval: Duration,
         routing_nodes: Vec<SocketAddr>,
     ) -> Result<Self> {
         let socket = Arc::new(Self::bind_socket().await?);
         let socket_addr = socket.local_addr()?;
         let (command_sender, command_receiver) = channel!(256);
-        let mut context = TrackerContext::new(id, socket, socket_addr);
+        let mut context = TrackerContext::new(id, socket, socket_addr, info_hash_indexing_enabled);
         let metrics = context.metrics.clone();
         let callbacks = context.callbacks.clone();
         let cancellation_token = context.cancellation_token.clone();
@@ -113,7 +117,13 @@ impl DhtTracker {
         // start the context in a separate task
         tokio::spawn(async move {
             context
-                .run(storage, observer, traversal, command_receiver)
+                .run(
+                    info_hash_indexing_interval,
+                    storage,
+                    observer,
+                    traversal,
+                    command_receiver,
+                )
                 .await;
         });
 
@@ -672,6 +682,8 @@ pub struct DhtTrackerBuilder {
     routing_nodes: Vec<SocketAddr>,
     routing_node_urls: Vec<String>,
     max_torrents: Option<usize>,
+    enable_indexing: Option<bool>,
+    indexing_interval: Option<Duration>,
 }
 
 impl DhtTrackerBuilder {
@@ -722,6 +734,18 @@ impl DhtTrackerBuilder {
         self
     }
 
+    /// Set if the DHT tracker should enable indexing of info hashes.
+    pub fn enable_indexing(&mut self, enable: bool) -> &mut Self {
+        self.enable_indexing = Some(enable);
+        self
+    }
+
+    /// Set the interval at which the DHT tracker should index info hashes.
+    pub fn indexing_interval(&mut self, interval: Duration) -> &mut Self {
+        self.indexing_interval = Some(interval);
+        self
+    }
+
     /// Try to create a new DHT node server from this builder.
     pub async fn build(&mut self) -> Result<DhtTracker> {
         let node_id = self.node_id.take().unwrap_or_else(|| {
@@ -731,6 +755,8 @@ impl DhtTrackerBuilder {
                 .unwrap_or(NodeId::new())
         });
         let max_torrents = self.max_torrents.unwrap_or(DEFAULT_MAX_TORRENTS);
+        let enable_indexing = self.enable_indexing.unwrap_or(true);
+        let indexing_interval = self.indexing_interval.unwrap_or(INDEX_INFO_HASHES_INTERVAL);
         let mut routing_nodes: HashSet<SocketAddr> = self.routing_nodes.drain(..).collect();
 
         for node_url in self.routing_node_urls.drain(..).filter_map(Self::host) {
@@ -742,7 +768,14 @@ impl DhtTrackerBuilder {
             }
         }
 
-        DhtTracker::new(node_id, max_torrents, routing_nodes.into_iter().collect()).await
+        DhtTracker::new(
+            node_id,
+            max_torrents,
+            enable_indexing,
+            indexing_interval,
+            routing_nodes.into_iter().collect::<Vec<_>>(),
+        )
+        .await
     }
 
     fn host<S: AsRef<str>>(url: S) -> Option<String> {
@@ -937,6 +970,8 @@ pub(crate) struct TrackerContext {
     pending_requests: HashMap<TransactionKey, PendingRequest>,
     /// The timeout while trying to send packages to a target address
     send_timeout: Duration,
+    /// Indicates if the DHT tracker should enable indexing of info hashes.
+    info_hash_indexing_enabled: bool,
     /// The tracker metrics of the DHT network
     pub(crate) metrics: DhtMetrics,
     /// The channel receiver for incoming messages
@@ -948,7 +983,12 @@ pub(crate) struct TrackerContext {
 }
 
 impl TrackerContext {
-    pub(crate) fn new(id: NodeId, socket: Arc<UdpSocket>, socket_addr: SocketAddr) -> Self {
+    pub(crate) fn new(
+        id: NodeId,
+        socket: Arc<UdpSocket>,
+        socket_addr: SocketAddr,
+        info_hash_indexing_enabled: bool,
+    ) -> Self {
         let (sender, receiver) = unbounded_channel();
         let cancellation_token = CancellationToken::new();
 
@@ -972,6 +1012,7 @@ impl TrackerContext {
             routing_table: RoutingTable::new(id, DEFAULT_BUCKET_SIZE),
             pending_requests: Default::default(),
             send_timeout: SEND_PACKAGE_TIMEOUT,
+            info_hash_indexing_enabled,
             metrics: Default::default(),
             receiver,
             callbacks: MultiThreadedCallback::new(),
@@ -983,6 +1024,7 @@ impl TrackerContext {
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     pub(crate) async fn run(
         &mut self,
+        index_info_hashes_interval: Duration,
         mut storage: DhtStorage,
         mut observer: Observer,
         mut traversal: TraversalAlgorithm,
@@ -991,7 +1033,7 @@ impl TrackerContext {
         let mut bootstrap_interval = interval(BOOTSTRAP_INTERVAL);
         let mut refresh_interval = interval(REFRESH_INTERVAL);
         let mut cleanup_interval = interval(CLEANUP_INTERVAL);
-        let mut index_info_hashes_interval = interval(INDEX_INFO_HASHES_INTERVAL);
+        let mut index_info_hashes_interval = interval(index_info_hashes_interval);
         let mut stats_interval = interval(STATS_INTERVAL);
 
         debug!("{} started", self);
@@ -1011,7 +1053,7 @@ impl TrackerContext {
                 _ = cleanup_interval.tick() => event = Event::CleanupTick,
                 _ = refresh_interval.tick() => event = Event::RefreshTick,
                 _ = bootstrap_interval.tick() => event = Event::BootstrapTick,
-                _ = index_info_hashes_interval.tick() => event = Event::IndexInfoHashesTick,
+                _ = index_info_hashes_interval.tick(), if self.info_hash_indexing_enabled => event = Event::IndexInfoHashesTick,
                 _ = stats_interval.tick() => event = Event::StatsTick,
             }
 
@@ -1221,6 +1263,7 @@ impl TrackerContext {
         request: AnnouncePeerRequest,
         storage: &mut DhtStorage,
     ) -> Result<()> {
+        self.metrics.announce_peer_requests.inc();
         if let Some(node) = self.routing_table.find_node(&request.id) {
             // check if the address matches the node
             if node.addr() != addr {
@@ -1327,6 +1370,7 @@ impl TrackerContext {
         addr: &SocketAddr,
         peers: &DhtStorage,
     ) -> Result<()> {
+        self.metrics.sample_info_hashes_requests.inc();
         let num = peers.info_hashes().count();
         let samples = peers.info_hashes().take(20).cloned().collect::<Vec<_>>();
         let (nodes, nodes6) = Self::closest_node_pairs(&self.routing_table, &request.target);
@@ -1419,6 +1463,7 @@ impl TrackerContext {
         transaction_id: TransactionId,
         addr: &SocketAddr,
     ) -> Result<()> {
+        self.metrics.ping_requests.inc();
         self.send_response(
             transaction_id,
             ResponseMessage::Ping {
@@ -1487,6 +1532,7 @@ impl TrackerContext {
         addr: &SocketAddr,
         request: FindNodeRequest,
     ) -> Result<()> {
+        self.metrics.find_node_requests.inc();
         let target_node = request.target;
         let (compact_nodes, compact_nodes6) =
             Self::closest_node_pairs(&self.routing_table, &target_node);
@@ -1582,6 +1628,7 @@ impl TrackerContext {
         request: GetPeersRequest,
         storage: &DhtStorage,
     ) -> Result<()> {
+        self.metrics.get_peers_requests.inc();
         let token: NodeToken;
         let (nodes, nodes6) = match self.routing_table.find_node(&request.id) {
             None => {
@@ -2637,7 +2684,7 @@ mod tests {
         async fn test_tracker_new() {
             init_logger!();
             let node_id = NodeId::new();
-            let tracker = DhtTracker::new(node_id, 1, Vec::new())
+            let tracker = DhtTracker::new(node_id, 1, true, INDEX_INFO_HASHES_INTERVAL, vec![])
                 .await
                 .expect("expected a new DHT server");
 
@@ -2698,7 +2745,12 @@ mod tests {
         async fn test_ping_invalid_address() {
             init_logger!();
             let addr = SocketAddr::from(([0, 0, 0, 0], 9000));
-            let tracker = DhtTracker::new(NodeId::new(), 1, Vec::new()).await.unwrap();
+            let tracker = DhtTracker::builder()
+                .max_torrents(1)
+                .enable_indexing(false)
+                .build()
+                .await
+                .unwrap();
 
             let result = timeout!(
                 tracker.ping(addr),
@@ -2725,7 +2777,13 @@ mod tests {
             let search_node_id = NodeId::from_ip_with_rand(&[132, 141, 12, 40].into(), rand);
             let incoming_id = NodeId::from_ip_with_rand(&Ipv4Addr::LOCALHOST.into(), rand);
             let outgoing_id = NodeId::from_ip_with_rand(&Ipv4Addr::LOCALHOST.into(), rand);
-            let outgoing = DhtTracker::new(outgoing_id, 16, Vec::new()).await.unwrap();
+            let outgoing = DhtTracker::builder()
+                .node_id(outgoing_id)
+                .max_torrents(16)
+                .enable_indexing(false)
+                .build()
+                .await
+                .unwrap();
             let mut incoming = create_tracker_context!(incoming_id);
 
             // register the incoming tracker with the outgoing tracker
@@ -2778,7 +2836,15 @@ mod tests {
             // process the incoming node task
             tokio::spawn(async move {
                 let (_sender, receiver) = channel!(1);
-                incoming.run(storage, observer, traversal, receiver).await;
+                incoming
+                    .run(
+                        INDEX_INFO_HASHES_INTERVAL,
+                        storage,
+                        observer,
+                        traversal,
+                        receiver,
+                    )
+                    .await;
             });
 
             // request the node info from the nearby node
@@ -2860,6 +2926,7 @@ mod tests {
 
                 context
                     .run(
+                        INDEX_INFO_HASHES_INTERVAL,
                         storage,
                         Observer::new(sender.clone()),
                         TraversalAlgorithm::new(8, vec![], sender),
@@ -3045,7 +3112,7 @@ mod tests {
             init_logger!();
             let info_hash =
                 InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
-            let mut source = create_tracker_context!();
+            let mut source = create_tracker_context!(NodeId::new(), true);
             let (sender, _receiver) = channel!(2);
             let mut traversal = TraversalAlgorithm::new(8, vec![], sender.clone());
             let mut observer = Observer::new(sender.clone());
@@ -3091,6 +3158,36 @@ mod tests {
                 "expected the info hash to be present in the storage: {:?}",
                 result
             )
+        }
+
+        #[tokio::test]
+        async fn test_indexing_disabled() {
+            init_logger!();
+            let indexing_interval = Duration::from_millis(50);
+            let source = DhtTracker::builder()
+                .enable_indexing(false)
+                .indexing_interval(indexing_interval)
+                .build()
+                .await
+                .unwrap();
+            let target = DhtTracker::builder()
+                .enable_indexing(false)
+                .build()
+                .await
+                .unwrap();
+
+            // add the target to the source network
+            let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
+            let _ = source
+                .ping(target_addr)
+                .await
+                .expect("expected the target to have been pinged");
+
+            // await the interval
+            time::sleep(indexing_interval).await;
+
+            let result = target.metrics().sample_info_hashes_requests.total();
+            assert_eq!(0, result, "expected no info hashes to be indexed");
         }
     }
 

@@ -65,17 +65,21 @@ mod tests {
             create_tracker_context!(NodeId::new())
         }};
         ($node_id:expr) => {{
+            create_tracker_context!($node_id, false)
+        }};
+        ($node_id:expr, $enable_indexing:expr) => {{
             use crate::dht::DhtTracker;
             use crate::dht::NodeId;
             use crate::dht::TrackerContext;
             use std::sync::Arc;
 
             let id: NodeId = $node_id;
+            let enable_indexing: bool = $enable_indexing;
 
             let socket = Arc::new(DhtTracker::bind_socket().await.unwrap());
             let socket_addr = socket.local_addr().unwrap();
 
-            TrackerContext::new(id, socket, socket_addr)
+            TrackerContext::new(id, socket, socket_addr, enable_indexing)
         }};
     }
 }
