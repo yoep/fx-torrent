@@ -139,6 +139,23 @@ impl MenuSettings {
                     },
                     app_sender.clone(),
                 ))),
+                SettingsMenuItem::Title("DHT options".to_string()),
+                SettingsMenuItem::Option(Box::new(ToggleSetting::new(
+                    "Enable bootstrap nodes",
+                    true,
+                    |enabled, sender| {
+                        let _ = sender.send(AppCommand::DhtBootstrapNodesEnabled(enabled));
+                    },
+                    app_sender.clone(),
+                ))),
+                SettingsMenuItem::Option(Box::new(ToggleSetting::new(
+                    "Enable info hash indexing",
+                    true,
+                    |enabled, sender| {
+                        let _ = sender.send(AppCommand::DhtInfoHashIndexingEnabled(enabled));
+                    },
+                    app_sender.clone(),
+                ))),
                 SettingsMenuItem::Title("Storage location".to_string()),
                 SettingsMenuItem::Widget(Box::new(StorageSetting::new(
                     app_sender.clone(),

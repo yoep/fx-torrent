@@ -234,7 +234,15 @@ mod tests {
             let observer = Observer::new(sender.clone());
             let traversal = TraversalAlgorithm::new(8, vec![], sender);
 
-            target.run(storage, observer, traversal, receiver).await;
+            target
+                .run(
+                    Duration::from_secs(60),
+                    storage,
+                    observer,
+                    traversal,
+                    receiver,
+                )
+                .await;
         });
 
         // run the traversal algorithm

@@ -8,6 +8,11 @@ pub struct DhtMetrics {
     pub pending_queries: Gauge,
     pub errors: Counter,
     pub discovered_peers: Gauge,
+    pub ping_requests: Counter,
+    pub find_node_requests: Counter,
+    pub get_peers_requests: Counter,
+    pub announce_peer_requests: Counter,
+    pub sample_info_hashes_requests: Counter,
     pub bytes_in: Counter,
     pub bytes_out: Counter,
 }
@@ -29,6 +34,11 @@ impl Metric for DhtMetrics {
             pending_queries: self.pending_queries.snapshot(),
             errors: self.errors.snapshot(),
             discovered_peers: self.discovered_peers.snapshot(),
+            ping_requests: self.ping_requests.snapshot(),
+            find_node_requests: self.find_node_requests.snapshot(),
+            get_peers_requests: self.get_peers_requests.snapshot(),
+            announce_peer_requests: self.announce_peer_requests.snapshot(),
+            sample_info_hashes_requests: self.sample_info_hashes_requests.snapshot(),
             bytes_in: self.bytes_in.snapshot(),
             bytes_out: self.bytes_out.snapshot(),
         }
@@ -39,6 +49,11 @@ impl Metric for DhtMetrics {
         self.pending_queries.tick(interval);
         self.errors.tick(interval);
         self.discovered_peers.tick(interval);
+        self.ping_requests.tick(interval);
+        self.find_node_requests.tick(interval);
+        self.get_peers_requests.tick(interval);
+        self.announce_peer_requests.tick(interval);
+        self.sample_info_hashes_requests.tick(interval);
         self.bytes_in.tick(interval);
         self.bytes_out.tick(interval);
     }
