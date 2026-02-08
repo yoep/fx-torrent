@@ -699,6 +699,18 @@ impl DhtTrackerBuilder {
         self
     }
 
+    /// Set if the default routing nodes should be enabled.
+    pub fn enable_default_routing_nodes(&mut self, enabled: bool) -> &mut Self {
+        if enabled {
+            self.default_routing_nodes();
+        } else {
+            let default_routing_nodes = DEFAULT_ROUTING_NODE_SERVERS();
+            self.routing_node_urls
+                .retain(|e| !default_routing_nodes.contains(&e.as_str()));
+        }
+        self
+    }
+
     /// Add the default routing nodes used for searching new nodes.
     pub fn default_routing_nodes(&mut self) -> &mut Self {
         self.routing_node_urls.extend(

@@ -185,6 +185,12 @@ impl App {
         match command {
             AppCommand::AddTorrentUri(uri) => self.add_torrent_uri(uri.as_str()).await,
             AppCommand::DhtEnabled(enabled) => self.update_dht(enabled).await,
+            AppCommand::DhtBootstrapNodesEnabled(enabled) => {
+                self.update_dht_bootstrap_nodes_enabled(enabled).await
+            }
+            AppCommand::DhtInfoHashIndexingEnabled(enabled) => {
+                self.update_dht_info_hash_indexing(enabled).await
+            }
             AppCommand::TrackerEnabled(enabled) => self.update_trackers(enabled).await,
             AppCommand::WebseedsEnabled(enabled) => self.update_webseeds(enabled).await,
             AppCommand::TcpPeerEnabled(enabled) => self.update_tcp_peer_connections(enabled).await,
@@ -319,6 +325,16 @@ impl App {
 
     async fn update_dht(&mut self, enabled: bool) {
         self.settings.dht_enabled = enabled;
+        self.recreate_session().await;
+    }
+
+    async fn update_dht_bootstrap_nodes_enabled(&mut self, enabled: bool) {
+        self.settings.dht_bootstrap_nodes_enabled = enabled;
+        self.recreate_session().await;
+    }
+
+    async fn update_dht_info_hash_indexing(&mut self, enabled: bool) {
+        self.settings.dht_info_hash_indexing_enabled = enabled;
         self.recreate_session().await;
     }
 
@@ -492,7 +508,8 @@ impl App {
             .dht(if settings.dht_enabled {
                 DhtOption::new(
                     DhtTracker::builder()
-                        .default_routing_nodes()
+                        .enable_indexing(settings.dht_info_hash_indexing_enabled)
+                        .enable_default_routing_nodes(settings.dht_bootstrap_nodes_enabled)
                         .build()
                         .await
                         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
@@ -511,6 +528,10 @@ pub enum AppCommand {
     AddTorrentUri(String),
     /// Set if DHT is enabled
     DhtEnabled(bool),
+    /// Set if DHT should bootstrap through the default routing nodes.
+    DhtBootstrapNodesEnabled(bool),
+    /// Set if the DHT tracker should enable torrent info hash indexing.
+    DhtInfoHashIndexingEnabled(bool),
     /// Set if trackers are enabled
     TrackerEnabled(bool),
     /// Set if webseeds are enabled
@@ -537,6 +558,8 @@ pub enum AppCommand {
 struct AppSettings {
     storage: PathBuf,
     dht_enabled: bool,
+    dht_bootstrap_nodes_enabled: bool,
+    dht_info_hash_indexing_enabled: bool,
     trackers_enabled: bool,
     tcp_peer_enabled: bool,
     utp_peer_enabled: bool,
@@ -549,6 +572,8 @@ impl Default for AppSettings {
         Self {
             storage: PathBuf::from(APP_DEFAULT_STORAGE),
             dht_enabled: true,
+            dht_bootstrap_nodes_enabled: true,
+            dht_info_hash_indexing_enabled: true,
             trackers_enabled: true,
             tcp_peer_enabled: true,
             utp_peer_enabled: true,
