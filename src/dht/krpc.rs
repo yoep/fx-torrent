@@ -2,6 +2,7 @@ use crate::dht::compact::{CompactIPv4Nodes, CompactIPv6Nodes};
 use crate::dht::{Error, NodeId, Result};
 use crate::{CompactIpAddr, InfoHash};
 use bitmask_enum::bitmask;
+use log::debug;
 use serde::de::{DeserializeOwned, IgnoredAny, MapAccess, SeqAccess};
 use serde::ser::SerializeSeq;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -644,6 +645,7 @@ impl<'de> Deserialize<'de> for MessagePayload {
                             error = Some(map.next_value()?);
                         }
                         _ => {
+                            debug!("DHT node received unknown key \"{}\", ignoring", key);
                             let _ = map.next_value::<IgnoredAny>()?;
                         }
                     }
