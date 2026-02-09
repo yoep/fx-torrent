@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::ops::Range;
 
 /// The maximum size in bytes of a piece part can be requested from a peer.
-pub const MAX_PIECE_PART_SIZE: usize = 16 * 1024; // 16 KiB
+pub(crate) const MAX_PIECE_PART_SIZE: usize = 16 * 1024; // 16 KiB
 
 /// The alias type used to identify piece indexes.
 pub type PieceIndex = usize;

@@ -1,7 +1,6 @@
 .PHONY: cargo
 
 prerequisites: ## Install the Cargo requirements for testing
-	@echo Installing Cargo plugins
 	@command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov
 

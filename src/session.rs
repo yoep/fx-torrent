@@ -59,7 +59,7 @@ pub enum SessionEvent {
 }
 
 /// A torrent session which isolates torrents from each-other.
-/// [Session] is able to process and managed torrents from multiple sources.
+/// A [Session] can process and manage torrents from multiple sources.
 ///
 /// The session is always the owner of a [Torrent], meaning that it's able to drop a torrent at any time.
 #[async_trait]
