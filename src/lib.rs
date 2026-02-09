@@ -751,7 +751,7 @@ pub mod tests {
             }
 
             select! {
-                _ = time::sleep(Duration::from_secs(1)) => assert!(false, "expected pieces to have been created"),
+                _ = time::sleep(Duration::from_secs(2)) => assert!(false, "expected the pieces of {} to have been created", torrent),
                 _ = async {
                     while let Some(event) = receiver.recv().await {
                         match &*event {

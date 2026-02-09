@@ -1122,9 +1122,9 @@ impl PeerContext {
                 Some(event) = event_receiver.recv() => self.handle_command_event(event).await,
                 Some(event) = torrent_receiver.recv() => self.handle_torrent_event(&*event).await,
                 _ = interval.tick() => {
+                    self.update_stats();
                     self.check_for_wanted_pieces().await;
                     self.request_upload_permit_if_needed(false).await;
-                    self.callbacks.invoke(PeerEvent::Stats(self.metrics.snapshot()));
                 },
             }
         }
@@ -2756,6 +2756,12 @@ impl PeerContext {
         if self.torrent.is_valid() {
             self.torrent.peer_closed(&self.client.handle).await;
         }
+    }
+
+    fn update_stats(&self) {
+        let event_stats = self.metrics.snapshot();
+        self.metrics.tick(PEER_TICK_INTERVAL);
+        self.callbacks.invoke(PeerEvent::Stats(event_stats));
     }
 
     /// Publish a command event to the peer that will be processed by the main loop.

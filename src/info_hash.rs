@@ -12,10 +12,10 @@ use sha2::Sha256;
 use crate::errors::Result;
 use crate::TorrentError;
 
-pub const V1_HASH_IDENTIFIER: &str = "btih";
-pub const V2_HASH_IDENTIFIER: &str = "btmh";
+const V1_HASH_IDENTIFIER: &str = "btih";
+const V2_HASH_IDENTIFIER: &str = "btmh";
 
-/// Represents the available protocol versions of the BitTorrent protocol.
+/// The list of available protocol versions of the BitTorrent protocol.
 pub const PROTOCOL_VERSIONS: [ProtocolVersion; 2] = [ProtocolVersion::V1, ProtocolVersion::V2];
 
 /// Represent the v1 hash type of the BitTorrent protocol.
