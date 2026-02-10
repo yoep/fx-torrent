@@ -2,7 +2,7 @@ use crate::errors::Result;
 use crate::operation::{
     TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation,
     TorrentFileValidationOperation, TorrentMetadataOperation, TorrentOperation,
-    TorrentOperationFactory, TorrentTrackersOperation,
+    TorrentOperationFactory, TorrentStatsOperation, TorrentTrackersOperation,
 };
 #[cfg(feature = "dht")]
 use crate::operation::{TorrentDhtNodesOperation, TorrentDhtPeersOperation};
@@ -744,6 +744,7 @@ impl FxTorrentSessionBuilder {
         let torrent_operations = self.operation_factories.take().unwrap_or_else(|| {
             // FIXME: this is currently a duplicate list, consolidate with the torrent request operations
             vec![
+                TorrentOperationFactory::new(|| Box::new(TorrentStatsOperation::new())),
                 TorrentOperationFactory::new(|| Box::new(TorrentTrackersOperation::new())),
                 #[cfg(feature = "dht")]
                 TorrentOperationFactory::new(|| Box::new(TorrentDhtNodesOperation::new())),
