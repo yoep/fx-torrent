@@ -5,7 +5,7 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use derive_more::Display;
 use fx_handle::Handle;
 use log::{debug, trace, warn};
-use rand::{rng, Rng};
+use rand::{rng, RngExt};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::io;
