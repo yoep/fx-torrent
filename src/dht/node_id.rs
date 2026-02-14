@@ -1,6 +1,6 @@
 use crate::dht::{Error, Result};
 use crc::{Crc, CRC_32_ISCSI};
-use rand::{rng, Rng, RngCore};
+use rand::{rng, Rng, RngExt};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha1::{Digest, Sha1};
 use std::fmt::{Debug, Display, Formatter};

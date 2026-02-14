@@ -1,5 +1,5 @@
 use crate::peer::{Error, Result};
-use rand::Rng;
+use rand::RngExt;
 use std::fmt::{Debug, Display, Formatter};
 
 const ID_PREFIX: &str = "-RW0082-";

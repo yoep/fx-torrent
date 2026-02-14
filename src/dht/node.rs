@@ -1,5 +1,5 @@
 use crate::dht::{Error, NodeId, NodeMetrics, Result};
-use rand::{rng, Rng};
+use rand::{rng, RngExt};
 use sha1::{Digest, Sha1};
 use std::fmt::Display;
 use std::net::{IpAddr, SocketAddr};
