@@ -37,19 +37,25 @@ mod tests {
             create_node_server_pair!(NodeId::new(), NodeId::new())
         }};
         ($node_id1:expr, $node_id2:expr) => {{
+            create_node_server_pair!($node_id1, $node_id2, true)
+        }};
+        ($node_id1:expr, $node_id2:expr, $enable_indexing:expr) => {{
             use crate::dht::DhtTracker;
             use crate::dht::NodeId;
 
             let node_id1: NodeId = $node_id1;
             let node_id2: NodeId = $node_id2;
+            let enable_indexing: bool = $enable_indexing;
 
             let left_node = DhtTracker::builder()
                 .node_id(node_id1)
+                .enable_indexing(enable_indexing)
                 .build()
                 .await
                 .unwrap();
             let right_node = DhtTracker::builder()
                 .node_id(node_id2)
+                .enable_indexing(enable_indexing)
                 .build()
                 .await
                 .unwrap();

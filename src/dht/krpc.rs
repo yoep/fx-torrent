@@ -1,11 +1,12 @@
 use crate::dht::compact::{CompactIPv4Nodes, CompactIPv6Nodes};
-use crate::dht::{Error, NodeId, Result};
+use crate::dht::{Error, NodeId, NodeToken, Result};
 use crate::{CompactIpAddr, InfoHash};
 use bitmask_enum::bitmask;
 use log::debug;
 use serde::de::{DeserializeOwned, IgnoredAny, MapAccess, SeqAccess};
 use serde::ser::SerializeSeq;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde_bencode::value::Value;
 use std::borrow::Cow;
 use std::fmt::{Display, Formatter};
 use std::result;
@@ -16,6 +17,8 @@ const MESSAGE_FIND_NODE: &str = "find_node";
 const MESSAGE_GET_PEERS: &str = "get_peers";
 const MESSAGE_ANNOUNCE: &str = "announce_peer";
 const MESSAGE_SAMPLE_INFO_HASHES: &str = "sample_infohashes";
+const MESSAGE_PUT: &str = "put";
+const MESSAGE_GET: &str = "get";
 
 /// The unique transaction ID of a message.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -92,6 +95,16 @@ pub enum QueryMessage {
         #[serde(rename = "a")]
         request: SampleInfoHashesRequest,
     },
+    #[serde(rename = "put")]
+    Put {
+        #[serde(rename = "a")]
+        request: PutRequest,
+    },
+    #[serde(rename = "get")]
+    Get {
+        #[serde(rename = "a")]
+        request: GetRequest,
+    },
 }
 
 impl QueryMessage {
@@ -103,6 +116,8 @@ impl QueryMessage {
             QueryMessage::GetPeers { request } => &request.id,
             QueryMessage::AnnouncePeer { request } => &request.id,
             QueryMessage::SampleInfoHashes { request } => &request.id,
+            QueryMessage::Put { request } => &request.id,
+            QueryMessage::Get { request } => &request.id,
         }
     }
 
@@ -114,6 +129,8 @@ impl QueryMessage {
             QueryMessage::GetPeers { .. } => MESSAGE_GET_PEERS,
             QueryMessage::AnnouncePeer { .. } => MESSAGE_ANNOUNCE,
             QueryMessage::SampleInfoHashes { .. } => MESSAGE_SAMPLE_INFO_HASHES,
+            QueryMessage::Put { .. } => MESSAGE_PUT,
+            QueryMessage::Get { .. } => MESSAGE_GET,
         }
     }
 }
@@ -137,6 +154,14 @@ pub enum ResponseMessage {
         #[serde(rename = "r")]
         response: AnnouncePeerResponse,
     },
+    Put {
+        #[serde(rename = "r")]
+        response: PutResponse,
+    },
+    Get {
+        #[serde(rename = "r")]
+        response: GetResponse,
+    },
     Ping {
         #[serde(rename = "r")]
         response: PingMessage,
@@ -152,6 +177,8 @@ impl ResponseMessage {
             ResponseMessage::Ping { response } => &response.id,
             ResponseMessage::Announce { response } => &response.id,
             ResponseMessage::SampleInfoHashes { response } => &response.id,
+            ResponseMessage::Put { response } => &response.id,
+            ResponseMessage::Get { response } => &response.id,
         }
     }
 
@@ -163,6 +190,8 @@ impl ResponseMessage {
             ResponseMessage::Ping { .. } => MESSAGE_PING,
             ResponseMessage::Announce { .. } => MESSAGE_ANNOUNCE,
             ResponseMessage::SampleInfoHashes { .. } => MESSAGE_SAMPLE_INFO_HASHES,
+            ResponseMessage::Put { .. } => MESSAGE_PUT,
+            ResponseMessage::Get { .. } => MESSAGE_GET,
         }
     }
 }
@@ -189,8 +218,8 @@ pub struct FindNodeResponse {
     pub nodes: CompactIPv4Nodes,
     #[serde(default, skip_serializing_if = "CompactIPv6Nodes::is_empty")]
     pub nodes6: CompactIPv6Nodes,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
-    pub token: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<NodeToken>,
 }
 
 #[bitmask(u8)]
@@ -320,8 +349,8 @@ pub struct GetPeersResponse {
     pub name: Option<String>,
     /// The token for announcing a peer.
     /// If a node does not return a token, it indicates that it currently cannot accept announces for this info hash.
-    #[serde(default, with = "serde_bytes", skip_serializing_if = "Option::is_none")]
-    pub token: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<NodeToken>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub values: Vec<CompactIpAddr>,
     #[serde(default, skip_serializing_if = "CompactIPv4Nodes::is_empty")]
@@ -344,8 +373,7 @@ pub struct AnnouncePeerRequest {
     pub implied_port: bool,
     pub info_hash: InfoHash,
     pub port: u16,
-    #[serde(with = "serde_bytes")]
-    pub token: Vec<u8>,
+    pub token: NodeToken,
     /// The name of the torrent, if provided
     #[serde(default, rename = "n", skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -382,6 +410,37 @@ pub struct SampleInfoHashesResponse {
     /// The subset of stored info hashes as 20 byte string
     #[serde(with = "serde_info_hash")]
     pub samples: Vec<InfoHash>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct PutRequest {
+    pub id: NodeId,
+    pub token: NodeToken,
+    #[serde(rename = "v")]
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PutResponse {
+    pub id: NodeId,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct GetRequest {
+    pub id: NodeId,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GetResponse {
+    pub id: NodeId,
+    pub token: NodeToken,
+    #[serde(default, rename = "v", skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    #[serde(default, skip_serializing_if = "CompactIPv4Nodes::is_empty")]
+    pub nodes: CompactIPv4Nodes,
+    #[serde(default, skip_serializing_if = "CompactIPv6Nodes::is_empty")]
+    pub nodes6: CompactIPv6Nodes,
 }
 
 /// The error message.
@@ -502,7 +561,7 @@ impl ResponsePayload {
         }
     }
 
-    fn try_parse(query_name: &str, value: &serde_bencode::value::Value) -> Result<ResponseMessage> {
+    fn try_parse(query_name: &str, value: &Value) -> Result<ResponseMessage> {
         match query_name {
             MESSAGE_PING => Ok(ResponseMessage::Ping {
                 response: decode_bencode_value(value)
@@ -531,6 +590,14 @@ impl ResponsePayload {
                     }
                 }
             }
+            MESSAGE_PUT => Ok(ResponseMessage::Put {
+                response: decode_bencode_value(value)
+                    .map_err(|e| Self::parse_error(query_name, e))?,
+            }),
+            MESSAGE_GET => Ok(ResponseMessage::Get {
+                response: decode_bencode_value(value)
+                    .map_err(|e| Self::parse_error(query_name, e))?,
+            }),
             _ => Err(Error::InvalidMessage(format!(
                 "unable to parse response payload, unknown query \"{}\"",
                 query_name
@@ -545,16 +612,12 @@ impl ResponsePayload {
         ))
     }
 
-    fn from_value(value: serde_bencode::value::Value) -> Self {
+    fn from_value(value: Value) -> Self {
         let id = match &value {
-            serde_bencode::value::Value::Dict(dict) => {
-                dict.get("id".as_bytes()).and_then(|v| match v {
-                    serde_bencode::value::Value::Bytes(bytes) => {
-                        NodeId::try_from(bytes.as_slice()).ok()
-                    }
-                    _ => None,
-                })
-            }
+            Value::Dict(dict) => dict.get("id".as_bytes()).and_then(|v| match v {
+                Value::Bytes(bytes) => NodeId::try_from(bytes.as_slice()).ok(),
+                _ => None,
+            }),
             _ => None,
         };
 
@@ -679,6 +742,15 @@ impl<'de> Deserialize<'de> for MessagePayload {
                                 let request = decode_bencode_value(&query_args)?;
                                 QueryMessage::SampleInfoHashes { request }
                             }
+                            // BEP44
+                            "put" => {
+                                let request = decode_bencode_value(&query_args)?;
+                                QueryMessage::Put { request }
+                            }
+                            "get" => {
+                                let request = decode_bencode_value(&query_args)?;
+                                QueryMessage::Get { request }
+                            }
                             _ => {
                                 return Err(de::Error::unknown_variant(
                                     query_type.as_ref(),
@@ -688,6 +760,8 @@ impl<'de> Deserialize<'de> for MessagePayload {
                                         "get_peers",
                                         "announce",
                                         "sample_info_hashes",
+                                        "put",
+                                        "get",
                                     ],
                                 ))
                             }
@@ -1167,7 +1241,7 @@ mod tests {
             // as compact address cannot be printed as UTF8 strings,
             // we're going to use hex representation instead
             let id = NodeId::try_from("0123456789abcdefghij".as_bytes()).unwrap();
-            let token = "tokenexample".as_bytes();
+            let token = NodeToken::try_from("tokenexample".as_bytes()).unwrap();
             let expected_result = Message::builder()
                 .transaction_id_bytes("aa".as_bytes())
                 .payload(MessagePayload::Response(ResponsePayload::Message(
@@ -1183,7 +1257,7 @@ mod tests {
                             }]
                             .into(),
                             nodes6: Default::default(),
-                            token: Some(token.to_vec()),
+                            token: Some(token),
                         },
                     },
                 )))
@@ -1211,6 +1285,7 @@ mod tests {
         #[test]
         fn test_request() {
             let payload = "d1:ad2:id20:abcdefghij012345678912:implied_porti1e9:info_hash20:mnopqrstuvwxyz1234564:porti6881e5:token8:aoeusnthe1:q13:announce_peer1:t2:aa1:y1:qe";
+            let token = NodeToken::try_from("aoeusnth".as_bytes()).unwrap();
             let expected_result = Message::builder()
                 .transaction_id_bytes("aa".as_bytes())
                 .payload(MessagePayload::Query(QueryMessage::AnnouncePeer {
@@ -1219,7 +1294,7 @@ mod tests {
                         implied_port: true,
                         info_hash: InfoHash::from_str("mnopqrstuvwxyz123456").unwrap(),
                         port: 6881,
-                        token: "aoeusnth".as_bytes().to_vec(),
+                        token,
                         name: None,
                         seed: false,
                     },
@@ -1469,6 +1544,39 @@ mod tests {
             let bytes = serde_bencode::to_bytes(&want).unwrap();
             let result = serde_bencode::from_bytes::<WantFamily>(bytes.as_slice()).unwrap();
             assert_eq!(want, result);
+        }
+    }
+
+    mod put {
+        use super::*;
+
+        #[test]
+        fn test_request_deserialize() {
+            let token = NodeToken::try_from("WriteToken".as_bytes()).unwrap();
+            let request = PutRequest {
+                id: NodeId::new(),
+                token,
+                value: Value::Int(666),
+            };
+
+            // deserialize the payload
+            let bytes =
+                serde_bencode::to_bytes(&request).expect("expected the request to be serialized");
+            let result: PutRequest = serde_bencode::from_bytes(bytes.as_slice())
+                .expect("expected the request to be valid");
+            assert_eq!(request, result);
+        }
+
+        #[test]
+        fn test_response_deserialize() {
+            let response = PutResponse { id: NodeId::new() };
+
+            // deserialize the payload
+            let bytes =
+                serde_bencode::to_bytes(&response).expect("expected the response to be serialized");
+            let result: PutResponse = serde_bencode::from_bytes(bytes.as_slice())
+                .expect("expected the response to be valid");
+            assert_eq!(response, result);
         }
     }
 

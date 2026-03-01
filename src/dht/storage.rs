@@ -1,5 +1,8 @@
-use crate::InfoHash;
+use crate::dht::{Error, Result};
+use crate::{InfoHash, Sha1Hash};
 use log::trace;
+use serde_bencode::value::Value;
+use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
@@ -14,6 +17,7 @@ const PEER_ENTRY_EXPIRED_AFTER: Duration = Duration::from_mins(30);
 #[derive(Debug)]
 pub struct DhtStorage {
     peers: HashMap<InfoHash, HashSet<PeerEntry>>,
+    items: HashMap<Sha1Hash, ItemEntry>,
     /// The total number of torrents to track from the DHT.
     max_torrents: usize,
 }
@@ -23,6 +27,7 @@ impl DhtStorage {
     pub fn new(max_torrents: usize) -> Self {
         Self {
             peers: Default::default(),
+            items: Default::default(),
             max_torrents,
         }
     }
@@ -49,6 +54,31 @@ impl DhtStorage {
     /// Returns an iterator over all torrents stored in the storage.
     pub fn torrents(&self) -> impl Iterator<Item = &InfoHash> {
         self.peers.keys()
+    }
+
+    /// Get an item from the storage based on the given sha1 key.
+    pub fn get(&self, key: &Sha1Hash) -> Option<&ItemEntry> {
+        self.items.get(key)
+    }
+
+    /// Store the given item value within the storage.
+    /// It returns the key of the stored item.
+    pub fn store(&mut self, value: Value, immutable: bool) -> Result<Sha1Hash> {
+        let key = serde_bencode::to_bytes(&value)
+            .map_err(|e| Error::Parse(e.to_string()))
+            .and_then(|bytes| {
+                Sha1Hash::try_from(Sha1::digest(bytes.as_slice()))
+                    .map_err(|e| Error::Parse(e.to_string()))
+            })?;
+        if let Some(item) = self.items.get(&key) {
+            if item.immutable {
+                return Err(Error::AlreadyExists);
+            }
+        }
+
+        self.items
+            .insert(key.clone(), ItemEntry { value, immutable });
+        Ok(key)
     }
 
     /// Updates the peer information for the given info hash.
@@ -124,6 +154,12 @@ impl Hash for PeerEntry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemEntry {
+    pub value: Value,
+    pub immutable: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,7 +167,6 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::str::FromStr;
 
-    #[cfg(test)]
     mod update_peer {
         use super::*;
         use itertools::Itertools;
@@ -199,6 +234,42 @@ mod tests {
                 storage.torrents().contains(&info_hash2),
                 "expected the torrent to not have been added to the storage"
             );
+        }
+    }
+
+    mod store {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_non_existing() {
+            let expected_result = Value::Int(13);
+            let mut storage = DhtStorage::new(16);
+
+            let key = storage
+                .store(expected_result.clone(), true)
+                .expect("expected the item to have been stored");
+
+            let result = storage
+                .get(&key)
+                .expect("expected the item to be present within the storage");
+            assert_eq!(expected_result, result.value);
+        }
+
+        #[tokio::test]
+        async fn test_existing_immutable_item() {
+            let expected_result = Value::Int(69);
+            let mut storage = DhtStorage::new(16);
+
+            // store the item as immutable
+            let _ = storage
+                .store(expected_result.clone(), true)
+                .expect("expected the item to have been stored");
+
+            // try to store the item a second time
+            let result = storage
+                .store(expected_result.clone(), false)
+                .expect_err("expected the item to be immutable");
+            assert_eq!(Error::AlreadyExists, result);
         }
     }
 

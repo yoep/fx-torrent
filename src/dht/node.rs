@@ -1,8 +1,11 @@
 use crate::dht::{Error, NodeId, NodeMetrics, Result};
 use rand::{rng, RngExt};
+use serde::de::Visitor;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha1::{Digest, Sha1};
-use std::fmt::Display;
+use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
+use std::result;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
@@ -33,6 +36,15 @@ pub struct NodeKey {
 pub struct NodeToken(Vec<u8>);
 
 impl NodeToken {
+    /// Create a new [NodeToken] from the given byte slice.
+    /// The length of this new token is limited to [TOKEN_SIZE].
+    ///
+    /// If you want a longer token, use [NodeToken::try_from] instead.
+    fn new<T: AsRef<[u8]>>(value: T) -> Self {
+        let len = value.as_ref().len().min(TOKEN_SIZE);
+        Self(value.as_ref()[0..len].to_vec())
+    }
+
     /// Returns the underlying byte slice of the token.
     pub fn as_ref(&self) -> &[u8] {
         self.0.as_ref()
@@ -47,16 +59,51 @@ impl NodeToken {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+}
 
-    /// Returns a [NodeToken] from the given byte slice.
-    fn from<T: AsRef<[u8]>>(value: T) -> Self {
-        let len = value.as_ref().len().min(TOKEN_SIZE);
-        Self(value.as_ref()[0..len].to_vec())
+impl Serialize for NodeToken {
+    fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for NodeToken {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct NodeTokenVisitor;
+        impl<'de> Visitor<'de> for NodeTokenVisitor {
+            type Value = NodeToken;
+
+            fn expecting(&self, f: &mut Formatter) -> std::fmt::Result {
+                write!(f, "expected a string or byte array as node token")
+            }
+
+            fn visit_str<E>(self, value: &str) -> result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                NodeToken::try_from(value.as_bytes()).map_err(E::custom)
+            }
+
+            fn visit_bytes<E>(self, value: &[u8]) -> result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                NodeToken::try_from(value).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_any(NodeTokenVisitor)
     }
 }
 
 impl Display for NodeToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", String::from_utf8_lossy(&self.0))
     }
 }
@@ -71,7 +118,7 @@ impl TryFrom<&[u8]> for NodeToken {
             return Err(Error::InvalidToken);
         }
 
-        Ok(Self::from(value))
+        Ok(Self(value.to_vec()))
     }
 }
 
@@ -353,7 +400,7 @@ impl TokenSecret {
 
     fn generate(&self, addr: &IpAddr) -> NodeToken {
         let hash = Self::hash(&self.secret, addr);
-        NodeToken::from(hash.as_slice())
+        NodeToken::new(hash.as_slice())
     }
 
     /// Rotate the token secret.
@@ -371,7 +418,7 @@ impl TokenSecret {
 
     fn verify_with(&self, token: &NodeToken, addr: &IpAddr, secret: &TokenSecretValue) -> bool {
         let hash = Self::hash(secret, &addr);
-        let validation_token = NodeToken::from(hash.as_slice());
+        let validation_token = NodeToken::new(hash.as_slice());
         token == &validation_token
     }
 
@@ -520,6 +567,44 @@ mod tests {
             let result = Node::from(key);
 
             assert_eq!(result.id(), &id);
+        }
+    }
+
+    mod node_token {
+        use super::*;
+
+        #[test]
+        fn test_serialize() {
+            let expected_result = "10:LoremIpsum";
+            let token = NodeToken("LoremIpsum".as_bytes().to_vec());
+
+            let result = serde_bencode::to_string(&token)
+                .expect("expected the token to have been serialized");
+
+            assert_eq!(expected_result, result.as_str());
+        }
+
+        #[test]
+        fn test_deserialize_str() {
+            let value = "8:LoremIps";
+            let expected_result = NodeToken("LoremIps".as_bytes().to_vec());
+
+            let result: NodeToken =
+                serde_bencode::from_str(value).expect("expected the token to be valid");
+
+            assert_eq!(expected_result, result);
+        }
+
+        #[test]
+        fn test_deserialize_bytes() {
+            let expected_result = NodeToken("Qwerty".as_bytes().to_vec());
+            let bytes = serde_bencode::to_bytes(&expected_result)
+                .expect("expected the token to be serialized");
+
+            let result: NodeToken = serde_bencode::from_bytes(bytes.as_slice())
+                .expect("expected the token to be valid");
+
+            assert_eq!(expected_result, result);
         }
     }
 }
