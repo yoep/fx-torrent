@@ -418,6 +418,31 @@ pub struct PutRequest {
     pub token: NodeToken,
     #[serde(rename = "v")]
     pub value: Value,
+    /// The sequence number of the data blob being overwritten by the put
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cas: Option<u64>,
+    /// The sequence number of the mutable item
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_nr: Option<u64>,
+    /// The public key of the mutable item
+    #[serde(
+        default,
+        rename = "k",
+        skip_serializing_if = "Option::is_none",
+        with = "serde_bytes"
+    )]
+    pub public_key: Option<Vec<u8>>,
+    /// The optional salt to be appended to the public key when hashing
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
+    pub salt: Option<Vec<u8>>,
+    /// The signature of the put request
+    #[serde(
+        default,
+        rename = "sig",
+        skip_serializing_if = "Option::is_none",
+        with = "serde_bytes"
+    )]
+    pub signature: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -429,6 +454,8 @@ pub struct PutResponse {
 pub struct GetRequest {
     pub id: NodeId,
     pub target: String,
+    #[serde(default, rename = "seq", skip_serializing_if = "Option::is_none")]
+    pub sequence_nr: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -441,6 +468,25 @@ pub struct GetResponse {
     pub nodes: CompactIPv4Nodes,
     #[serde(default, skip_serializing_if = "CompactIPv6Nodes::is_empty")]
     pub nodes6: CompactIPv6Nodes,
+    /// The sequence number of the mutable item
+    #[serde(default, rename = "seq", skip_serializing_if = "Option::is_none")]
+    pub sequence_nr: Option<u64>,
+    /// The public key of the mutable item
+    #[serde(
+        default,
+        rename = "k",
+        skip_serializing_if = "Option::is_none",
+        with = "serde_bytes"
+    )]
+    pub public_key: Option<Vec<u8>>,
+    /// The signature of the put request
+    #[serde(
+        default,
+        rename = "sig",
+        skip_serializing_if = "Option::is_none",
+        with = "serde_bytes"
+    )]
+    pub signature: Option<Vec<u8>>,
 }
 
 /// The error message.
@@ -450,6 +496,11 @@ pub enum ErrorMessage {
     Server(String),
     Protocol(String),
     Method(String),
+    MessageTooBig(String),
+    InvalidSignature(String),
+    SaltTooBig(String),
+    CasMismatch(String),
+    InvalidSequenceNr(String),
 }
 
 impl ErrorMessage {
@@ -461,6 +512,11 @@ impl ErrorMessage {
             ErrorMessage::Server(_) => 202,
             ErrorMessage::Protocol(_) => 203,
             ErrorMessage::Method(_) => 204,
+            ErrorMessage::MessageTooBig(_) => 205,
+            ErrorMessage::InvalidSignature(_) => 206,
+            ErrorMessage::SaltTooBig(_) => 207,
+            ErrorMessage::CasMismatch(_) => 301,
+            ErrorMessage::InvalidSequenceNr(_) => 302,
         }
     }
 
@@ -471,6 +527,11 @@ impl ErrorMessage {
             ErrorMessage::Server(msg) => msg.as_str(),
             ErrorMessage::Protocol(msg) => msg.as_str(),
             ErrorMessage::Method(msg) => msg.as_str(),
+            ErrorMessage::MessageTooBig(msg) => msg.as_str(),
+            ErrorMessage::InvalidSignature(msg) => msg.as_str(),
+            ErrorMessage::SaltTooBig(msg) => msg.as_str(),
+            ErrorMessage::CasMismatch(msg) => msg.as_str(),
+            ErrorMessage::InvalidSequenceNr(msg) => msg.as_str(),
         }
     }
 }
@@ -484,6 +545,11 @@ impl TryFrom<(u16, String)> for ErrorMessage {
             202 => Ok(ErrorMessage::Server(value.1)),
             203 => Ok(ErrorMessage::Protocol(value.1)),
             204 => Ok(ErrorMessage::Method(value.1)),
+            205 => Ok(ErrorMessage::MessageTooBig(value.1)),
+            206 => Ok(ErrorMessage::InvalidSignature(value.1)),
+            207 => Ok(ErrorMessage::SaltTooBig(value.1)),
+            301 => Ok(ErrorMessage::CasMismatch(value.1)),
+            302 => Ok(ErrorMessage::InvalidSequenceNr(value.1)),
             _ => Err(Error::InvalidMessage(format!(
                 "unknown error code {}",
                 value.0
@@ -1549,14 +1615,47 @@ mod tests {
 
     mod put {
         use super::*;
+        use crate::dht::PublicKey;
+        use rand::{rng, Rng};
 
         #[test]
-        fn test_request_deserialize() {
+        fn test_immutable_item_request_deserialize() {
             let token = NodeToken::try_from("WriteToken".as_bytes()).unwrap();
             let request = PutRequest {
                 id: NodeId::new(),
                 token,
                 value: Value::Int(666),
+                cas: None,
+                sequence_nr: None,
+                public_key: None,
+                salt: None,
+                signature: None,
+            };
+
+            // deserialize the payload
+            let bytes =
+                serde_bencode::to_bytes(&request).expect("expected the request to be serialized");
+            let result: PutRequest = serde_bencode::from_bytes(bytes.as_slice())
+                .expect("expected the request to be valid");
+            assert_eq!(request, result);
+        }
+
+        #[test]
+        fn test_mutable_item_request_deserialize() {
+            let token = NodeToken::try_from("WriteToken".as_bytes()).unwrap();
+            let mut public_key = PublicKey::default();
+            rng().fill_bytes(&mut public_key);
+            let mut signature = [0u8; 64];
+            rng().fill_bytes(&mut signature);
+            let request = PutRequest {
+                id: NodeId::new(),
+                token,
+                value: Value::Int(98),
+                cas: None,
+                sequence_nr: Some(1),
+                public_key: Some(public_key.to_vec()),
+                salt: None,
+                signature: Some(signature.to_vec()),
             };
 
             // deserialize the payload

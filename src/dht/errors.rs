@@ -18,8 +18,14 @@ pub enum Error {
     InvalidAddr,
     #[error("token is invalid")]
     InvalidToken,
+    #[error("signature is invalid")]
+    InvalidSignature,
+    #[error("sequence number is less than current")]
+    InvalidSequenceNr,
     #[error("item already exists")]
     AlreadyExists,
+    #[error("missing crypto provider")]
+    MissingCryptoProvider,
     #[error("response error code {0}, {1}")]
     Response(u16, String),
     #[error("timed-out while waiting for a response from the node")]
@@ -58,7 +64,9 @@ impl PartialEq for Error {
             (Self::InvalidNodeId, Self::InvalidNodeId) => true,
             (Self::InvalidAddr, Self::InvalidAddr) => true,
             (Self::InvalidToken, Self::InvalidToken) => true,
+            (Self::InvalidSignature, Self::InvalidSignature) => true,
             (Self::AlreadyExists, Self::AlreadyExists) => true,
+            (Self::MissingCryptoProvider, Self::MissingCryptoProvider) => true,
             (Self::Response(code, _), Self::Response(other_code, _)) => code == other_code,
             (Self::Timeout, Self::Timeout) => true,
             (Self::Parse(_), Self::Parse(_)) => true,

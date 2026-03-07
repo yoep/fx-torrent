@@ -9,19 +9,20 @@ use crate::dht::krpc::{
 };
 use crate::dht::observer::Observer;
 use crate::dht::routing_table::RoutingTable;
-use crate::dht::storage::DhtStorage;
+use crate::dht::storage::{DhtStorage, MutableItemProperties};
 use crate::dht::traversal::TraversalAlgorithm;
 use crate::dht::{
-    DhtMetrics, Error, Node, NodeId, NodeKey, NodeState, NodeToken, Result,
-    DEFAULT_ROUTING_NODE_SERVERS,
+    DhtMetrics, Error, ItemSignature, Node, NodeId, NodeKey, NodeState, NodeToken, PublicKey,
+    Result, SecretKey, DEFAULT_ROUTING_NODE_SERVERS,
 };
 use crate::metrics::Metric;
 use crate::{channel, CompactIpAddr, CompactIpv4Addr, CompactIpv6Addr, InfoHash, Sha1Hash};
 use derive_more::Display;
+use ed25519::SignatureBytes;
 use futures::StreamExt;
 use fx_callback::{Callback, MultiThreadedCallback, Subscriber, Subscription};
 use itertools::Itertools;
-use log::{debug, trace, warn};
+use log::{debug, error, trace, warn};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_bencode::value::Value;
@@ -95,18 +96,26 @@ impl DhtTracker {
     /// * `max_torrents` - The maximum number of torrents that can be tracked by the DHT server.
     /// * `info_hash_indexing_enabled` - Whether to enable indexing of info hashes within the DHT network.
     /// * `info_hash_indexing_interval` - The interval at which to index info hashes within the DHT network.
+    /// * `item_verifier` - The verifier to use to validate mutable items in the DHT network.
     /// * `routing_nodes` - The routing nodes to use to bootstrap the DHT network.
     pub async fn new(
         id: NodeId,
         max_torrents: usize,
         info_hash_indexing_enabled: bool,
         info_hash_indexing_interval: Duration,
+        item_verifier: ItemSignature,
         routing_nodes: Vec<SocketAddr>,
     ) -> Result<Self> {
         let socket = Arc::new(Self::bind_socket().await?);
         let socket_addr = socket.local_addr()?;
         let (command_sender, command_receiver) = channel!(256);
-        let mut context = TrackerContext::new(id, socket, socket_addr, info_hash_indexing_enabled);
+        let mut context = TrackerContext::new(
+            id,
+            socket,
+            socket_addr,
+            info_hash_indexing_enabled,
+            item_verifier,
+        );
         let metrics = context.metrics.clone();
         let callbacks = context.callbacks.clone();
         let cancellation_token = context.cancellation_token.clone();
@@ -558,6 +567,10 @@ impl DhtTracker {
                 .send(|tx| TrackerCommand::Put {
                     node: *node,
                     value: value.clone(),
+                    sequence_nr: None,
+                    signature: None,
+                    public_key: None,
+                    salt: None,
                     response: tx,
                 })
                 .await;
@@ -572,6 +585,65 @@ impl DhtTracker {
         Ok(())
     }
 
+    /// Put a mutable item within the DHT network.
+    /// Each queried node is limited to the given timeout.
+    ///
+    /// Returns the [PublicKey] to use for item validation.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    pub async fn put_mutable<V>(
+        &self,
+        value: &V,
+        timeout: Duration,
+        sequence_nr: Option<u64>,
+        salt: Option<Vec<u8>>,
+        secret_key: &SecretKey,
+    ) -> Result<PublicKey>
+    where
+        V: Serialize,
+    {
+        let nodes = self
+            .sender
+            .send(|tx| TrackerCommand::GoodSearchNodes { response: tx })
+            .await
+            .await?;
+        let bytes = serde_bencode::to_bytes(value)?;
+        let value = serde_bencode::from_bytes::<Value>(bytes.as_slice())?;
+        let (signature, public_key) = self
+            .sender
+            .send(|tx| TrackerCommand::SignValue {
+                value: value.clone(),
+                sequence_nr: sequence_nr.unwrap_or(1),
+                salt: salt.clone(),
+                secret_key: secret_key.clone(),
+                response: tx,
+            })
+            .await
+            .await?;
+
+        let futures = nodes.iter().map(|node| async {
+            let response = self
+                .sender
+                .send(|tx| TrackerCommand::Put {
+                    node: *node,
+                    value: value.clone(),
+                    sequence_nr: sequence_nr.clone(),
+                    signature: Some(signature.clone()),
+                    public_key: Some(public_key.clone()),
+                    salt: salt.clone(),
+                    response: tx,
+                })
+                .await;
+
+            select! {
+                _ = time::sleep(timeout) => Err(Error::Timeout),
+                result = response => result,
+            }
+        });
+
+        let _ = futures::future::join_all(futures).await;
+        Ok(public_key)
+    }
+
     /// Put an immutable item to the given node within the DHT network.
     #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
     pub async fn put_to<V>(&self, value: &V, node: &NodeKey) -> Result<()>
@@ -584,13 +656,17 @@ impl DhtTracker {
             .send(|tx| TrackerCommand::Put {
                 node: *node,
                 value,
+                sequence_nr: None,
+                signature: None,
+                public_key: None,
+                salt: None,
                 response: tx,
             })
             .await
             .await
     }
 
-    /// Get an immutable item from the DHT network.
+    /// Get an **immutable** item from the DHT network.
     /// Each queried node is limited to the given timeout.
     ///
     /// Use `n_depth` to determine the depth of the search within the network.
@@ -614,7 +690,75 @@ impl DhtTracker {
             .map(|node| async move {
                 select! {
                     _ = time::sleep(timeout) => Err(Error::Timeout),
-                    result = self.internal_get_item(&hash, &node, n_depth) => result,
+                    result = self.internal_get_item(
+                        &hash,
+                        None,
+                        None,
+                        None,
+                        &node,
+                        n_depth
+                    ) => result,
+                }
+            })
+            .buffer_unordered(5);
+
+        while let Some(item) = item_stream.next().await {
+            if let Some(item) = item.ok().flatten() {
+                let bytes = serde_bencode::to_bytes(&item)?;
+                return Ok(Some(serde_bencode::from_bytes::<V>(bytes.as_slice())?));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get a **mutable** item from the DHT network.
+    /// Each queried node is limited to the given timeout.
+    ///
+    /// Use `n_depth` to determine the depth of the search within the network.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    pub async fn get_mutable<V>(
+        &self,
+        public_key: &PublicKey,
+        salt: Option<Vec<u8>>,
+        sequence_nr: Option<u64>,
+        timeout: Duration,
+        n_depth: usize,
+    ) -> Result<Option<V>>
+    where
+        V: DeserializeOwned,
+    {
+        let nodes = self
+            .sender
+            .send(|tx| TrackerCommand::GoodSearchNodes { response: tx })
+            .await
+            .await?;
+        let hash: Sha1Hash = self
+            .sender
+            .send(|tx| TrackerCommand::GetHash {
+                public_key: public_key.clone(),
+                salt: salt.clone(),
+                response: tx,
+            })
+            .await
+            .await?;
+
+        let mut item_stream = futures::stream::iter(nodes)
+            .map(|node| {
+                let fn_sequence_nr = sequence_nr.as_ref();
+                let fn_salt = salt.as_ref().map(|e| e.as_ref());
+                async move {
+                    select! {
+                        _ = time::sleep(timeout) => Err(Error::Timeout),
+                        result = self.internal_get_item(
+                            &hash,
+                            fn_sequence_nr,
+                            Some(public_key),
+                            fn_salt,
+                            &node,
+                            n_depth
+                        ) => result,
+                    }
                 }
             })
             .buffer_unordered(5);
@@ -639,6 +783,9 @@ impl DhtTracker {
             .send(|tx| TrackerCommand::Get {
                 node: *node,
                 hash,
+                sequence_nr: None,
+                public_key: None,
+                salt: None,
                 response: tx,
             })
             .await
@@ -758,11 +905,22 @@ impl DhtTracker {
     async fn internal_get_item(
         &self,
         hash: &Sha1Hash,
+        sequence_nr: Option<&u64>,
+        public_key: Option<&PublicKey>,
+        salt: Option<&[u8]>,
         node: &NodeKey,
         depth_left: usize,
     ) -> Result<Option<Value>> {
         const MAX_IN_FLIGHT: usize = 5;
-        let result = self.do_get_item(hash.clone(), node).await?;
+        let result = self
+            .do_get_item(
+                hash.clone(),
+                sequence_nr.as_ref().map(|e| **e),
+                public_key.map(|e| e.clone()),
+                salt.map(|e| e.to_vec()),
+                node,
+            )
+            .await?;
         if let Some(value) = result.value {
             return Ok(Some(value));
         }
@@ -778,10 +936,17 @@ impl DhtTracker {
                     return None;
                 }
 
-                self.internal_get_item(hash, &node, depth_left.saturating_sub(1))
-                    .await
-                    .ok()
-                    .flatten()
+                self.internal_get_item(
+                    hash,
+                    sequence_nr,
+                    public_key,
+                    salt,
+                    &node,
+                    depth_left.saturating_sub(1),
+                )
+                .await
+                .ok()
+                .flatten()
             })
             .buffer_unordered(MAX_IN_FLIGHT);
 
@@ -795,11 +960,21 @@ impl DhtTracker {
     }
 
     /// Retrieve the immutable item from the given node for [Sha1Hash].
-    async fn do_get_item(&self, hash: Sha1Hash, node: &NodeKey) -> Result<GetResult> {
+    async fn do_get_item(
+        &self,
+        hash: Sha1Hash,
+        sequence_nr: Option<u64>,
+        public_key: Option<PublicKey>,
+        salt: Option<Vec<u8>>,
+        node: &NodeKey,
+    ) -> Result<GetResult> {
         self.sender
             .send(|tx| TrackerCommand::Get {
                 node: *node,
                 hash,
+                sequence_nr,
+                public_key,
+                salt,
                 response: tx,
             })
             .await
@@ -858,6 +1033,7 @@ pub struct DhtTrackerBuilder {
     max_torrents: Option<usize>,
     enable_indexing: Option<bool>,
     indexing_interval: Option<Duration>,
+    verifier: Option<ItemSignature>,
 }
 
 impl DhtTrackerBuilder {
@@ -932,7 +1108,18 @@ impl DhtTrackerBuilder {
         self
     }
 
+    /// Set the item verifier to use for validating mutable items stored in the DHT network.
+    pub fn item_verifier(&mut self, verifier: ItemSignature) -> &mut Self {
+        self.verifier = Some(verifier);
+        self
+    }
+
     /// Try to create a new DHT node server from this builder.
+    ///
+    /// # Panics
+    ///
+    /// This method panics if no [ItemSignature] has been set and no crypto provider features are enabled.
+    /// For more info, see [ItemSignature::new].
     pub async fn build(&mut self) -> Result<DhtTracker> {
         let node_id = self.node_id.take().unwrap_or_else(|| {
             self.public_ip
@@ -943,6 +1130,10 @@ impl DhtTrackerBuilder {
         let max_torrents = self.max_torrents.unwrap_or(DEFAULT_MAX_TORRENTS);
         let enable_indexing = self.enable_indexing.unwrap_or(true);
         let indexing_interval = self.indexing_interval.unwrap_or(INDEX_INFO_HASHES_INTERVAL);
+        let item_verifier = match self.verifier.take() {
+            Some(verifier) => verifier,
+            None => ItemSignature::new()?,
+        };
         let mut routing_nodes: HashSet<SocketAddr> = self.routing_nodes.drain(..).collect();
 
         for node_url in self.routing_node_urls.drain(..).filter_map(Self::host) {
@@ -959,6 +1150,7 @@ impl DhtTrackerBuilder {
             max_torrents,
             enable_indexing,
             indexing_interval,
+            item_verifier,
             routing_nodes.into_iter().collect::<Vec<_>>(),
         )
         .await
@@ -1039,17 +1231,38 @@ pub(crate) enum TrackerCommand {
         node: NodeKey,
         response: Reply<Result<Vec<InfoHash>>>,
     },
-    /// Put an immutable item to the DHT node.
+    /// Put an item to the DHT node.
     Put {
         node: NodeKey,
         value: Value,
+        sequence_nr: Option<u64>,
+        signature: Option<SignatureBytes>,
+        public_key: Option<PublicKey>,
+        salt: Option<Vec<u8>>,
         response: Reply<Result<()>>,
     },
-    /// Get an immutable item from the DHT node.
+    /// Sign the given value
+    SignValue {
+        value: Value,
+        sequence_nr: u64,
+        salt: Option<Vec<u8>>,
+        secret_key: SecretKey,
+        response: Reply<Result<(SignatureBytes, PublicKey)>>,
+    },
+    /// Get an item from the DHT node.
     Get {
         node: NodeKey,
         hash: Sha1Hash,
+        sequence_nr: Option<u64>,
+        public_key: Option<PublicKey>,
+        salt: Option<Vec<u8>>,
         response: Reply<Result<GetResult>>,
+    },
+    /// Get the item hash for the given public key and salt.
+    GetHash {
+        public_key: PublicKey,
+        salt: Option<Vec<u8>>,
+        response: Reply<Result<Sha1Hash>>,
     },
     TotalNodes {
         response: Reply<usize>,
@@ -1082,78 +1295,11 @@ pub(crate) enum TrackerCommand {
 
 impl Debug for TrackerCommand {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TrackerCommand::Id { .. } => write!(f, "TrackerCommand::Id"),
-            TrackerCommand::Ping { addr, .. } => {
-                write!(f, "TrackerCommand::Ping{{ addr: {:?} }}", addr)
-            }
-            TrackerCommand::FindNode { target_id, .. } => {
-                write!(
-                    f,
-                    "TrackerCommand::FindNodes{{ target_id: {:?} }}",
-                    target_id
-                )
-            }
-            TrackerCommand::LookupPeers { info_hash, .. } => {
-                write!(
-                    f,
-                    "TrackerCommand::LookupPeers{{ info_hash: {:?} }}",
-                    info_hash
-                )
-            }
-            TrackerCommand::GetPeers {
-                info_hash, scrape, ..
-            } => {
-                write!(
-                    f,
-                    "TrackerCommand::GetPeers{{ info_hash: {:?}, scrape: {:?} }}",
-                    info_hash, scrape
-                )
-            }
-            TrackerCommand::AnnouncePeer {
-                info_hash,
-                peer_addr,
-                is_seed,
-                ..
-            } => write!(
-                f,
-                "TrackerCommand::AnnouncePeer{{ info_hash: {:?}, peer_addr: {:?}, is_seed: {:?} }}",
-                info_hash, peer_addr, is_seed
-            ),
-            TrackerCommand::ScrapeInfoHashes { node, .. } => {
-                write!(f, "TrackerCommand::ScrapeInfoHashes{{ node: {:?} }}", node)
-            }
-            TrackerCommand::Put { node, .. } => {
-                write!(f, "TrackerCommand::Put{{ node: {:?} }}", node)
-            }
-            TrackerCommand::Get { hash, node, .. } => {
-                write!(
-                    f,
-                    "TrackerCommand::Get{{ hash: {:?}, node: {:?} }}",
-                    hash, node
-                )
-            }
-            TrackerCommand::TotalNodes { .. } => write!(f, "TrackerCommand::TotalNodes"),
-            TrackerCommand::GetNode { node, .. } => {
-                write!(f, "TrackerCommand::GetNode{{ node: {:?} }}", node)
-            }
-            TrackerCommand::GetNodeById { id, .. } => {
-                write!(f, "TrackerCommand::GetNodeById{{ id: {:?} }}", id)
-            }
-            TrackerCommand::GetNodes { .. } => write!(f, "TrackerCommand::GetNodes"),
-            TrackerCommand::GetInfoHashes { .. } => write!(f, "TrackerCommand::GetInfoHashes"),
-            TrackerCommand::GoodSearchNodes { .. } => write!(f, "TrackerCommand::GoodSearchNodes"),
-            TrackerCommand::AddTraversalNode { .. } => {
-                write!(f, "TrackerCommand::AddTraversalNode")
-            }
-            TrackerCommand::UpdateExternalIp(addr) => {
-                write!(f, "TrackerCommand::UpdateExternalIp({:?})", addr)
-            }
-        }
+        f.debug_struct("TrackerCommand").finish()
     }
 }
 
-#[derive(Debug, Display)]
+#[derive(Display)]
 pub(crate) enum Event {
     #[display("Incoming")]
     Incoming(ReaderMessage),
@@ -1189,6 +1335,8 @@ pub(crate) struct TrackerContext {
     send_timeout: Duration,
     /// Indicates if the DHT tracker should enable indexing of info hashes.
     info_hash_indexing_enabled: bool,
+    /// The verifier to use for validating mutable items stored in the DHT network.
+    item_signature: ItemSignature,
     /// The tracker metrics of the DHT network
     pub(crate) metrics: DhtMetrics,
     /// The channel receiver for incoming messages
@@ -1205,6 +1353,7 @@ impl TrackerContext {
         socket: Arc<UdpSocket>,
         socket_addr: SocketAddr,
         info_hash_indexing_enabled: bool,
+        item_verifier: ItemSignature,
     ) -> Self {
         let (sender, receiver) = unbounded_channel();
         let cancellation_token = CancellationToken::new();
@@ -1230,6 +1379,7 @@ impl TrackerContext {
             pending_requests: Default::default(),
             send_timeout: SEND_PACKAGE_TIMEOUT,
             info_hash_indexing_enabled,
+            item_signature: item_verifier,
             metrics: Default::default(),
             receiver,
             callbacks: MultiThreadedCallback::new(),
@@ -1708,8 +1858,43 @@ impl TrackerContext {
                 )
                 .await;
         }
+        let public_key = match request
+            .public_key
+            .map(TryInto::<PublicKey>::try_into)
+            .transpose()
+        {
+            Ok(key) => key,
+            Err(_) => {
+                return self
+                    .send_error(
+                        transaction_id,
+                        ErrorMessage::Server("Invalid public key".to_string()),
+                        &addr,
+                    )
+                    .await;
+            }
+        };
+        let mutable_properties = match Self::parse_mutable_item_properties(
+            request.sequence_nr,
+            public_key,
+            request.salt,
+            request.signature,
+        ) {
+            Ok(properties) => properties,
+            Err(e) => {
+                return match e {
+                    Error::InvalidSequenceNr => {
+                        self.send_invalid_sequence_nr(transaction_id, &addr).await
+                    }
+                    Error::InvalidSignature => {
+                        self.send_invalid_signature(transaction_id, &addr).await
+                    }
+                    _ => Err(e),
+                }
+            }
+        };
 
-        if let Err(e) = storage.store(request.value, true) {
+        if let Err(e) = storage.store(request.value, mutable_properties) {
             warn!("{} failed to store immutable item, {}", self, e);
             return self
                 .send_error(
@@ -1810,7 +1995,18 @@ impl TrackerContext {
             }
         };
         let token = node.generate_token().await;
-        let value = storage.get(&hash).map(|e| e.value.clone());
+        let (value, mutable_properties) = match storage.get(&hash) {
+            Some(item) => (Some(item.value.clone()), item.mutable_properties.clone()),
+            None => (None, None),
+        };
+        let (sequence_nr, public_key, signature) = match mutable_properties {
+            Some(properties) => (
+                Some(properties.sequence_nr),
+                Some(properties.public_key.to_vec()),
+                Some(properties.signature.to_vec()),
+            ),
+            None => (None, None, None),
+        };
         let (nodes, nodes6) = Self::closest_node_pairs(&self.routing_table, &NodeId::from(&hash));
 
         self.send_response(
@@ -1822,6 +2018,9 @@ impl TrackerContext {
                     value,
                     nodes,
                     nodes6,
+                    sequence_nr,
+                    public_key,
+                    signature,
                 },
             },
             addr,
@@ -1856,9 +2055,89 @@ impl TrackerContext {
             return;
         }
 
-        // store the received value, if one was received
-        if let Some(value) = response.value.as_ref().cloned() {
-            if let Err(e) = storage.store(value, true) {
+        // extract the mutable info from the pending request
+        let (request_public_key, salt, tx) = match pending_request.request_type {
+            Some(PendingRequestType::Get {
+                public_key,
+                salt,
+                response,
+            }) => (public_key, salt, response),
+            Some(_) => {
+                Self::resolve_as_err(
+                    pending_request.request_type,
+                    Error::InvalidMessage(format!(
+                        "expected {} response, got get instead",
+                        pending_request.query_name
+                    )),
+                );
+                return;
+            }
+            _ => {
+                error!("{} received get response for empty request", self);
+                return;
+            }
+        };
+
+        // extract response data
+        let sequence_nr = response.sequence_nr;
+        let public_key = match response
+            .public_key
+            .map(TryInto::<PublicKey>::try_into)
+            .transpose()
+        {
+            Ok(key) => key,
+            Err(e) => {
+                debug!("{} failed to parse public key from {}", self, addr);
+                let _ = tx.send(Err(Error::Parse(format!(
+                    "failed to parse public key (len {})",
+                    e.len()
+                ))));
+                return;
+            }
+        };
+        let signature = response.signature;
+        let value = response.value;
+
+        // store the received value
+        if let Some(value) = value.as_ref().cloned() {
+            // validate that both public keys match
+            if request_public_key != public_key {
+                debug!("{} public keys are not matching for {}", self, addr);
+                let _ = tx.send(Err(Error::InvalidMessage(
+                    "public keys are not matching".to_string(),
+                )));
+                return;
+            }
+
+            // if the value is mutable, verify it before we store it
+            if let Some(public_key) = public_key.as_ref() {
+                if let Err(e) = self.verify_value(
+                    &value,
+                    sequence_nr.as_ref(),
+                    &public_key,
+                    salt.as_ref().map(AsRef::as_ref),
+                    signature.as_ref().map(AsRef::as_ref),
+                ) {
+                    debug!("{} value validation failed for {}, {}", self, addr, e);
+                    let _ = tx.send(Err(e));
+                    return;
+                }
+            }
+
+            let mutable_properties = match Self::parse_mutable_item_properties(
+                sequence_nr.clone(),
+                public_key,
+                None,
+                signature.clone(),
+            ) {
+                Ok(properties) => properties,
+                Err(e) => {
+                    debug!("{} failed to parse mutable item properties, {}", self, e);
+                    return;
+                }
+            };
+
+            if let Err(e) = storage.store(value, mutable_properties) {
                 if e != Error::AlreadyExists {
                     warn!("{} failed to store immutable item, {}", self, e);
                 }
@@ -1871,22 +2150,7 @@ impl TrackerContext {
             traversal.add_node(Some(node.id), node.addr);
         }
 
-        match pending_request.request_type {
-            Some(PendingRequestType::Get(tx)) => {
-                let _ = tx.send(Ok(GetResult {
-                    value: response.value,
-                    nodes,
-                }));
-            }
-            Some(_) => Self::resolve_as_err(
-                pending_request.request_type,
-                Error::InvalidMessage(format!(
-                    "expected {} response, got get instead",
-                    pending_request.query_name
-                )),
-            ),
-            _ => {}
-        }
+        let _ = tx.send(Ok(GetResult { value, nodes }));
     }
 
     /// Process a received ping query.
@@ -2339,19 +2603,61 @@ impl TrackerContext {
             TrackerCommand::Put {
                 node,
                 value,
+                sequence_nr,
+                signature,
+                public_key,
+                salt,
                 response,
             } => match self.routing_table.find_node_by_key(&node).cloned() {
                 None => response.send(Err(Error::InvalidNodeId)),
-                Some(node) => self.put(&node, value, response).await,
+                Some(node) => {
+                    self.put(
+                        &node,
+                        value,
+                        sequence_nr,
+                        signature,
+                        public_key,
+                        salt,
+                        response,
+                        storage,
+                    )
+                    .await
+                }
             },
             TrackerCommand::Get {
                 node,
                 hash,
+                sequence_nr,
+                public_key,
+                salt,
                 response,
             } => match self.routing_table.find_node_by_key(&node).cloned() {
                 None => response.send(Err(Error::InvalidNodeId)),
-                Some(node) => self.get(&node, hash, response).await,
+                Some(node) => {
+                    self.get(&node, hash, sequence_nr, public_key, salt, response)
+                        .await
+                }
             },
+            TrackerCommand::GetHash {
+                public_key,
+                salt,
+                response,
+            } => {
+                response
+                    .send(storage.calculate_hash(&public_key, salt.as_ref().map(|e| e.as_ref())));
+            }
+            TrackerCommand::SignValue {
+                value,
+                sequence_nr,
+                salt,
+                secret_key,
+                response,
+            } => response.send(self.item_signature.sign(
+                &value,
+                &sequence_nr,
+                salt.as_ref().map(|e| e.as_ref()),
+                &secret_key,
+            )),
             TrackerCommand::TotalNodes { response } => response.send(self.routing_table.len()),
             TrackerCommand::GetNode { node, response } => {
                 match self.routing_table.find_node_by_key(&node) {
@@ -2617,13 +2923,62 @@ impl TrackerContext {
     /// Send an immutable `put` item request to the given node.
     /// The response will eventually be sent to the given reply channel.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    async fn put(&mut self, node: &Node, value: Value, response: Reply<Result<()>>) {
+    async fn put(
+        &mut self,
+        node: &Node,
+        value: Value,
+        sequence_nr: Option<u64>,
+        signature: Option<SignatureBytes>,
+        public_key: Option<PublicKey>,
+        salt: Option<Vec<u8>>,
+        response: Reply<Result<()>>,
+        storage: &mut DhtStorage,
+    ) {
         let token = match node.announce_token().await {
             None => {
                 response.send(Err(Error::InvalidToken));
                 return;
             }
             Some(token) => token,
+        };
+        let mutable_properties = match Self::parse_mutable_item_properties(
+            sequence_nr,
+            public_key,
+            salt.clone(),
+            signature.map(|e| e.to_vec()),
+        ) {
+            Ok(properties) => properties,
+            Err(e) => {
+                response.send(Err(e));
+                return;
+            }
+        };
+        let key = match storage.store(value.clone(), mutable_properties) {
+            Err(e) => {
+                response.send(Err(e));
+                return;
+            }
+            Ok(key) => key,
+        };
+        let (cas, sequence_nr, public_key, signature) = match storage
+            .get(&key)
+            .and_then(|e| e.mutable_properties.as_ref())
+        {
+            None => (None, None, None, None),
+            Some(properties) => {
+                let cas = if properties.sequence_nr > 0 {
+                    Some(properties.sequence_nr - 1)
+                } else {
+                    None
+                };
+
+                (
+                    cas,
+                    Some(properties.sequence_nr),
+                    Some(properties.public_key.to_vec()),
+                    Some(properties.signature.to_vec()),
+                )
+            }
         };
 
         self.send_query(
@@ -2632,6 +2987,11 @@ impl TrackerContext {
                     id: self.routing_table.id,
                     token,
                     value,
+                    cas,
+                    sequence_nr,
+                    public_key,
+                    signature,
+                    salt,
                 },
             },
             node.addr(),
@@ -2641,20 +3001,35 @@ impl TrackerContext {
         .await
     }
 
-    /// Send an immutable `get` item request to the given node.
+    /// Send a `get` item request to the given node.
+    ///
+    ///
     /// The response will eventually be sent to the given reply channel.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    async fn get(&mut self, node: &Node, hash: Sha1Hash, response: Reply<Result<GetResult>>) {
+    async fn get(
+        &mut self,
+        node: &Node,
+        hash: Sha1Hash,
+        sequence_nr: Option<u64>,
+        public_key: Option<PublicKey>,
+        salt: Option<Vec<u8>>,
+        response: Reply<Result<GetResult>>,
+    ) {
         let target = hex::encode(hash);
         self.send_query(
             QueryMessage::Get {
                 request: GetRequest {
                     id: self.routing_table.id,
                     target,
+                    sequence_nr,
                 },
             },
             node.addr(),
-            Some(PendingRequestType::Get(response.take())),
+            Some(PendingRequestType::Get {
+                public_key,
+                salt,
+                response: response.take(),
+            }),
             || node.failed(),
         )
         .await
@@ -2775,6 +3150,7 @@ impl TrackerContext {
     /// * `transaction_id` - The original transaction id of the message.
     /// * `error` - The error payload.
     /// * `addr` - The node address to send the response to.
+    #[cfg_attr(feature = "tracing", instrument(skip_all, err))]
     async fn send_error(
         &self,
         transaction_id: TransactionId,
@@ -2789,6 +3165,32 @@ impl TrackerContext {
             .build()?;
 
         self.send(message, addr).await
+    }
+
+    async fn send_invalid_sequence_nr(
+        &self,
+        transaction_id: TransactionId,
+        addr: &SocketAddr,
+    ) -> Result<()> {
+        self.send_error(
+            transaction_id,
+            ErrorMessage::InvalidSequenceNr("Invalid Sequence Nr".to_string()),
+            &addr,
+        )
+        .await
+    }
+
+    async fn send_invalid_signature(
+        &self,
+        transaction_id: TransactionId,
+        addr: &SocketAddr,
+    ) -> Result<()> {
+        self.send_error(
+            transaction_id,
+            ErrorMessage::InvalidSignature("Invalid Signature".to_string()),
+            &addr,
+        )
+        .await
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip(self), err))]
@@ -3003,6 +3405,32 @@ impl TrackerContext {
         id.into_bytes().into()
     }
 
+    /// Verify the given mutable value.
+    fn verify_value<V>(
+        &self,
+        value: &V,
+        sequence_nr: Option<&u64>,
+        public_key: &PublicKey,
+        salt: Option<&[u8]>,
+        signature: Option<&[u8]>,
+    ) -> Result<()>
+    where
+        V: Serialize,
+    {
+        let signature = signature.ok_or(Error::InvalidSignature).and_then(|e| {
+            TryInto::<SignatureBytes>::try_into(e).map_err(|_| Error::InvalidSignature)
+        })?;
+        let sequence_nr = sequence_nr.ok_or(Error::InvalidSequenceNr)?;
+
+        self.item_signature.verify(
+            &value,
+            &sequence_nr,
+            &public_key,
+            salt.as_ref().map(AsRef::as_ref),
+            &signature,
+        )
+    }
+
     fn resolve_as_err(request_type: Option<PendingRequestType>, err: Error) {
         if let Some(request_type) = request_type {
             match request_type {
@@ -3024,8 +3452,8 @@ impl TrackerContext {
                 PendingRequestType::Put(tx) => {
                     let _ = tx.send(Err(err));
                 }
-                PendingRequestType::Get(tx) => {
-                    let _ = tx.send(Err(err));
+                PendingRequestType::Get { response, .. } => {
+                    let _ = response.send(Err(err));
                 }
             }
         }
@@ -3104,6 +3532,29 @@ impl TrackerContext {
             IpAddr::V4(ip) => Sha1::digest(ip.octets()).to_vec(),
             IpAddr::V6(ip) => Sha1::digest(ip.octets()).to_vec(),
         }
+    }
+
+    fn parse_mutable_item_properties(
+        sequence_nr: Option<u64>,
+        public_key: Option<PublicKey>,
+        salt: Option<Vec<u8>>,
+        signature: Option<Vec<u8>>,
+    ) -> Result<Option<MutableItemProperties>> {
+        let public_key = match public_key {
+            None => return Ok(None),
+            Some(key) => key,
+        };
+        let sequence_nr = sequence_nr.ok_or(Error::InvalidSequenceNr)?;
+        let signature = signature.ok_or(Error::InvalidSignature).and_then(|bytes| {
+            SignatureBytes::try_from(bytes.as_slice()).map_err(|_| Error::InvalidSignature)
+        })?;
+
+        Ok(Some(MutableItemProperties {
+            sequence_nr,
+            public_key,
+            signature,
+            salt,
+        }))
     }
 }
 
@@ -3201,7 +3652,11 @@ enum PendingRequestType {
     },
     ScrapeInfoHashes(oneshot::Sender<Result<Vec<InfoHash>>>),
     Put(oneshot::Sender<Result<()>>),
-    Get(oneshot::Sender<Result<GetResult>>),
+    Get {
+        public_key: Option<PublicKey>,
+        salt: Option<Vec<u8>>,
+        response: oneshot::Sender<Result<GetResult>>,
+    },
 }
 
 #[derive(Debug, Display, Clone, PartialEq, Eq, Hash)]
@@ -3226,9 +3681,17 @@ mod tests {
         async fn test_tracker_new() {
             init_logger!();
             let node_id = NodeId::new();
-            let tracker = DhtTracker::new(node_id, 1, true, INDEX_INFO_HASHES_INTERVAL, vec![])
-                .await
-                .expect("expected a new DHT server");
+            let verifier = ItemSignature::new().unwrap();
+            let tracker = DhtTracker::new(
+                node_id,
+                1,
+                true,
+                INDEX_INFO_HASHES_INTERVAL,
+                verifier,
+                vec![],
+            )
+            .await
+            .expect("expected a new DHT server");
 
             // verify the tracker id
             let result = tracker.id().await.unwrap();
@@ -3735,6 +4198,7 @@ mod tests {
 
     mod put {
         use super::*;
+        use rand::{rng, Rng};
         use serde::Deserialize;
 
         #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -3808,6 +4272,74 @@ mod tests {
                 .await
                 .expect("expected the get_from operation to succeed");
             assert_eq!(Some(item), result);
+        }
+
+        #[tokio::test]
+        async fn test_put_to_no_write_token() {
+            init_logger!();
+            let item = TestItem {
+                id: 123456,
+                name: "NoWriteToken".to_string(),
+            };
+            let (source, target) = create_node_server_pair!(NodeId::new(), NodeId::new(), false);
+            let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
+
+            // connect the source to the target
+            let target_key = source.ping(target_addr).await.unwrap();
+
+            // try to put the item on the target
+            let result = source.put_to(&item, &target_key).await;
+            assert_eq!(
+                Err(Error::InvalidToken),
+                result,
+                "expected Error::InvalidToken, but got {:?}",
+                result
+            );
+        }
+
+        #[tokio::test]
+        async fn test_put_mutable_no_salt() {
+            init_logger!();
+            let item = TestItem {
+                id: 8989,
+                name: "MyMutableItem".to_string(),
+            };
+            let hash = item.hash();
+            let mut secret_key: SecretKey = SecretKey::default();
+            rng().fill_bytes(&mut secret_key);
+            let (source, target) = create_node_server_pair!(NodeId::new(), NodeId::new(), false);
+            let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
+
+            // connect the source to the target
+            let target_key = source.ping(target_addr).await.unwrap();
+            let _ = source
+                .get_from::<TestItem>(hash.clone(), &target_key)
+                .await
+                .expect("expected the get operation to succeed");
+
+            // put the mutable item on the target
+            let public_key = source
+                .put_mutable(
+                    &item,
+                    Duration::from_millis(250),
+                    Some(1),
+                    None,
+                    &secret_key,
+                )
+                .await
+                .expect("expected the put operation to succeed");
+            assert_ne!(
+                PublicKey::default(),
+                public_key,
+                "expected a public key to have been returned"
+            );
+
+            // request the mutable item from the network
+            let result = source
+                .get_mutable::<TestItem>(&public_key, None, None, Duration::from_millis(500), 1)
+                .await
+                .unwrap();
+            assert_eq!(Some(item), result, "expected the item to have been found");
         }
     }
 
