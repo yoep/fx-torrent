@@ -58,6 +58,15 @@ async fn main() -> Result<(), io::Error> {
 
 For more examples, see the [examples](./examples).
 
+## DHT
+
+When using the `dht` feature, enabled by default, one of the following additional features should be enabled:
+- `ed25519-dalek`
+- `ring-compat`
+
+These crypto providers are used within the DHT network to verify mutable items within the network.
+When both features are missing, a [dht::Error::MissingCryptoProvider] error will be returned.
+
 */
 
 pub use compact::*;

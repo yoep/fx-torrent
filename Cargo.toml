@@ -33,6 +33,8 @@ bitmask-enum = "2.2"
 byteorder = "1.5"
 crc = "3.4"
 derive_more = { version = "2.1", features = ["display"] }
+ed25519 = { version = "2.2", optional = true }
+ed25519-dalek = { version = "2.2", optional = true}
 futures = "0.3"
 fx-callback = "1.0"
 fx-handle = "1.0"
@@ -42,6 +44,7 @@ log = "0.4"
 percent-encoding = "2.3"
 rand = "0.10"
 reqwest = { version = "0.13", features = ["stream"] }
+ring-compat = { version = "0.8", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_bencode = "0.2"
 serde_bytes = "0.11"
@@ -58,17 +61,20 @@ url = "2.5"
 [features]
 default = ["dht", "extension-metadata", "extension-pex", "extension-holepunch", "extension-donthave", "tracker-server"]
 
-dht = []
+dht = ["dep:ed25519"]
+ed25519-dalek = ["dep:ed25519-dalek"]
 extension-donthave = []
 extension-holepunch = []
 extension-metadata = []
 extension-pex = []
+ring-compat = ["dep:ring-compat"]
 tracing = ["dep:tracing", "dep:tracing-futures", "dep:tracing-subscriber"]
 tracker-server = ["dep:axum"]
 
 [dev-dependencies]
 chrono = "0.4"
 crossterm = { version = "0.29", features = ["event-stream"] }
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 log4rs = { version = "1.4", features = ["console_writer"] }
 mockall = "0.14"
 ratatui = "0.30"
@@ -82,4 +88,4 @@ all-features = true
 [[example]]
 name = "cli"
 path = "examples/cli/main.rs"
-required-features = ["tracing"]
+required-features = ["ed25519-dalek", "tracing"]

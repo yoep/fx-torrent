@@ -13,6 +13,8 @@ pub struct DhtMetrics {
     pub get_peers_requests: Counter,
     pub announce_peer_requests: Counter,
     pub sample_info_hashes_requests: Counter,
+    pub put_requests: Counter,
+    pub get_requests: Counter,
     pub bytes_in: Counter,
     pub bytes_out: Counter,
 }
@@ -39,6 +41,8 @@ impl Metric for DhtMetrics {
             get_peers_requests: self.get_peers_requests.snapshot(),
             announce_peer_requests: self.announce_peer_requests.snapshot(),
             sample_info_hashes_requests: self.sample_info_hashes_requests.snapshot(),
+            put_requests: self.put_requests.snapshot(),
+            get_requests: self.get_requests.snapshot(),
             bytes_in: self.bytes_in.snapshot(),
             bytes_out: self.bytes_out.snapshot(),
         }
@@ -54,6 +58,8 @@ impl Metric for DhtMetrics {
         self.get_peers_requests.tick(interval);
         self.announce_peer_requests.tick(interval);
         self.sample_info_hashes_requests.tick(interval);
+        self.put_requests.tick(interval);
+        self.get_requests.tick(interval);
         self.bytes_in.tick(interval);
         self.bytes_out.tick(interval);
     }

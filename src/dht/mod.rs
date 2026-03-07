@@ -1,3 +1,4 @@
+pub use ed25519::*;
 pub use errors::*;
 pub use metrics::*;
 pub use node::*;
@@ -5,6 +6,7 @@ pub use node_id::*;
 pub use tracker::*;
 
 mod compact;
+mod ed25519;
 mod errors;
 mod krpc;
 mod metrics;
@@ -37,19 +39,25 @@ mod tests {
             create_node_server_pair!(NodeId::new(), NodeId::new())
         }};
         ($node_id1:expr, $node_id2:expr) => {{
+            create_node_server_pair!($node_id1, $node_id2, true)
+        }};
+        ($node_id1:expr, $node_id2:expr, $enable_indexing:expr) => {{
             use crate::dht::DhtTracker;
             use crate::dht::NodeId;
 
             let node_id1: NodeId = $node_id1;
             let node_id2: NodeId = $node_id2;
+            let enable_indexing: bool = $enable_indexing;
 
             let left_node = DhtTracker::builder()
                 .node_id(node_id1)
+                .enable_indexing(enable_indexing)
                 .build()
                 .await
                 .unwrap();
             let right_node = DhtTracker::builder()
                 .node_id(node_id2)
+                .enable_indexing(enable_indexing)
                 .build()
                 .await
                 .unwrap();
@@ -69,6 +77,7 @@ mod tests {
         }};
         ($node_id:expr, $enable_indexing:expr) => {{
             use crate::dht::DhtTracker;
+            use crate::dht::ItemSignature;
             use crate::dht::NodeId;
             use crate::dht::TrackerContext;
             use std::sync::Arc;
@@ -78,8 +87,9 @@ mod tests {
 
             let socket = Arc::new(DhtTracker::bind_socket().await.unwrap());
             let socket_addr = socket.local_addr().unwrap();
+            let item_verifier = ItemSignature::new().unwrap();
 
-            TrackerContext::new(id, socket, socket_addr, enable_indexing)
+            TrackerContext::new(id, socket, socket_addr, enable_indexing, item_verifier)
         }};
     }
 }
