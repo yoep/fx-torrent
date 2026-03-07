@@ -2,7 +2,7 @@ use crate::app::FXKeyEvent;
 use crate::app_logger::AppLogger;
 use crate::menu::widget::MenuSectionWidget;
 use crate::menu::{MenuCommand, MenuSection};
-use crate::widget::ComboboxWidget;
+use crate::widgets::ComboboxWidget;
 use async_trait::async_trait;
 use crossterm::event::KeyCode;
 use log::Level;

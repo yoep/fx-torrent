@@ -3,7 +3,7 @@ use crate::app::{
 };
 use crate::menu::widget::MenuSectionWidget;
 use crate::menu::{MenuCommand, MenuSection};
-use crate::widget::{CheckboxWidget, InputWidget};
+use crate::widgets::{CheckboxWidget, InputWidget};
 use async_trait::async_trait;
 use crossterm::event::KeyCode;
 use fx_torrent::TorrentFlags;

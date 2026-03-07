@@ -2,9 +2,9 @@ mod app;
 mod app_logger;
 mod dht_info;
 mod menu;
-mod torrent_info;
+mod torrent;
 mod tracker_info;
-mod widget;
+mod widgets;
 
 use crate::app::App;
 use crate::app_logger::AppLogger;

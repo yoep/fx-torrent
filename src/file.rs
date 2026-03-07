@@ -43,9 +43,14 @@ pub struct File {
 
 impl File {
     /// Get the filename of the file.
-    pub fn filename(&self) -> String {
-        Self::filename_from_path(&self.torrent_path)
-            .unwrap_or_else(|| Self::filename_from_path(&self.info.path()).unwrap_or(String::new()))
+    pub fn filename(&self) -> &str {
+        Self::filename_from_path(&self.torrent_path).unwrap_or_else(|| {
+            self.info
+                .path_segments()
+                .last()
+                .map(|e| e.as_str())
+                .unwrap_or("")
+        })
     }
 
     /// Get the total amount of bytes in the torrent file.
@@ -152,9 +157,9 @@ impl File {
         self.info.attr.unwrap_or(FileAttributeFlags::default())
     }
 
-    fn filename_from_path(path: &PathBuf) -> Option<String> {
+    fn filename_from_path(path: &PathBuf) -> Option<&str> {
         if let Some(filename) = path.file_name() {
-            filename.to_str().map(|e| e.to_string())
+            filename.to_str()
         } else {
             None
         }
