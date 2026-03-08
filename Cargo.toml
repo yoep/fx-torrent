@@ -89,3 +89,8 @@ all-features = true
 name = "cli"
 path = "examples/cli/main.rs"
 required-features = ["ed25519-dalek", "tracing"]
+
+[[example]]
+name = "dht-get-item"
+path = "examples/dht-get-item/main.rs"
+required-features = ["ed25519-dalek"]

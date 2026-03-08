@@ -461,7 +461,8 @@ pub struct GetRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GetResponse {
     pub id: NodeId,
-    pub token: NodeToken,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<NodeToken>,
     #[serde(default, rename = "v", skip_serializing_if = "Option::is_none")]
     pub value: Option<Value>,
     #[serde(default, skip_serializing_if = "CompactIPv4Nodes::is_empty")]

@@ -2014,7 +2014,7 @@ impl TrackerContext {
             ResponseMessage::Get {
                 response: GetResponse {
                     id: self.routing_table.id,
-                    token,
+                    token: Some(token),
                     value,
                     nodes,
                     nodes6,
@@ -2047,12 +2047,11 @@ impl TrackerContext {
         self.node_query_result(&addr, true).await;
 
         // update the write token for the node
-        if let Err(e) = self
-            .update_announce_token(&response.id, &response.token)
-            .await
-        {
-            Self::resolve_as_err(pending_request.request_type, e);
-            return;
+        if let Some(token) = response.token.as_ref() {
+            if let Err(e) = self.update_announce_token(&response.id, token).await {
+                Self::resolve_as_err(pending_request.request_type, e);
+                return;
+            }
         }
 
         // extract the mutable info from the pending request
