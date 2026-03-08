@@ -167,7 +167,7 @@ impl FXWidget for MenuWidget {
         self.active_section_mut().on_paste_event(text);
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&mut self, frame: &mut Frame, area: Rect) {
         let section = self.active_section();
         let layout = Layout::horizontal([Length(section.preferred_width()), Fill(1)]);
         let [section_area, log_area] = layout.areas(area);

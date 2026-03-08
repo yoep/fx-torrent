@@ -43,9 +43,14 @@ pub struct File {
 
 impl File {
     /// Get the filename of the file.
-    pub fn filename(&self) -> String {
-        Self::filename_from_path(&self.torrent_path)
-            .unwrap_or_else(|| Self::filename_from_path(&self.info.path()).unwrap_or(String::new()))
+    pub fn filename(&self) -> &str {
+        Self::filename_from_path(&self.torrent_path).unwrap_or_else(|| {
+            self.info
+                .path_segments()
+                .last()
+                .map(|e| e.as_str())
+                .unwrap_or("")
+        })
     }
 
     /// Get the total amount of bytes in the torrent file.
@@ -152,9 +157,9 @@ impl File {
         self.info.attr.unwrap_or(FileAttributeFlags::default())
     }
 
-    fn filename_from_path(path: &PathBuf) -> Option<String> {
+    fn filename_from_path(path: &PathBuf) -> Option<&str> {
         if let Some(filename) = path.file_name() {
-            filename.to_str().map(|e| e.to_string())
+            filename.to_str()
         } else {
             None
         }
@@ -277,6 +282,60 @@ mod tests {
         let data = (0..448).map(|i| i as u8).collect::<Vec<u8>>();
         let result = file.torrent_applicable_bytes(&(64..512), data.as_slice());
         assert_eq!(Some(&data[0..64]), result);
+    }
+
+    mod filename {
+        use super::*;
+
+        #[test]
+        fn test_torrent_path() {
+            let torrent_path = PathBuf::from("MyTorrentDirectory/MyTorrentFile.mp4");
+            let file = File {
+                index: 0,
+                torrent_path,
+                torrent_offset: 0,
+                info: TorrentFileInfo {
+                    length: 1024,
+                    path: None,
+                    path_utf8: None,
+                    md5sum: None,
+                    attr: None,
+                    symlink_path: None,
+                    sha1: None,
+                },
+                priority: FilePriority::default(),
+                pieces: 0..100,
+            };
+
+            let result = file.filename();
+
+            assert_eq!("MyTorrentFile.mp4", result);
+        }
+
+        #[test]
+        fn test_info_path() {
+            let filename = "MyTorrentFile.mkv";
+            let file = File {
+                index: 0,
+                torrent_path: PathBuf::new(),
+                torrent_offset: 0,
+                info: TorrentFileInfo {
+                    length: 1024,
+                    path: Some(vec!["MyTorrentDirectory".to_string(), filename.to_string()]),
+                    path_utf8: None,
+                    md5sum: None,
+                    attr: None,
+                    symlink_path: None,
+                    sha1: None,
+                },
+                priority: FilePriority::default(),
+                pieces: 0..100,
+            };
+
+            let result = file.filename();
+
+            assert_eq!(filename, result);
+        }
     }
 
     fn new_file(offset: usize, length: usize) -> File {

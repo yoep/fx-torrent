@@ -85,7 +85,7 @@ impl FXWidget for TrackersInfoWidget {
         // no-op
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&mut self, frame: &mut Frame, area: Rect) {
         let main = Layout::vertical([Length(10), Fill(1)]);
         let [header_area, details_area] = main.areas(area);
         let header = Layout::horizontal([Percentage(50), Percentage(50)]);

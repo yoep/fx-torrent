@@ -1,5 +1,5 @@
 use crate::app::{FXKeyEvent, FXWidget, PERFORMANCE_HISTORY};
-use crate::widget::InputWidget;
+use crate::widgets::InputWidget;
 use async_trait::async_trait;
 use crossterm::event::KeyCode;
 use fx_callback::{Callback, Subscription};
@@ -144,7 +144,7 @@ impl FXWidget for DhtInfoWidget {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&mut self, frame: &mut Frame, area: Rect) {
         let main = Layout::vertical([Length(10), Fill(1)]);
         let [header_area, details_area] = main.areas(area);
         let header = Layout::horizontal([Percentage(50), Percentage(50)]);

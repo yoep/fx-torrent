@@ -195,11 +195,11 @@ impl TorrentFileInfo {
     /// # Returns
     ///
     /// Returns either the utf8 representation of the path or the normal path.
-    pub fn path_segments(&self) -> Vec<String> {
+    pub fn path_segments(&self) -> &[String] {
         self.path_utf8
-            .as_ref()
-            .map_or_else(|| self.path.clone(), |e| Some(e.clone()))
-            .unwrap_or(Vec::new())
+            .as_deref()
+            .or(self.path.as_deref())
+            .unwrap_or(&[])
     }
 
     /// Check if the file is a padding file (see BEP47).

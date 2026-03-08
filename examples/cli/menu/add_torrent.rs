@@ -1,7 +1,7 @@
 use crate::app::FXKeyEvent;
 use crate::menu::widget::MenuSectionWidget;
 use crate::menu::{MenuCommand, MenuSection, MenuWidget};
-use crate::widget::InputWidget;
+use crate::widgets::InputWidget;
 use async_trait::async_trait;
 use crossterm::event::KeyCode;
 use ratatui::layout::Constraint::{Fill, Length};

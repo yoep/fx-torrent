@@ -1,7 +1,7 @@
 use crate::app_logger::AppLogger;
 use crate::dht_info::{DhtInfoWidget, DHT_INFO_WIDGET_NAME};
 use crate::menu::MenuWidget;
-use crate::torrent_info::TorrentInfoWidget;
+use crate::torrent::TorrentInfoWidget;
 use crate::tracker_info::{TrackersInfoWidget, TRACKER_INFO_WIDGET_NAME};
 use async_trait::async_trait;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
@@ -36,7 +36,7 @@ pub const APP_CLIENT_NAME: &str = "FX torrent";
 pub const APP_DEFAULT_STORAGE: &str = "torrents";
 pub const PERFORMANCE_HISTORY: usize = 150;
 pub const DEFAULT_TORRENT_FLAGS: fn() -> TorrentFlags =
-    || TorrentFlags::default() | TorrentFlags::UploadMode;
+    || TorrentFlags::default() | TorrentFlags::Paused | TorrentFlags::UploadMode;
 const APP_QUIT_KEY: char = 'q';
 const TAB_NAME_LEN: usize = 16;
 const SESSION_CACHE_LIMIT: usize = 10;
@@ -60,7 +60,7 @@ pub trait FXWidget: Debug {
     fn on_paste_event(&mut self, text: String);
 
     /// Render this widget for the given frame and area.
-    fn render(&self, frame: &mut Frame, area: Rect);
+    fn render(&mut self, frame: &mut Frame, area: Rect);
 }
 
 /// A key event that can be marked as *consumed* to stop further propagation.
