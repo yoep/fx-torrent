@@ -1,5 +1,4 @@
 use crate::app::FXKeyEvent;
-use crate::torrent::command::TorrentInfoCommand;
 use crate::torrent::widgets::priority_text;
 use crossterm::event::KeyCode;
 use fx_torrent::{format_bytes, File, FileIndex, FilePriority, PieceIndex};
@@ -9,30 +8,29 @@ use ratatui::layout::Rect;
 use ratatui::prelude::{Color, StatefulWidget, Style, Widget};
 use ratatui::widgets::{Block, Cell, HighlightSpacing, Row, Table, TableState};
 use std::ops::Range;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
 pub struct FilesWidget {
     files: Vec<TorrentFileData>,
+    sender: UnboundedSender<FileIndex>,
+    receiver: UnboundedReceiver<FileIndex>,
     state: TableState,
-    command_sender: UnboundedSender<TorrentInfoCommand>,
 }
 
 impl FilesWidget {
-    pub fn new(command_sender: UnboundedSender<TorrentInfoCommand>) -> Self {
+    pub fn new() -> Self {
+        let (sender, receiver) = unbounded_channel();
         Self {
             files: vec![],
+            sender,
+            receiver,
             state: TableState::new().with_selected(0),
-            command_sender,
         }
     }
 
     fn selected_index(&self) -> usize {
         self.state.selected().unwrap_or(0)
-    }
-
-    fn selected(&self) -> &TorrentFileData {
-        &self.files[self.selected_index()]
     }
 
     pub fn on_key_event(&mut self, event: FXKeyEvent) {
@@ -49,6 +47,12 @@ impl FilesWidget {
                     .saturating_add(1)
                     .min(self.files.len().saturating_sub(1));
                 self.state.select(Some(offset));
+            }
+            KeyCode::Enter => {
+                let selected = self.selected_index();
+                if let Some(file) = self.files.get(selected) {
+                    let _ = self.sender.send(file.index);
+                }
             }
             _ => {}
         }
@@ -86,6 +90,10 @@ impl FilesWidget {
                 total_pieces: file.pieces.len(),
             })
             .collect()
+    }
+
+    pub fn on_file_selected(&mut self) -> Option<FileIndex> {
+        self.receiver.try_recv().ok()
     }
 }
 

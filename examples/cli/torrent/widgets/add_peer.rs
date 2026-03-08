@@ -1,5 +1,5 @@
 use crate::app::FXKeyEvent;
-use crate::torrent::command::TorrentInfoCommand;
+use crate::torrent::ActionResult;
 use crate::widgets::InputWidget;
 use crossterm::event::KeyCode;
 use ratatui::layout::Constraint::{Fill, Length};
@@ -9,39 +9,29 @@ use ratatui::widgets::{Block, Borders, Widget};
 use ratatui::Frame;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
+/// The action result type of the add peer widget.
+pub type PeerAction = ActionResult<SocketAddr>;
+
+/// Widget which allows the user to add a new peer to the torrent.
 #[derive(Debug)]
 pub struct AddPeerWidget {
     input: InputWidget,
     error: Option<String>,
-    command_sender: UnboundedSender<TorrentInfoCommand>,
+    sender: UnboundedSender<PeerAction>,
+    receiver: UnboundedReceiver<PeerAction>,
 }
 
 impl AddPeerWidget {
-    pub fn new(command_sender: UnboundedSender<TorrentInfoCommand>) -> Self {
+    pub fn new() -> Self {
+        let (sender, receiver) = unbounded_channel();
         Self {
             input: InputWidget::new_with_opts("", true),
             error: None,
-            command_sender,
+            sender,
+            receiver,
         }
-    }
-
-    fn try_parse_addr(&mut self) -> Option<SocketAddr> {
-        let addr_value = self.input.as_str();
-
-        match SocketAddr::from_str(addr_value) {
-            Ok(addr) => Some(addr),
-            Err(e) => {
-                self.error = Some(format!("Address is invalid, {}", e));
-                None
-            }
-        }
-    }
-
-    fn reset(&mut self) {
-        self.input.reset();
-        self.error = None;
     }
 
     pub fn on_key_event(&mut self, mut event: FXKeyEvent) {
@@ -49,7 +39,7 @@ impl AddPeerWidget {
             KeyCode::Esc => {
                 event.consume();
                 self.reset();
-                let _ = self.command_sender.send(TorrentInfoCommand::ShowFiles);
+                let _ = self.sender.send(PeerAction::Cancel);
             }
             KeyCode::Backspace => {
                 event.consume();
@@ -59,8 +49,7 @@ impl AddPeerWidget {
                 event.consume();
                 if let Some(addr) = self.try_parse_addr() {
                     self.reset();
-                    let _ = self.command_sender.send(TorrentInfoCommand::AddPeer(addr));
-                    let _ = self.command_sender.send(TorrentInfoCommand::ShowFiles);
+                    let _ = self.sender.send(PeerAction::Ok(addr));
                 }
             }
             KeyCode::Char(ch) => {
@@ -105,5 +94,27 @@ impl AddPeerWidget {
                 .style(Style::new().fg(Color::Red))
                 .render(invalid_area, frame.buffer_mut());
         }
+    }
+
+    /// Returns the widget action result.
+    pub fn on_action(&mut self) -> Option<PeerAction> {
+        self.receiver.try_recv().ok()
+    }
+
+    fn try_parse_addr(&mut self) -> Option<SocketAddr> {
+        let addr_value = self.input.as_str();
+
+        match SocketAddr::from_str(addr_value) {
+            Ok(addr) => Some(addr),
+            Err(e) => {
+                self.error = Some(format!("Address is invalid, {}", e));
+                None
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.error = None;
     }
 }

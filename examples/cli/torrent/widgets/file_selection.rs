@@ -1,12 +1,13 @@
 use crate::app::FXKeyEvent;
 use crate::widgets::CheckboxWidget;
 use crossterm::event::KeyCode;
-use fx_torrent::File;
+use fx_torrent::{File, FileIndex, FilePriority};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::{Color, Style};
 use ratatui::text::Text;
 use ratatui::widgets::{Block, List, ListState, StatefulWidget, Widget};
+use tokio::sync::oneshot;
 
 const FILE_ICON: &str = "\u{1F4C4}";
 const DIR_ICON: &str = "\u{1F4C1}";
@@ -14,14 +15,19 @@ const DIR_ICON: &str = "\u{1F4C1}";
 #[derive(Debug)]
 pub struct FileSelectionWidget {
     files: Vec<InnerFile>,
+    sender: Option<oneshot::Sender<Vec<(FileIndex, FilePriority)>>>,
+    complete_receiver: oneshot::Receiver<Vec<(FileIndex, FilePriority)>>,
     state: ListState,
 }
 
 impl FileSelectionWidget {
     /// Create a new file selection widget.
     pub fn new() -> Self {
+        let (sender, complete_receiver) = oneshot::channel();
         Self {
             files: vec![],
+            sender: Some(sender),
+            complete_receiver,
             state: ListState::default().with_selected(Some(0)),
         }
     }
@@ -91,7 +97,7 @@ impl FileSelectionWidget {
             KeyCode::Char(' ') => {
                 event.consume();
                 let selected = self.state.selected().unwrap_or_default();
-                match self.files.get_mut(selected) {
+                match Self::find(selected, &mut 0, &mut self.files) {
                     Some(InnerFile::File { widget, .. }) => {
                         widget.toggle();
                     }
@@ -100,9 +106,68 @@ impl FileSelectionWidget {
             }
             KeyCode::Enter => {
                 event.consume();
+                match self.sender.take() {
+                    None => {}
+                    Some(sender) => {
+                        let priorities = Self::collect_priorities(self.files.as_slice());
+                        let _ = sender.send(priorities);
+                    }
+                }
             }
             _ => {}
         }
+    }
+
+    /// Returns the widget action result.
+    pub fn on_action(&mut self) -> Option<Vec<(FileIndex, FilePriority)>> {
+        self.complete_receiver.try_recv().ok()
+    }
+
+    /// Try to find the given list index within the files.
+    fn find<'a>(
+        index: usize,
+        cursor: &mut usize,
+        files: &'a mut Vec<InnerFile>,
+    ) -> Option<&'a mut InnerFile> {
+        for file in files.iter_mut() {
+            if index == *cursor {
+                return Some(file);
+            }
+
+            *cursor += 1;
+            match file {
+                InnerFile::Directory { files, .. } => {
+                    if let Some(file) = Self::find(index, cursor, files) {
+                        return Some(file);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        None
+    }
+
+    fn collect_priorities(files: &[InnerFile]) -> Vec<(FileIndex, FilePriority)> {
+        let mut priorities = vec![];
+
+        for file in files {
+            match file {
+                InnerFile::File { file, widget } => {
+                    let priority = if widget.is_checked() {
+                        FilePriority::Normal
+                    } else {
+                        FilePriority::None
+                    };
+                    priorities.push((file.index, priority));
+                }
+                InnerFile::Directory { files, .. } => {
+                    priorities.extend(Self::collect_priorities(files));
+                }
+            }
+        }
+
+        priorities
     }
 }
 
@@ -117,7 +182,7 @@ impl Widget for &mut FileSelectionWidget {
         let list =
             List::new(items)
                 .block(Block::bordered().title(" Files ").title_bottom(
-                    " Press SPACE to toggle file selection, ENTER to start downloading",
+                    " Press SPACE to toggle file selection, ENTER to start downloading ",
                 ))
                 .highlight_style(Style::new().bg(Color::DarkGray));
 

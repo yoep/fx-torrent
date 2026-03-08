@@ -1,21 +1,19 @@
 use crate::app::{FXKeyEvent, FXWidget};
-use crate::torrent::command::TorrentInfoCommand;
 use crate::torrent::widgets::file_selection::FileSelectionWidget;
-use crate::torrent::widgets::{FilePriorityWidget, FilesWidget, PeersWidget};
+use crate::torrent::widgets::{FilePriorityWidget, FilesWidget, PeersWidget, PriorityAction};
 use async_trait::async_trait;
 use fx_torrent::peer::PeerHandle;
-use fx_torrent::{File, TorrentPeer};
+use fx_torrent::{File, FileIndex, FilePriority, PieceIndex, Torrent, TorrentPeer};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint::Percentage;
 use ratatui::layout::{Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget};
 use ratatui::Frame;
-use std::time::Instant;
-use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug)]
 pub struct ContentWidget {
+    torrent: Torrent,
     loading: LoadingWidget,
     file_picker: FileSelectionWidget,
     details: DetailsWidget,
@@ -24,11 +22,12 @@ pub struct ContentWidget {
 }
 
 impl ContentWidget {
-    pub fn new(command_sender: UnboundedSender<TorrentInfoCommand>) -> Self {
+    pub fn new(torrent: Torrent) -> Self {
         Self {
+            torrent: torrent.clone(),
             loading: LoadingWidget::new(),
             file_picker: FileSelectionWidget::new(),
-            details: DetailsWidget::new(command_sender),
+            details: DetailsWidget::new(torrent),
             peers_widget: PeersWidget::new(),
             state: State::Loading,
         }
@@ -50,6 +49,14 @@ impl ContentWidget {
             self.state = State::Picker;
         }
     }
+
+    pub fn on_piece_completed(&mut self, piece: &PieceIndex) {
+        self.details.on_piece_completed(piece);
+    }
+
+    pub fn on_priorities_changed(&mut self, priorities: &[(FileIndex, FilePriority)]) {
+        self.details.on_priorities_changed(priorities);
+    }
 }
 
 #[async_trait]
@@ -63,8 +70,14 @@ impl FXWidget for ContentWidget {
 
         match &self.state {
             State::Loading => self.loading.tick().await,
-            State::Picker => {}
-            State::Details => {}
+            State::Picker => {
+                if let Some(priorities) = self.file_picker.on_action() {
+                    self.torrent.prioritize_files(priorities).await;
+                    self.torrent.resume().await;
+                    self.state = State::Details;
+                }
+            }
+            State::Details => self.details.tick().await,
         }
     }
 
@@ -98,22 +111,15 @@ impl FXWidget for ContentWidget {
 #[derive(Debug)]
 struct LoadingWidget {
     cursor: usize,
-    last_tick: Instant,
 }
 
 impl LoadingWidget {
     fn new() -> Self {
-        Self {
-            cursor: 0,
-            last_tick: Instant::now(),
-        }
+        Self { cursor: 0 }
     }
 
     async fn tick(&mut self) {
-        // if self.last_tick.elapsed() > Duration::from_millis(500) {
         self.cursor = (self.cursor + 1) % 4;
-        self.last_tick = Instant::now();
-        // }
     }
 }
 
@@ -136,26 +142,62 @@ impl Widget for &LoadingWidget {
 
 #[derive(Debug)]
 struct DetailsWidget {
+    torrent: Torrent,
     files_widget: FilesWidget,
     priority_widget: FilePriorityWidget,
     state: DetailsState,
 }
 
 impl DetailsWidget {
-    fn new(command_sender: UnboundedSender<TorrentInfoCommand>) -> Self {
+    fn new(torrent: Torrent) -> Self {
         Self {
-            files_widget: FilesWidget::new(command_sender.clone()),
-            priority_widget: FilePriorityWidget::new(command_sender),
+            torrent,
+            files_widget: FilesWidget::new(),
+            priority_widget: FilePriorityWidget::new(),
             state: DetailsState::Files,
         }
     }
 
     fn on_key_event(&mut self, event: FXKeyEvent) {
-        todo!()
+        match self.state {
+            DetailsState::Files => self.files_widget.on_key_event(event),
+            DetailsState::Priority => self.priority_widget.on_key_event(event),
+        }
     }
 
     fn on_files_changed(&mut self, files: Vec<File>) {
         self.files_widget.on_files_changed(files);
+    }
+
+    fn on_piece_completed(&mut self, piece: &PieceIndex) {
+        self.files_widget.on_piece_completed(piece);
+    }
+    fn on_priorities_changed(&mut self, priorities: &[(FileIndex, FilePriority)]) {
+        self.files_widget.on_priorities_changed(priorities);
+    }
+
+    async fn tick(&mut self) {
+        match self.state {
+            DetailsState::Files => {
+                if let Some(index) = self.files_widget.on_file_selected() {
+                    if let Some(file) = self.torrent.file(&index).await {
+                        self.priority_widget.set_file(file.index);
+                        self.priority_widget.select(file.priority);
+                        self.state = DetailsState::Priority;
+                    }
+                }
+            }
+            DetailsState::Priority => match self.priority_widget.on_action() {
+                Some(PriorityAction::Ok((file, priority))) => {
+                    self.torrent.prioritize_files(vec![(file, priority)]).await;
+                    self.state = DetailsState::Files;
+                }
+                Some(PriorityAction::Cancel) => {
+                    self.state = DetailsState::Files;
+                }
+                None => {}
+            },
+        }
     }
 }
 

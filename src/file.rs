@@ -284,6 +284,60 @@ mod tests {
         assert_eq!(Some(&data[0..64]), result);
     }
 
+    mod filename {
+        use super::*;
+
+        #[test]
+        fn test_torrent_path() {
+            let torrent_path = PathBuf::from("MyTorrentDirectory/MyTorrentFile.mp4");
+            let file = File {
+                index: 0,
+                torrent_path,
+                torrent_offset: 0,
+                info: TorrentFileInfo {
+                    length: 1024,
+                    path: None,
+                    path_utf8: None,
+                    md5sum: None,
+                    attr: None,
+                    symlink_path: None,
+                    sha1: None,
+                },
+                priority: FilePriority::default(),
+                pieces: 0..100,
+            };
+
+            let result = file.filename();
+
+            assert_eq!("MyTorrentFile.mp4", result);
+        }
+
+        #[test]
+        fn test_info_path() {
+            let filename = "MyTorrentFile.mkv";
+            let file = File {
+                index: 0,
+                torrent_path: PathBuf::new(),
+                torrent_offset: 0,
+                info: TorrentFileInfo {
+                    length: 1024,
+                    path: Some(vec!["MyTorrentDirectory".to_string(), filename.to_string()]),
+                    path_utf8: None,
+                    md5sum: None,
+                    attr: None,
+                    symlink_path: None,
+                    sha1: None,
+                },
+                priority: FilePriority::default(),
+                pieces: 0..100,
+            };
+
+            let result = file.filename();
+
+            assert_eq!(filename, result);
+        }
+    }
+
     fn new_file(offset: usize, length: usize) -> File {
         File {
             index: 0,

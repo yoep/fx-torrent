@@ -1,7 +1,6 @@
 use crate::app::{FXKeyEvent, FXWidget, PERFORMANCE_HISTORY};
-use crate::torrent::command::TorrentInfoCommand;
 use crate::torrent::data::TorrentData;
-use crate::torrent::widgets::{AddPeerWidget, ContentWidget, PeersWidget};
+use crate::torrent::widgets::{AddPeerWidget, ContentWidget, PeerAction};
 use crate::widgets::print_optional_string;
 use async_trait::async_trait;
 use crossterm::event::KeyCode;
@@ -15,7 +14,6 @@ use ratatui::style::Stylize;
 use ratatui::widgets::{Block, Gauge, Paragraph, Sparkline, Widget};
 use ratatui::Frame;
 use std::net::SocketAddr;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
 pub struct TorrentInfoWidget {
@@ -24,8 +22,6 @@ pub struct TorrentInfoWidget {
     add_peer: AddPeerWidget,
     content_widget: ContentWidget,
     event_receiver: Subscription<TorrentEvent>,
-    command_sender: UnboundedSender<TorrentInfoCommand>,
-    command_receiver: UnboundedReceiver<TorrentInfoCommand>,
     data: TorrentData,
     state: State,
 }
@@ -34,7 +30,7 @@ impl TorrentInfoWidget {
     /// Create a new info widget for the given [Torrent].
     pub async fn new(name: &str, torrent: Torrent) -> Self {
         let event_receiver = torrent.subscribe();
-        let (command_sender, command_receiver) = unbounded_channel();
+        let files = torrent.files().await;
         let data = if let Some(metadata) = torrent.metadata().await.ok() {
             TorrentData {
                 info_hash: Some(metadata.info_hash.clone()),
@@ -58,15 +54,17 @@ impl TorrentInfoWidget {
         } else {
             Default::default()
         };
+        let mut content_widget = ContentWidget::new(torrent.clone());
+        if !files.is_empty() {
+            content_widget.on_files_changed(files);
+        }
 
         Self {
             name: name.to_string(),
+            add_peer: AddPeerWidget::new(),
+            content_widget,
             torrent,
-            add_peer: AddPeerWidget::new(command_sender.clone()),
-            content_widget: ContentWidget::new(command_sender.clone()),
             event_receiver,
-            command_sender,
-            command_receiver,
             data,
             state: State::Content,
         }
@@ -108,17 +106,17 @@ impl TorrentInfoWidget {
             }
             TorrentEvent::PieceCompleted(piece) => {
                 data.completed_pieces = self.torrent.total_completed_pieces().await as u64;
-                // self.files_widget.on_piece_completed(piece);
+                self.content_widget.on_piece_completed(piece);
             }
             TorrentEvent::PiecePrioritiesChanged => {
                 let files = self.torrent.files().await;
-                // self.files_widget.on_priorities_changed(
-                //     files
-                //         .into_iter()
-                //         .map(|e| (e.index, e.priority))
-                //         .collect::<Vec<_>>()
-                //         .as_slice(),
-                // )
+                self.content_widget.on_priorities_changed(
+                    files
+                        .into_iter()
+                        .map(|e| (e.index, e.priority))
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                )
             }
             TorrentEvent::FilesChanged => {
                 data.total_files = self.torrent.total_files().await.unwrap_or(0);
@@ -144,32 +142,21 @@ impl TorrentInfoWidget {
         }
     }
 
-    async fn handle_command(&mut self, command: TorrentInfoCommand) {
-        match command {
-            TorrentInfoCommand::ShowFiles => {
-                self.state = State::Content;
-            }
-            TorrentInfoCommand::UpdatePriority(index, priority) => {
-                self.torrent.prioritize_files(vec![(index, priority)]).await;
-            }
-            TorrentInfoCommand::ShowAddPeer => {
-                self.state = State::AddPeer;
-            }
-            TorrentInfoCommand::AddPeer(peer) => self.add_torrent_peer(peer).await,
-            TorrentInfoCommand::TogglePaused => {
-                if self.torrent.is_paused().await {
-                    self.torrent.resume().await;
-                } else {
-                    self.torrent.pause().await;
-                }
-            }
-        }
-    }
-
     async fn add_torrent_peer(&self, addr: SocketAddr) {
         if let Err(e) = self.torrent.add_peer(addr).await {
             error!("Failed to add peer {}, {}", addr, e);
         }
+    }
+
+    fn toggle_pause_state(&self) {
+        let torrent = self.torrent.clone();
+        tokio::spawn(async move {
+            if torrent.is_paused().await {
+                torrent.resume().await;
+            } else {
+                torrent.pause().await;
+            }
+        });
     }
 }
 
@@ -183,11 +170,20 @@ impl FXWidget for TorrentInfoWidget {
         while let Ok(event) = self.event_receiver.try_recv() {
             self.handle_event(&event).await;
         }
-        while let Ok(command) = self.command_receiver.try_recv() {
-            self.handle_command(command).await;
-        }
 
-        self.content_widget.tick().await;
+        match self.state {
+            State::AddPeer => match self.add_peer.on_action() {
+                Some(PeerAction::Ok(addr)) => {
+                    self.add_torrent_peer(addr).await;
+                    self.state = State::Content;
+                }
+                Some(PeerAction::Cancel) => {
+                    self.state = State::Content;
+                }
+                _ => {}
+            },
+            State::Content => self.content_widget.tick().await,
+        }
     }
 
     fn on_key_event(&mut self, mut event: FXKeyEvent) {
@@ -195,12 +191,12 @@ impl FXWidget for TorrentInfoWidget {
             match event.key_code() {
                 KeyCode::Char('a') => {
                     event.consume();
-                    let _ = self.command_sender.send(TorrentInfoCommand::ShowAddPeer);
+                    self.state = State::AddPeer;
                     return;
                 }
                 KeyCode::Char('p') => {
                     event.consume();
-                    let _ = self.command_sender.send(TorrentInfoCommand::TogglePaused);
+                    self.toggle_pause_state();
                     return;
                 }
                 _ => {}
@@ -281,7 +277,7 @@ impl FXWidget for TorrentInfoWidget {
         // render the performance
         Sparkline::default()
             .block(Block::bordered().title(format!(
-                "Down: {}/s",
+                " Down: {}/s ",
                 format_bytes(self.data.down.last().map(|e| *e as usize).unwrap_or(0))
             )))
             .data(&self.data.down)
@@ -290,7 +286,7 @@ impl FXWidget for TorrentInfoWidget {
 
         Sparkline::default()
             .block(Block::bordered().title(format!(
-                "Up: {}/s",
+                " Up: {}/s ",
                 format_bytes(self.data.up.last().map(|e| *e as usize).unwrap_or(0))
             )))
             .data(&self.data.up)
@@ -301,7 +297,7 @@ impl FXWidget for TorrentInfoWidget {
         Gauge::default()
             .block(
                 Block::bordered()
-                    .title("Progress")
+                    .title(" Progress ")
                     .title_alignment(Alignment::Center),
             )
             .gauge_style(Style::default().fg(Color::Yellow))

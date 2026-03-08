@@ -1,90 +1,90 @@
 use crate::app::FXKeyEvent;
-use crate::torrent::command::TorrentInfoCommand;
 use crate::torrent::widgets::priority_text;
+use crate::torrent::ActionResult;
 use crossterm::event::KeyCode;
 use fx_torrent::{FileIndex, FilePriority};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::{Color, StatefulWidget, Style, Widget};
 use ratatui::widgets::{Block, Borders, List, ListState};
-use std::sync::Mutex;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
+/// The action result type of the priority widget.
+pub type PriorityAction = ActionResult<(FileIndex, FilePriority)>;
+
+/// Widget which allows the user to configure the priority of a file.
 #[derive(Debug)]
 pub struct FilePriorityWidget {
     file: FileIndex,
     priorities: Vec<FilePriority>,
-    state: Mutex<ListState>,
-    command_sender: UnboundedSender<TorrentInfoCommand>,
+    sender: UnboundedSender<PriorityAction>,
+    receiver: UnboundedReceiver<PriorityAction>,
+    state: ListState,
 }
 
 impl FilePriorityWidget {
-    pub fn new(command_sender: UnboundedSender<TorrentInfoCommand>) -> Self {
+    pub fn new() -> Self {
+        let (sender, receiver) = unbounded_channel();
         Self {
             file: FileIndex::default(),
             priorities: FilePriority::iter().collect(),
+            sender,
+            receiver,
             state: Default::default(),
-            command_sender,
         }
     }
 
+    /// Set the file that is being prioritized.
     pub fn set_file(&mut self, file: FileIndex) {
         self.file = file;
     }
 
+    /// Select the current priority of the file.
     pub fn select(&mut self, priority: FilePriority) {
-        if let Ok(mut state) = self.state.lock() {
-            state.select(Some(
-                self.priorities
-                    .iter()
-                    .position(|e| *e == priority)
-                    .unwrap_or(0),
-            ));
-        }
+        self.state.select(Some(
+            self.priorities
+                .iter()
+                .position(|e| *e == priority)
+                .unwrap_or(0),
+        ));
     }
 
     fn selected(&self) -> FilePriority {
-        let offset = self
-            .state
-            .lock()
-            .ok()
-            .and_then(|e| e.selected())
-            .unwrap_or_default();
+        let offset = self.state.selected().unwrap_or_default();
         self.priorities[offset]
     }
 
     pub fn on_key_event(&mut self, event: FXKeyEvent) {
         match event.key_code() {
             KeyCode::Esc | KeyCode::Backspace => {
-                let _ = self.command_sender.send(TorrentInfoCommand::ShowFiles);
+                let _ = self.sender.send(PriorityAction::Cancel);
             }
             KeyCode::Enter => {
-                let _ = self.command_sender.send(TorrentInfoCommand::UpdatePriority(
-                    self.file,
-                    self.selected(),
-                ));
-                let _ = self.command_sender.send(TorrentInfoCommand::ShowFiles);
+                let _ = self
+                    .sender
+                    .send(PriorityAction::Ok((self.file, self.selected())));
             }
             KeyCode::Up => {
-                if let Ok(mut state) = self.state.lock() {
-                    let offset = state.selected().unwrap_or(0).saturating_sub(1);
-                    state.select(Some(offset));
-                }
+                let offset = self.state.selected().unwrap_or(0).saturating_sub(1);
+                self.state.select(Some(offset));
             }
             KeyCode::Down => {
-                if let Ok(mut state) = self.state.lock() {
-                    let selected = state.selected().unwrap_or(0).saturating_add(1);
-                    if selected <= self.priorities.len() - 1 {
-                        state.select(Some(selected));
-                    }
+                let selected = self.state.selected().unwrap_or(0).saturating_add(1);
+                if selected <= self.priorities.len() - 1 {
+                    self.state.select(Some(selected));
                 }
             }
             _ => {}
         }
     }
+
+    /// Returns the widget action result.
+    pub fn on_action(&mut self) -> Option<PriorityAction> {
+        self.receiver.try_recv().ok()
+    }
 }
 
-impl Widget for &FilePriorityWidget {
+impl Widget for &mut FilePriorityWidget {
     fn render(self, area: Rect, buf: &mut Buffer)
     where
         Self: Sized,
@@ -98,7 +98,6 @@ impl Widget for &FilePriorityWidget {
             .block(Block::new().title("File priority").borders(Borders::ALL))
             .highlight_style(Style::new().bg(Color::DarkGray));
 
-        let mut state = self.state.lock().expect("Mutex poisoned");
-        StatefulWidget::render(menu_list, area, buf, &mut state);
+        StatefulWidget::render(menu_list, area, buf, &mut self.state);
     }
 }
