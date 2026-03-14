@@ -1,6 +1,5 @@
-use crate::app::{
-    AppCommand, AppCommandSender, FXKeyEvent, APP_DEFAULT_STORAGE, DEFAULT_TORRENT_FLAGS,
-};
+use crate::app::{AppCommand, AppCommandSender, FXKeyEvent};
+use crate::app_settings::AppSettings;
 use crate::menu::widget::MenuSectionWidget;
 use crate::menu::{MenuCommand, MenuSection};
 use crate::widgets::{CheckboxWidget, InputWidget};
@@ -14,7 +13,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Widget};
 use ratatui::Frame;
 use std::fmt::Debug;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::vec;
@@ -93,14 +92,14 @@ pub struct MenuSettings {
 impl MenuSettings {
     pub fn new(app_sender: AppCommandSender, menu_sender: UnboundedSender<MenuCommand>) -> Self {
         let (close_sender, close_receiver) = unbounded_channel();
-        let torrent_flags = DEFAULT_TORRENT_FLAGS();
+        let default_settings = AppSettings::default();
 
         Self {
             items: vec![
                 SettingsMenuItem::Title("Peer discovery".to_string()),
                 SettingsMenuItem::Option(Box::new(ToggleSetting::new(
                     "DHT",
-                    true,
+                    default_settings.dht_enabled,
                     |enabled, sender| {
                         let _ = sender.send(AppCommand::DhtEnabled(enabled));
                     },
@@ -108,7 +107,7 @@ impl MenuSettings {
                 ))),
                 SettingsMenuItem::Option(Box::new(ToggleSetting::new(
                     "Tracker",
-                    true,
+                    default_settings.trackers_enabled,
                     |enabled, sender| {
                         let _ = sender.send(AppCommand::TrackerEnabled(enabled));
                     },
@@ -117,7 +116,7 @@ impl MenuSettings {
                 SettingsMenuItem::Title("Peer connections".to_string()),
                 SettingsMenuItem::Option(Box::new(ToggleSetting::new(
                     "Webseeds",
-                    true,
+                    default_settings.webseeds_enabled,
                     |enabled, sender| {
                         let _ = sender.send(AppCommand::WebseedsEnabled(enabled));
                     },
@@ -125,7 +124,7 @@ impl MenuSettings {
                 ))),
                 SettingsMenuItem::Option(Box::new(ToggleSetting::new(
                     "TCP",
-                    true,
+                    default_settings.tcp_peer_enabled,
                     |enabled, sender| {
                         let _ = sender.send(AppCommand::TcpPeerEnabled(enabled));
                     },
@@ -133,7 +132,7 @@ impl MenuSettings {
                 ))),
                 SettingsMenuItem::Option(Box::new(ToggleSetting::new(
                     "uTP",
-                    true,
+                    default_settings.utp_peer_enabled,
                     |enabled, sender| {
                         let _ = sender.send(AppCommand::UtpPeerEnabled(enabled));
                     },
@@ -142,7 +141,7 @@ impl MenuSettings {
                 SettingsMenuItem::Title("DHT options".to_string()),
                 SettingsMenuItem::Option(Box::new(ToggleSetting::new(
                     "Enable bootstrap nodes",
-                    true,
+                    default_settings.dht_bootstrap_nodes_enabled,
                     |enabled, sender| {
                         let _ = sender.send(AppCommand::DhtBootstrapNodesEnabled(enabled));
                     },
@@ -150,7 +149,7 @@ impl MenuSettings {
                 ))),
                 SettingsMenuItem::Option(Box::new(ToggleSetting::new(
                     "Enable info hash indexing",
-                    true,
+                    default_settings.dht_info_hash_indexing_enabled,
                     |enabled, sender| {
                         let _ = sender.send(AppCommand::DhtInfoHashIndexingEnabled(enabled));
                     },
@@ -158,6 +157,7 @@ impl MenuSettings {
                 ))),
                 SettingsMenuItem::Title("Storage location".to_string()),
                 SettingsMenuItem::Widget(Box::new(StorageSetting::new(
+                    default_settings.storage,
                     app_sender.clone(),
                     close_sender,
                 ))),
@@ -165,55 +165,55 @@ impl MenuSettings {
                 SettingsMenuItem::Option(Box::new(ToggleFlagSetting::new(
                     "Seed mode",
                     TorrentFlags::SeedMode,
-                    torrent_flags,
+                    default_settings.torrent_flags,
                     app_sender.clone(),
                 ))),
                 SettingsMenuItem::Option(Box::new(ToggleFlagSetting::new(
                     "Upload mode",
                     TorrentFlags::UploadMode,
-                    torrent_flags,
+                    default_settings.torrent_flags,
                     app_sender.clone(),
                 ))),
                 SettingsMenuItem::Option(Box::new(ToggleFlagSetting::new(
                     "Download mode",
                     TorrentFlags::DownloadMode,
-                    torrent_flags,
+                    default_settings.torrent_flags,
                     app_sender.clone(),
                 ))),
                 SettingsMenuItem::Option(Box::new(ToggleFlagSetting::new(
                     "Share mode",
                     TorrentFlags::ShareMode,
-                    torrent_flags,
+                    default_settings.torrent_flags,
                     app_sender.clone(),
                 ))),
                 SettingsMenuItem::Option(Box::new(ToggleFlagSetting::new(
                     "Apply IP filter",
                     TorrentFlags::ApplyIpFilter,
-                    torrent_flags,
+                    default_settings.torrent_flags,
                     app_sender.clone(),
                 ))),
                 SettingsMenuItem::Option(Box::new(ToggleFlagSetting::new(
                     "Paused",
                     TorrentFlags::Paused,
-                    torrent_flags,
+                    default_settings.torrent_flags,
                     app_sender.clone(),
                 ))),
                 SettingsMenuItem::Option(Box::new(ToggleFlagSetting::new(
                     "Metadata",
                     TorrentFlags::Metadata,
-                    torrent_flags,
+                    default_settings.torrent_flags,
                     app_sender.clone(),
                 ))),
                 SettingsMenuItem::Option(Box::new(ToggleFlagSetting::new(
                     "Sequential download",
                     TorrentFlags::SequentialDownload,
-                    torrent_flags,
+                    default_settings.torrent_flags,
                     app_sender.clone(),
                 ))),
                 SettingsMenuItem::Option(Box::new(ToggleFlagSetting::new(
                     "Stop when ready",
                     TorrentFlags::StopWhenReady,
-                    torrent_flags,
+                    default_settings.torrent_flags,
                     app_sender.clone(),
                 ))),
             ],
@@ -435,9 +435,15 @@ struct StorageSetting {
 }
 
 impl StorageSetting {
-    fn new(app_sender: AppCommandSender, close_sender: UnboundedSender<()>) -> Self {
+    fn new<P: AsRef<Path>>(
+        path: P,
+        app_sender: AppCommandSender,
+        close_sender: UnboundedSender<()>,
+    ) -> Self {
+        let path = path.as_ref();
+
         Self {
-            input: InputWidget::new_with_opts(APP_DEFAULT_STORAGE, true),
+            input: InputWidget::new_with_opts(path.to_string_lossy(), true),
             app_sender,
             close_sender,
         }

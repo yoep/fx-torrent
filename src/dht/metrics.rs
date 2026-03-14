@@ -8,6 +8,7 @@ pub struct DhtMetrics {
     pub pending_queries: Gauge,
     pub errors: Counter,
     pub discovered_peers: Gauge,
+    pub discovered_info_hashes: Gauge,
     pub ping_requests: Counter,
     pub find_node_requests: Counter,
     pub get_peers_requests: Counter,
@@ -36,6 +37,7 @@ impl Metric for DhtMetrics {
             pending_queries: self.pending_queries.snapshot(),
             errors: self.errors.snapshot(),
             discovered_peers: self.discovered_peers.snapshot(),
+            discovered_info_hashes: self.discovered_info_hashes.snapshot(),
             ping_requests: self.ping_requests.snapshot(),
             find_node_requests: self.find_node_requests.snapshot(),
             get_peers_requests: self.get_peers_requests.snapshot(),
@@ -53,6 +55,7 @@ impl Metric for DhtMetrics {
         self.pending_queries.tick(interval);
         self.errors.tick(interval);
         self.discovered_peers.tick(interval);
+        self.discovered_info_hashes.tick(interval);
         self.ping_requests.tick(interval);
         self.find_node_requests.tick(interval);
         self.get_peers_requests.tick(interval);

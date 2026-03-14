@@ -1,5 +1,6 @@
 mod app;
 mod app_logger;
+mod app_settings;
 mod dht_info;
 mod menu;
 mod torrent;

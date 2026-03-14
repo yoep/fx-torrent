@@ -1,13 +1,12 @@
-use crate::dht::{Error, PublicKey, Result};
+use crate::dht::{Error, PeerEntry, PublicKey, Result};
 use crate::{InfoHash, Sha1Hash};
 use ed25519::SignatureBytes;
 use log::trace;
 use serde_bencode::value::Value;
 use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
@@ -52,7 +51,7 @@ impl DhtStorage {
             .unwrap_or_default()
     }
 
-    /// Returns an iterator over all torrents stored in the storage.
+    /// Returns an iterator over all torrent info hashes stored in the storage.
     pub fn torrents(&self) -> impl Iterator<Item = &InfoHash> {
         self.peers.keys()
     }
@@ -134,11 +133,6 @@ impl DhtStorage {
         }
     }
 
-    /// Returns an iterator over all info hashes stored in the storage.
-    pub fn info_hashes(&self) -> impl Iterator<Item = &InfoHash> {
-        self.peers.keys()
-    }
-
     /// Purge old peers within the storage.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     pub fn do_cleanup(&mut self) -> usize {
@@ -172,37 +166,6 @@ impl DhtStorage {
         }
 
         Sha1Hash::try_from(Sha1::digest(bytes.as_slice())).map_err(|e| Error::Parse(e.to_string()))
-    }
-}
-
-#[derive(Debug)]
-pub struct PeerEntry {
-    pub addr: SocketAddr,
-    pub added: Instant,
-    pub seed: bool,
-}
-
-impl PeerEntry {
-    pub fn new(addr: SocketAddr, seed: bool) -> Self {
-        Self {
-            addr,
-            added: Instant::now(),
-            seed,
-        }
-    }
-}
-
-impl PartialEq for PeerEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.addr == other.addr
-    }
-}
-
-impl Eq for PeerEntry {}
-
-impl Hash for PeerEntry {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.addr.hash(state);
     }
 }
 
@@ -502,7 +465,7 @@ mod tests {
 
         storage.register(&info_hash);
 
-        let result = storage.info_hashes().cloned().collect::<Vec<_>>();
+        let result = storage.torrents().cloned().collect::<Vec<_>>();
         assert!(
             result.contains(&info_hash),
             "expected info hash {} to have been present within the storage",

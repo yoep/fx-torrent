@@ -3,6 +3,7 @@ pub use errors::*;
 pub use metrics::*;
 pub use node::*;
 pub use node_id::*;
+pub use storage_data::*;
 pub use tracker::*;
 
 mod compact;
@@ -15,6 +16,7 @@ mod node_id;
 mod observer;
 mod routing_table;
 mod storage;
+mod storage_data;
 mod tracker;
 mod traversal;
 

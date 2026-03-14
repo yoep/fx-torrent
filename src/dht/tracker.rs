@@ -12,8 +12,8 @@ use crate::dht::routing_table::RoutingTable;
 use crate::dht::storage::{DhtStorage, MutableItemProperties};
 use crate::dht::traversal::TraversalAlgorithm;
 use crate::dht::{
-    DhtMetrics, Error, ItemSignature, Node, NodeId, NodeKey, NodeState, NodeToken, PublicKey,
-    Result, SecretKey, DEFAULT_ROUTING_NODE_SERVERS,
+    DhtMetrics, Error, ItemSignature, Node, NodeId, NodeKey, NodeState, NodeToken, PeerEntry,
+    PublicKey, Result, SecretKey, DEFAULT_ROUTING_NODE_SERVERS,
 };
 use crate::metrics::Metric;
 use crate::{channel, CompactIpAddr, CompactIpv4Addr, CompactIpv6Addr, InfoHash, Sha1Hash};
@@ -65,6 +65,10 @@ pub enum DhtEvent {
     ExternalIpChanged(IpAddr),
     /// Invoked when a new node is added to the routing table.
     NodeAdded(NodeKey),
+    /// Invoked when a new info hash is added to the DHT storage.
+    InfoHashAdded(InfoHash),
+    /// Invoked when a peer is updated within the DHT storage.
+    PeerUpdated(InfoHash, SocketAddr),
     /// Invoked when the stats of the DHT server are updated.
     Stats(DhtMetrics),
 }
@@ -240,13 +244,22 @@ impl DhtTracker {
         }
     }
 
-    /// Returns the info hashes known within the DHT network.
+    /// Returns a list of info hashes currently known to the DHT tracker.
     pub async fn info_hashes(&self) -> Vec<InfoHash> {
-        let response = self
-            .sender
-            .send(|tx| TrackerCommand::GetInfoHashes { response: tx })
-            .await;
-        response.await.unwrap_or_default()
+        self.sender
+            .send(|tx| TrackerCommand::GetStorageInfoHashes { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Returns a list of peers currently known to the DHT tracker.
+    pub async fn peers(&self) -> HashMap<InfoHash, HashSet<PeerEntry>> {
+        self.sender
+            .send(|tx| TrackerCommand::GetStoragePeers { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
     }
 
     /// Try to ping the given node address.
@@ -1281,9 +1294,13 @@ pub(crate) enum TrackerCommand {
     GetNodes {
         response: Reply<Vec<Node>>,
     },
-    /// Returns the info hashes known to the DHT network.
-    GetInfoHashes {
+    /// Returns the info hashes stored within the [DhtStorage].
+    GetStorageInfoHashes {
         response: Reply<Vec<InfoHash>>,
+    },
+    /// Returns the peers stored within the [DhtStorage].
+    GetStoragePeers {
+        response: Reply<HashMap<InfoHash, HashSet<PeerEntry>>>,
     },
     /// Returns the node keys of "good" nodes which can be used in search queries.
     GoodSearchNodes {
@@ -1670,18 +1687,22 @@ impl TrackerContext {
                 .await;
         };
 
-        trace!(
-            "{} adding peer address {} for info hash {}",
-            self,
-            addr,
-            request.info_hash
-        );
+        let info_hash = request.info_hash;
         let peer_addr = if request.implied_port {
             *addr
         } else {
             SocketAddr::new(addr.ip(), request.port)
         };
-        storage.update_peer(request.info_hash, peer_addr, request.seed);
+        trace!(
+            "{} adding peer address {} for info hash {}",
+            self,
+            peer_addr,
+            info_hash
+        );
+        storage.update_peer(info_hash.clone(), peer_addr, request.seed);
+        self.callbacks
+            .invoke(DhtEvent::PeerUpdated(info_hash, peer_addr));
+        self.metrics.discovered_peers.inc();
         self.send_response(
             transaction_id,
             ResponseMessage::Announce {
@@ -1749,8 +1770,8 @@ impl TrackerContext {
         peers: &DhtStorage,
     ) -> Result<()> {
         self.metrics.sample_info_hashes_requests.inc();
-        let num = peers.info_hashes().count();
-        let samples = peers.info_hashes().take(20).cloned().collect::<Vec<_>>();
+        let num = peers.torrents().count();
+        let samples = peers.torrents().take(20).cloned().collect::<Vec<_>>();
         let (nodes, nodes6) = Self::closest_node_pairs(&self.routing_table, &request.target);
 
         self.send_response(
@@ -1786,7 +1807,7 @@ impl TrackerContext {
         pending_request: PendingRequest,
         response: SampleInfoHashesResponse,
         traversal: &mut TraversalAlgorithm,
-        peers: &mut DhtStorage,
+        storage: &mut DhtStorage,
     ) {
         if !response.id.verify_id(&addr.ip()) {
             debug!("{} detected spoofed sample_infohashes from {}", self, key);
@@ -1809,8 +1830,15 @@ impl TrackerContext {
 
         // add the info hashes to the peer storage
         for info_hash in &response.samples {
-            peers.register(info_hash);
+            storage.register(info_hash);
+            self.callbacks
+                .invoke(DhtEvent::InfoHashAdded(info_hash.clone()));
         }
+
+        // update the metrics
+        self.metrics
+            .discovered_info_hashes
+            .set(storage.torrents().count() as u64);
 
         match pending_request.request_type {
             Some(PendingRequestType::ScrapeInfoHashes(tx)) => {
@@ -2457,6 +2485,8 @@ impl TrackerContext {
             }) => {
                 for peer in &peers {
                     storage.update_peer(info_hash.clone(), *peer, false);
+                    self.callbacks
+                        .invoke(DhtEvent::PeerUpdated(info_hash.clone(), *peer));
                 }
 
                 self.metrics
@@ -2658,9 +2688,20 @@ impl TrackerContext {
             TrackerCommand::GetNodes { response } => {
                 response.send(self.routing_table.nodes().cloned().collect::<Vec<_>>());
             }
-            TrackerCommand::GetInfoHashes { response } => {
-                response.send(storage.info_hashes().cloned().collect());
+            TrackerCommand::GetStorageInfoHashes { response } => {
+                response.send(storage.torrents().cloned().collect());
             }
+            TrackerCommand::GetStoragePeers { response } => response.send(
+                storage
+                    .torrents()
+                    .map(|info_hash| {
+                        (
+                            info_hash.clone(),
+                            storage.peers(&info_hash).cloned().collect(),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>(),
+            ),
             TrackerCommand::GoodSearchNodes { response } => {
                 response.send(
                     Self::find_good_search_nodes(&self.routing_table)
@@ -3597,7 +3638,15 @@ impl NodeReader {
         }
 
         let start_time = Instant::now();
-        let message = serde_bencode::from_bytes::<Message>(bytes)?;
+        let message = serde_bencode::from_bytes::<Message>(bytes).map_err(|e| {
+            trace!(
+                "{} failed to parse incoming message, {}\n{}",
+                self,
+                e,
+                String::from_utf8_lossy(bytes)
+            );
+            e
+        })?;
         let elapsed = start_time.elapsed();
         trace!(
             "{} read {} bytes from {} in {}.{:03}ms",
@@ -3656,7 +3705,6 @@ struct TransactionKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::create_node_server_pair;
     use crate::{init_logger, timeout};
     use std::net::Ipv4Addr;
@@ -3952,7 +4000,6 @@ mod tests {
             let info_hash =
                 InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
             let (source, target) = create_node_server_pair!();
-            let source_id = source.id().await.unwrap();
             let target_id = target.id().await.unwrap();
             let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
             let peer_addr = (Ipv4Addr::LOCALHOST, 8080).into();
@@ -3980,7 +4027,7 @@ mod tests {
 
             // announce the torrent peer to the target node
             let result = source.announce_peer(&info_hash, &peer_addr, false).await;
-            verify_announce_peer(&info_hash, &source, &source_id, &target_key, result).await;
+            verify_announce_peer(&info_hash, &target, &[peer_addr], result).await;
         }
 
         #[tokio::test]
@@ -3989,10 +4036,8 @@ mod tests {
             let info_hash =
                 InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
             let (source, target) = create_node_server_pair!();
-            let source_id = source.id().await.unwrap();
             let target_id = target.id().await.unwrap();
             let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
-            let peer_addr = (Ipv4Addr::LOCALHOST, 8080).into();
 
             // request peers from the target node
             // this will set the initial announce token in the source tracker for the target node
@@ -4015,18 +4060,23 @@ mod tests {
                 node.id()
             );
 
-            // announce the torrent peer to the target node
+            // announce the peers to the target node
+            let peer1 = (Ipv4Addr::LOCALHOST, 8080).into();
+            let peer2 = (Ipv4Addr::LOCALHOST, 17000).into();
+            source
+                .announce_peer_to(&info_hash, &peer1, false, &target_key)
+                .await
+                .unwrap();
             let result = source
-                .announce_peer_to(&info_hash, &peer_addr, false, &target_key)
+                .announce_peer_to(&info_hash, &peer2, true, &target_key)
                 .await;
-            verify_announce_peer(&info_hash, &source, &source_id, &target_key, result).await;
+            verify_announce_peer(&info_hash, &target, &[peer1, peer2], result).await;
         }
 
         async fn verify_announce_peer(
             info_hash: &InfoHash,
-            source: &DhtTracker,
-            source_id: &NodeId,
-            target_key: &NodeKey,
+            target: &DhtTracker,
+            peers: &[SocketAddr],
             result: Result<()>,
         ) {
             assert!(
@@ -4035,16 +4085,23 @@ mod tests {
                 result
             );
 
-            // retrieve the announced peer from the target
-            let info_hashes = source
-                .scrape_info_hashes_from(&source_id, &target_key)
-                .await
-                .unwrap();
-            assert_eq!(
-                Some(info_hash),
-                info_hashes.first(),
-                "expected the info hash to be present"
+            // get the stored peers of the target to which the announcement was made
+            let result = target.peers().await;
+            assert!(
+                result.contains_key(info_hash),
+                "expected the info hash {} to be present",
+                info_hash
             );
+
+            // verify if all announced peers are present
+            let result = result.get(info_hash).unwrap();
+            for peer in peers {
+                assert!(
+                    result.iter().find(|e| &e.addr == peer).is_some(),
+                    "expected peer {} to be present",
+                    peer
+                );
+            }
         }
     }
 
@@ -4139,8 +4196,8 @@ mod tests {
                     _ = &mut timeout => assert!(false, "timed out waiting for the info hash to be indexed"),
                     Some(message) = source.receiver.recv() => {
                         source.run_step(Event::Incoming(message), &mut observer, &mut traversal, &mut storage).await;
-                        if storage.info_hashes().count() > 0 {
-                            break storage.info_hashes().cloned().collect::<Vec<_>>();
+                        if storage.torrents().count() > 0 {
+                            break storage.torrents().cloned().collect::<Vec<_>>();
                         }
                     },
                 }
@@ -4180,6 +4237,34 @@ mod tests {
 
             let result = target.metrics().sample_info_hashes_requests.total();
             assert_eq!(0, result, "expected no info hashes to be indexed");
+        }
+
+        #[tokio::test]
+        async fn test_scrape_info_hashes_from() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let (source, target) = create_node_server_pair!(NodeId::new(), NodeId::new(), false);
+            let source_id = source.id().await.unwrap();
+            let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
+
+            // connect the source to the target
+            let target_key = source.ping(target_addr).await.unwrap();
+
+            // announce the peer addr to the target node through the announcer
+            let peer_addr = (Ipv4Addr::LOCALHOST, 7800).into();
+            announce_peer(&source, &target_addr, &info_hash, peer_addr, false).await;
+
+            // scrape the info hashes from the target
+            let result = source
+                .scrape_info_hashes_from(&source_id, &target_key)
+                .await
+                .expect("expected the scrape to have been successful");
+            assert_eq!(
+                Some(&info_hash),
+                result.first(),
+                "expected the info hash to be present"
+            );
         }
     }
 
@@ -4434,6 +4519,53 @@ mod tests {
 
             let result = tracker.nodes().await;
             assert!(!result.is_empty(), "expected at least one bootstrap node");
+        }
+    }
+
+    mod info_hashes {
+        use super::*;
+        use std::str::FromStr;
+
+        #[tokio::test]
+        async fn test_info_hashes() {
+            init_logger!();
+            let info_hash1 =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let info_hash2 =
+                InfoHash::from_str("urn:btih:2C6B6858D61DA9543D4231A71DB4B1C9264B0685").unwrap();
+            let (source, target) = create_node_server_pair!();
+            let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
+
+            // create a write token within the source for the target
+            let target_key = source.ping(target_addr).await.unwrap();
+            let result = source.get_peers_from(&info_hash1, &target_key, 1).await;
+            assert!(
+                result.is_ok(),
+                "expected the peers to have been queried, but got {:?}",
+                result
+            );
+
+            // announce the info hashes to the target
+            let peer = (Ipv4Addr::LOCALHOST, 6800).into();
+            source
+                .announce_peer(&info_hash1, &peer, false)
+                .await
+                .expect("expected the announce to succeed");
+            source
+                .announce_peer(&info_hash2, &peer, false)
+                .await
+                .expect("expected the announce to succeed");
+
+            // retrieve the known info hashes from the target storage
+            let result = target.info_hashes().await;
+            for info_hash in &[info_hash1, info_hash2] {
+                assert!(
+                    result.contains(info_hash),
+                    "expected info hash {} to be present in the storage: {:?}",
+                    info_hash,
+                    result
+                );
+            }
         }
     }
 

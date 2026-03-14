@@ -1,4 +1,5 @@
 use crate::app_logger::AppLogger;
+use crate::app_settings::AppSettings;
 use crate::dht_info::{DhtInfoWidget, DHT_INFO_WIDGET_NAME};
 use crate::menu::MenuWidget;
 use crate::torrent::TorrentInfoWidget;
@@ -33,10 +34,7 @@ use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
 
 pub const APP_CLIENT_NAME: &str = "FX torrent";
-pub const APP_DEFAULT_STORAGE: &str = "torrents";
 pub const PERFORMANCE_HISTORY: usize = 150;
-pub const DEFAULT_TORRENT_FLAGS: fn() -> TorrentFlags =
-    || TorrentFlags::default() | TorrentFlags::Paused | TorrentFlags::UploadMode;
 const APP_QUIT_KEY: char = 'q';
 const TAB_NAME_LEN: usize = 16;
 const SESSION_CACHE_LIMIT: usize = 10;
@@ -552,35 +550,6 @@ pub enum AppCommand {
     RemoveTorrentFlags(TorrentFlags),
     /// Quit the app
     Quit,
-}
-
-#[derive(Debug, Clone)]
-struct AppSettings {
-    storage: PathBuf,
-    dht_enabled: bool,
-    dht_bootstrap_nodes_enabled: bool,
-    dht_info_hash_indexing_enabled: bool,
-    trackers_enabled: bool,
-    tcp_peer_enabled: bool,
-    utp_peer_enabled: bool,
-    webseeds_enabled: bool,
-    torrent_flags: TorrentFlags,
-}
-
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            storage: PathBuf::from(APP_DEFAULT_STORAGE),
-            dht_enabled: true,
-            dht_bootstrap_nodes_enabled: true,
-            dht_info_hash_indexing_enabled: true,
-            trackers_enabled: true,
-            tcp_peer_enabled: true,
-            utp_peer_enabled: true,
-            webseeds_enabled: true,
-            torrent_flags: DEFAULT_TORRENT_FLAGS(),
-        }
-    }
 }
 
 #[derive(Debug, Default)]

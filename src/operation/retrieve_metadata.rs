@@ -27,7 +27,7 @@ impl TorrentMetadataOperation {
     pub fn new(retrieve_timeout: Option<Duration>) -> Self {
         Self {
             metadata_present: false,
-            active_tasks: Vec::new(),
+            active_tasks: Default::default(),
             last_executed: None,
             retrieve_timeout: retrieve_timeout.unwrap_or(RETRIEVE_TIMEOUT),
         }
