@@ -1963,26 +1963,14 @@ impl TrackerContext {
         else {
             return Ok(());
         };
-        let target = match hex::decode(request.target.as_bytes()) {
-            Ok(target) => target,
-            Err(e) => {
-                trace!("{} failed to decode target, {}", self, e);
-                return self
-                    .send_error(
-                        transaction_id,
-                        ErrorMessage::Server("Internal Server Error".to_string()),
-                        &addr,
-                    )
-                    .await;
-            }
-        };
-        let hash: Sha1Hash = match Sha1Hash::try_from(target.as_slice()) {
+        let hash: Sha1Hash = match Sha1Hash::try_from(request.target.as_slice()) {
             Ok(sha1) => sha1,
             Err(e) => {
+                let hash_hex = hex::encode(request.target);
                 trace!(
                     "{} failed to parse sha1 hash from \"{}\", {}",
                     self,
-                    request.target,
+                    hash_hex,
                     e
                 );
                 return self
@@ -3014,12 +3002,12 @@ impl TrackerContext {
         salt: Option<Vec<u8>>,
         response: Reply<Result<GetResult>>,
     ) {
-        let target = hex::encode(hash);
+        // let target = hex::encode(hash);
         self.send_query(
             QueryMessage::Get {
                 request: GetRequest {
                     id: self.routing_table.id,
-                    target,
+                    target: hash,
                     sequence_nr,
                 },
             },

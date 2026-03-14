@@ -415,6 +415,49 @@ mod tests {
         }
     }
 
+    mod generate_key {
+        use super::*;
+
+        /// BEP44: test 3 (immutable)
+        #[test]
+        fn test_generate_value_key() {
+            let item = "Hello World!";
+            let expected_result = Sha1Hash::try_from(
+                hex::decode("e5f96f6f38320f0f33959cb4d3d656452117aadb").unwrap(),
+            )
+            .unwrap();
+            let bencode = serde_bencode::to_string(&item.to_string())
+                .expect("expected the item to be serialized");
+            let value = serde_bencode::from_str::<Value>(&bencode)
+                .expect("expected the item to be deserialized");
+
+            let result = DhtStorage::generate_value_key(&value)
+                .expect("expected the value key to be generated");
+
+            assert_eq!(expected_result, result);
+        }
+
+        /// BEP44: test 2 (mutable with salt)
+        #[test]
+        fn test_generate_mutable_key() {
+            let expected_result = Sha1Hash::try_from(
+                hex::decode("411eba73b6f087ca51a3795d9c8c938d365e32c1").unwrap(),
+            )
+            .unwrap();
+            let public_key: PublicKey = PublicKey::try_from(
+                hex::decode("77ff84905a91936367c01360803104f92432fcd904a43511876df5cdf3e7e548")
+                    .unwrap(),
+            )
+            .unwrap();
+            let salt = b"foobar";
+
+            let result = DhtStorage::generate_mutable_key(&public_key, Some(salt))
+                .expect("expected the value key to be generated");
+
+            assert_eq!(expected_result, result);
+        }
+    }
+
     mod calculate_hash {
         use super::*;
         use rand::{rng, Rng};
