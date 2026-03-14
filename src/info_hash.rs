@@ -743,6 +743,23 @@ mod tests {
     }
 
     #[test]
+    fn test_try_from_bytes() {
+        let mut bytes: Sha1Hash = Sha1Hash::default();
+        rng().fill_bytes(&mut bytes);
+        let result = InfoHash::try_from_bytes(&bytes).expect("expected the sha1 hash to be valid");
+        assert!(result.v1.is_some(), "expected the sha1 hash to be present");
+
+        let mut bytes: Sha256Hash = Sha256Hash::default();
+        rng().fill_bytes(&mut bytes);
+        let result =
+            InfoHash::try_from_bytes(&bytes).expect("expected the sha256 hash to be valid");
+        assert!(
+            result.v2.is_some(),
+            "expected the sha256 hash to be present"
+        );
+    }
+
+    #[test]
     fn test_info_hash_deserialize() {
         init_logger!();
         let hash = "urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7";

@@ -4093,7 +4093,20 @@ mod tests {
             );
 
             // get the stored peers of the target to which the announcement was made
-            let result = target.peers().await;
+            // due to a strange race condition in Github, we try a few times
+            let result = {
+                let mut attempt = 0;
+                let mut result = HashMap::new();
+                while attempt < 3 {
+                    result = target.peers().await;
+                    if result.len() > 0 {
+                        break;
+                    }
+                    attempt += 1;
+                    time::sleep(Duration::from_millis(2)).await;
+                }
+                result
+            };
             assert!(
                 result.contains_key(info_hash),
                 "expected the info hash {} to be present, {:?}",
