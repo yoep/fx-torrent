@@ -1,6 +1,5 @@
-use std::fmt::{Debug, Display, Formatter};
-use std::str::FromStr;
-
+use crate::errors::Result;
+use crate::TorrentError;
 use base32::Alphabet;
 use hex::FromHex;
 use log::{debug, error, trace, warn};
@@ -8,9 +7,8 @@ use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
-
-use crate::errors::Result;
-use crate::TorrentError;
+use std::fmt::{Debug, Display, Formatter};
+use std::str::FromStr;
 
 const V1_HASH_IDENTIFIER: &str = "btih";
 const V2_HASH_IDENTIFIER: &str = "btmh";
@@ -31,7 +29,7 @@ pub struct InfoHash {
     /// The v1 (SHA1) hash, if present.
     v1: Option<Sha1Hash>,
     /// The v2 (SHA256) hash, if present.
-    v2: Option<Vec<u8>>,
+    v2: Option<Sha256Hash>,
 }
 
 impl InfoHash {
@@ -144,18 +142,14 @@ impl InfoHash {
                 v1: Some(hash),
                 v2: None,
             });
-        } else if bytes.as_ref().len() == 32 {
-            let mut hash: Sha256Hash = [0; 32];
-            hash.copy_from_slice(bytes.as_ref());
-            return Ok(Self {
-                v1: None,
-                v2: Some(hash.to_vec()),
-            });
         }
 
-        Err(TorrentError::InvalidInfoHash(
-            "invalid info hash length".to_string(),
-        ))
+        TryInto::<Sha256Hash>::try_into(bytes.as_ref())
+            .map(|hash| Self {
+                v1: None,
+                v2: Some(hash),
+            })
+            .map_err(|_| TorrentError::InvalidInfoHash("invalid info hash length".to_string()))
     }
 
     /// Try to parse the info hash from multiple str slices.
@@ -169,7 +163,7 @@ impl InfoHash {
 
         trace!("Parsing info hash from values {:?}", values);
         let mut v1_hash: Option<Sha1Hash> = None;
-        let mut v2_hash: Option<Vec<u8>> = None;
+        let mut v2_hash: Option<Sha256Hash> = None;
 
         for value in values {
             let segments: Vec<&str> = value.split(':').collect();
@@ -235,14 +229,11 @@ impl InfoHash {
         T: AsRef<[u8]>,
     {
         let v1_hasher = Sha1::digest(bytes.as_ref());
-        let mut v1_hash = [0; 20];
-        let mut v2_hash = None;
-
-        v1_hash.copy_from_slice(&v1_hasher[..20]);
+        let v1_hash: Sha1Hash = v1_hasher.into();
+        let mut v2_hash: Option<Sha256Hash> = None;
 
         if is_v2 {
-            let v2_hasher = Sha256::digest(bytes.as_ref());
-            v2_hash = Some(v2_hasher.to_vec());
+            v2_hash = Some(Sha256::digest(bytes.as_ref()).into());
         }
 
         Self {
@@ -337,10 +328,12 @@ impl InfoHash {
         }
 
         trace!("Parsing info hash value as v2 sha256 hex encoded");
-        let info_hash = hex::decode(value).map_err(|e| {
-            warn!("Failed to parse info hash hex, {}", e);
-            TorrentError::InvalidInfoHash("invalid sha256 hex".to_string())
-        })?;
+        let info_hash = hex::decode(value)
+            .map_err(|e| TorrentError::InvalidInfoHash(e.to_string()))
+            .and_then(|hash| {
+                TryInto::<Sha256Hash>::try_into(hash)
+                    .map_err(|_| TorrentError::InvalidInfoHash("invalid sha256 hash".to_string()))
+            })?;
 
         Ok(Self {
             v1: None,
@@ -427,11 +420,11 @@ impl Debug for InfoHash {
 
 impl Display for InfoHash {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let hash = self
-            .v1_as_str()
-            .unwrap_or_else(|| self.v2_as_str().unwrap_or("INVALID INFO HASH".to_string()));
-
-        write!(f, "{}", hash)
+        match (self.v2.as_ref(), self.v1.as_ref()) {
+            (Some(v2), _) => write!(f, "{}", hex::encode(v2).to_uppercase()),
+            (None, Some(v1)) => write!(f, "{}", hex::encode(v1).to_uppercase()),
+            (None, None) => write!(f, "invalid info hash"),
+        }
     }
 }
 
@@ -545,22 +538,22 @@ impl InfoHashBuilder {
     /// * `Ok(InfoHash)` - An `InfoHash` instance containing the v1 and/or v2 hashes set in the builder, if all validations pass.
     /// * `Err(TorrentError)` - A `TorrentError` if the v1 hash is not 20 bytes long.
     pub fn build(self) -> Result<InfoHash> {
-        if let Some(v1) = self.v1.as_ref() {
-            if v1.len() != 20 {
-                return Err(TorrentError::InvalidInfoHash(
-                    "v1 hash must be 20 bytes".to_string(),
-                ));
-            }
-        }
+        let v1 = match self.v1 {
+            None => None,
+            Some(hash) => Some(
+                TryInto::<Sha1Hash>::try_into(hash)
+                    .map_err(|_| TorrentError::InvalidInfoHash("invalid sha1 hash".to_string()))?,
+            ),
+        };
+        let v2 =
+            match self.v2 {
+                None => None,
+                Some(hash) => Some(TryInto::<Sha256Hash>::try_into(hash).map_err(|_| {
+                    TorrentError::InvalidInfoHash("invalid sha256 hash".to_string())
+                })?),
+            };
 
-        Ok(InfoHash {
-            v1: self.v1.map(|e| {
-                let mut v1_hash = [0; 20];
-                v1_hash.copy_from_slice(e.as_slice());
-                v1_hash
-            }),
-            v2: self.v2,
-        })
+        Ok(InfoHash { v1, v2 })
     }
 }
 
@@ -597,6 +590,7 @@ mod tests {
     use crate::init_logger;
     use crate::tests::read_test_file_to_bytes;
     use crate::{Magnet, TorrentMetadata};
+    use rand::{rng, Rng};
 
     #[test]
     fn test_info_hash_from_metadata_v1() {
@@ -673,7 +667,7 @@ mod tests {
         let result = InfoHashBuilder::default().v1(vec![0, 1, 2, 123]).build();
         assert_eq!(
             Err(TorrentError::InvalidInfoHash(
-                "v1 hash must be 20 bytes".to_string()
+                "invalid sha1 hash".to_string()
             )),
             result
         );
@@ -681,9 +675,11 @@ mod tests {
 
     #[test]
     fn test_info_hash_eq() {
+        let mut v2 = Sha256Hash::default();
+        rng().fill_bytes(&mut v2);
         let info_hash = InfoHash {
             v1: Some([0; 20]),
-            v2: Some(vec![1, 2, 3, 4, 5]),
+            v2: Some(v2),
         };
 
         let other = InfoHash {
@@ -694,7 +690,7 @@ mod tests {
 
         let other = InfoHash {
             v1: None,
-            v2: Some(vec![1, 2, 3, 4, 5]),
+            v2: Some(v2),
         };
         assert_eq!(info_hash, other, "expected the v1 hash to not be compared");
     }
@@ -744,6 +740,23 @@ mod tests {
 
         assert_ne!(None, result.v1, "expected the v1 hash to be present");
         assert_ne!(None, result.v2, "expected the v2 hash to be present");
+    }
+
+    #[test]
+    fn test_try_from_bytes() {
+        let mut bytes: Sha1Hash = Sha1Hash::default();
+        rng().fill_bytes(&mut bytes);
+        let result = InfoHash::try_from_bytes(&bytes).expect("expected the sha1 hash to be valid");
+        assert!(result.v1.is_some(), "expected the sha1 hash to be present");
+
+        let mut bytes: Sha256Hash = Sha256Hash::default();
+        rng().fill_bytes(&mut bytes);
+        let result =
+            InfoHash::try_from_bytes(&bytes).expect("expected the sha256 hash to be valid");
+        assert!(
+            result.v2.is_some(),
+            "expected the sha256 hash to be present"
+        );
     }
 
     #[test]

@@ -1,13 +1,12 @@
-use crate::dht::{Error, PublicKey, Result};
+use crate::dht::{Error, PeerEntry, PublicKey, Result};
 use crate::{InfoHash, Sha1Hash};
 use ed25519::SignatureBytes;
 use log::trace;
 use serde_bencode::value::Value;
 use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
@@ -52,7 +51,7 @@ impl DhtStorage {
             .unwrap_or_default()
     }
 
-    /// Returns an iterator over all torrents stored in the storage.
+    /// Returns an iterator over all torrent info hashes stored in the storage.
     pub fn torrents(&self) -> impl Iterator<Item = &InfoHash> {
         self.peers.keys()
     }
@@ -134,11 +133,6 @@ impl DhtStorage {
         }
     }
 
-    /// Returns an iterator over all info hashes stored in the storage.
-    pub fn info_hashes(&self) -> impl Iterator<Item = &InfoHash> {
-        self.peers.keys()
-    }
-
     /// Purge old peers within the storage.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     pub fn do_cleanup(&mut self) -> usize {
@@ -172,37 +166,6 @@ impl DhtStorage {
         }
 
         Sha1Hash::try_from(Sha1::digest(bytes.as_slice())).map_err(|e| Error::Parse(e.to_string()))
-    }
-}
-
-#[derive(Debug)]
-pub struct PeerEntry {
-    pub addr: SocketAddr,
-    pub added: Instant,
-    pub seed: bool,
-}
-
-impl PeerEntry {
-    pub fn new(addr: SocketAddr, seed: bool) -> Self {
-        Self {
-            addr,
-            added: Instant::now(),
-            seed,
-        }
-    }
-}
-
-impl PartialEq for PeerEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.addr == other.addr
-    }
-}
-
-impl Eq for PeerEntry {}
-
-impl Hash for PeerEntry {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.addr.hash(state);
     }
 }
 
@@ -415,6 +378,49 @@ mod tests {
         }
     }
 
+    mod generate_key {
+        use super::*;
+
+        /// BEP44: test 3 (immutable)
+        #[test]
+        fn test_generate_value_key() {
+            let item = "Hello World!";
+            let expected_result = Sha1Hash::try_from(
+                hex::decode("e5f96f6f38320f0f33959cb4d3d656452117aadb").unwrap(),
+            )
+            .unwrap();
+            let bencode = serde_bencode::to_string(&item.to_string())
+                .expect("expected the item to be serialized");
+            let value = serde_bencode::from_str::<Value>(&bencode)
+                .expect("expected the item to be deserialized");
+
+            let result = DhtStorage::generate_value_key(&value)
+                .expect("expected the value key to be generated");
+
+            assert_eq!(expected_result, result);
+        }
+
+        /// BEP44: test 2 (mutable with salt)
+        #[test]
+        fn test_generate_mutable_key() {
+            let expected_result = Sha1Hash::try_from(
+                hex::decode("411eba73b6f087ca51a3795d9c8c938d365e32c1").unwrap(),
+            )
+            .unwrap();
+            let public_key: PublicKey = PublicKey::try_from(
+                hex::decode("77ff84905a91936367c01360803104f92432fcd904a43511876df5cdf3e7e548")
+                    .unwrap(),
+            )
+            .unwrap();
+            let salt = b"foobar";
+
+            let result = DhtStorage::generate_mutable_key(&public_key, Some(salt))
+                .expect("expected the value key to be generated");
+
+            assert_eq!(expected_result, result);
+        }
+    }
+
     mod calculate_hash {
         use super::*;
         use rand::{rng, Rng};
@@ -459,7 +465,7 @@ mod tests {
 
         storage.register(&info_hash);
 
-        let result = storage.info_hashes().cloned().collect::<Vec<_>>();
+        let result = storage.torrents().cloned().collect::<Vec<_>>();
         assert!(
             result.contains(&info_hash),
             "expected info hash {} to have been present within the storage",

@@ -4,6 +4,7 @@
 ![Version](https://img.shields.io/github/v/tag/yoep/fx-torrent?label=version)
 [![Crates](https://img.shields.io/crates/v/fx-torrent)](https://crates.io/crates/fx-torrent)
 [![License: Apache-2.0](https://img.shields.io/github/license/yoep/fx-torrent)](./LICENSE)
+[![Documentation](https://docs.rs/fx-torrent/badge.svg)](https://docs.rs/fx-torrent/0.5.1/fx_torrent/)
 [![codecov](https://codecov.io/gh/yoep/fx-torrent/graph/badge.svg?token=CDT6SG6YEL)](https://codecov.io/gh/yoep/fx-torrent)
 
 FX-Torrent is the most complete BitTorrent implementation fully written in Rust, which supports both Linux, MacOS, and Windows.
@@ -25,9 +26,9 @@ Next, create a new `FXTorrentSession` which manages one or more torrents.
 A `Torrent` can be created from a magnet link, torrent file, or passing the raw `TorrentMetadata`.
 
 _create a new session with torrent_
-
 ```rust
-use fx_torrent::torrents::{FxTorrentSession, SessionConfig, TorrentFlags};
+use std::io;
+use fx_torrent::{FxTorrentSession, Session, SessionConfig, TorrentFlags, TorrentMetadata};
 
 // The fx-torrent crate makes use of async tokio runtimes
 // this requires that new sessions and torrents need to be created within an async context
@@ -41,13 +42,19 @@ async fn main() -> Result<(), io::Error> {
                 .build(),
         )
         .build()
-        .unwrap();
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     // Create a torrent from a magnet link
-    let magnet_torrent = session.session.add_torrent_from_uri("magnet:?XXX", TorrentFlags::default()).await;
+    let magnet_torrent = session.add_torrent_from_uri("magnet:?XXX", TorrentFlags::default()).await;
 
     // Create a torrent from a torrent file
-    let file_torrent = session.session.add_torrent_from_uri("/tmp/example.torrent", TorrentFlags::default()).await;
+    let file_torrent = session.add_torrent_from_uri("/tmp/example.torrent", TorrentFlags::default()).await;
+
+    // Create a torrent from metadata info
+    let data: &[u8] = &[0; 1024];
+    let metadata: TorrentMetadata = TorrentMetadata::try_from(data)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let metadata_torrent = session.add_torrent_from_metadata(metadata, TorrentFlags::Paused).await;
 
     Ok(())
 }
@@ -85,6 +92,7 @@ It uses [Ratatui](https://ratatui.rs/) as the terminal UI library.
 - [x] [BEP33](https://www.bittorrent.org/beps/bep_0033.html) - DHT scrape
 - [x] [BEP40](https://www.bittorrent.org/beps/bep_0040.html) - Canonical Peer Priority
 - [x] [BEP42](https://www.bittorrent.org/beps/bep_0042.html) - DHT Security extension
+- [ ] [BEP43](https://www.bittorrent.org/beps/bep_0043.html) - Read-only DHT Nodes
 - [x] [BEP44](https://www.bittorrent.org/beps/bep_0044.html) - Storing arbitrary data in the DHT
 - [x] [BEP47](https://www.bittorrent.org/beps/bep_0047.html) - Padding files and extended file attributes
 - [x] [BEP48](https://www.bittorrent.org/beps/bep_0048.html) - Tracker Protocol Extension: Scrape

@@ -3,37 +3,37 @@ use crate::operation::{TorrentOperation, TorrentOperationResult};
 use crate::peer::PeerDiscovery;
 use crate::{InnerTorrent, TorrentContext};
 use async_trait::async_trait;
-use futures::future::BoxFuture;
-use futures::stream::FuturesUnordered;
-use futures::{FutureExt, StreamExt};
 use log::debug;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::task::JoinHandle;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
 const RETRIEVE_INTERVAL: Duration = Duration::from_secs(90);
 const RETRIEVE_SHORT_INTERVAL: Duration = Duration::from_secs(30);
-const RETRIEVE_TIMEOUT: Duration = Duration::from_secs(10);
+const RETRIEVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Retrieve potential peer addresses for the torrent through the DHT network.
 #[derive(Debug)]
 pub struct TorrentDhtPeersOperation {
     last_executed: Option<Instant>,
-    in_flight: FuturesUnordered<BoxFuture<'static, ()>>,
+    active_tasks: Vec<JoinHandle<()>>,
+    retrieve_timeout: Duration,
 }
 
 impl TorrentDhtPeersOperation {
-    pub fn new() -> Self {
+    pub fn new(retrieve_timeout: Option<Duration>) -> Self {
         Self {
             last_executed: Default::default(),
-            in_flight: Default::default(),
+            active_tasks: Default::default(),
+            retrieve_timeout: retrieve_timeout.unwrap_or(RETRIEVE_TIMEOUT),
         }
     }
 
-    /// Poll the currently in-flight DHT operations for completion.
-    fn poll_in_flight(&mut self) {
-        while self.in_flight.next().now_or_never().flatten().is_some() {}
+    /// Periodically remove handles for tasks that have already finished
+    fn cleanup_finished_tasks(&mut self) {
+        self.active_tasks.retain(|handle| !handle.is_finished());
     }
 
     /// Returns `true` when new peers should be requested from the DHT network, else `false`.
@@ -67,9 +67,10 @@ impl TorrentDhtPeersOperation {
             context.command_sender().clone(),
             context.callbacks().clone(),
         );
-        self.in_flight.push(Box::pin(async move {
+        let timeout = self.retrieve_timeout;
+        self.active_tasks.push(tokio::spawn(async move {
             let result = dht
-                .get_peers(&info_hash, 3, RETRIEVE_TIMEOUT)
+                .get_peers(&info_hash, 3, timeout)
                 .await
                 .map_err(|_| Error::Timeout);
             match result {
@@ -99,7 +100,7 @@ impl TorrentOperation for TorrentDhtPeersOperation {
         context: &mut TorrentContext,
         _: &[Arc<dyn PeerDiscovery>],
     ) -> TorrentOperationResult {
-        self.poll_in_flight();
+        self.cleanup_finished_tasks();
 
         if self.should_retrieve_peers(context).await {
             self.retrieve_peers(context);
@@ -109,15 +110,21 @@ impl TorrentOperation for TorrentDhtPeersOperation {
     }
 }
 
-unsafe impl Send for TorrentDhtPeersOperation {}
-unsafe impl Sync for TorrentDhtPeersOperation {}
+impl Drop for TorrentDhtPeersOperation {
+    fn drop(&mut self) {
+        self.active_tasks
+            .drain(..)
+            .for_each(|handle| handle.abort());
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dht::DhtTracker;
-    use crate::{create_torrent_context, init_logger};
+    use crate::{create_torrent_context, init_logger, timeout};
     use tempfile::tempdir;
+    use tokio::time;
 
     #[tokio::test]
     async fn test_execute() {
@@ -138,7 +145,7 @@ mod tests {
             vec![],
             Some(dht)
         );
-        let mut operation = TorrentDhtPeersOperation::new();
+        let mut operation = TorrentDhtPeersOperation::new(Some(Duration::from_millis(100)));
 
         // execute the operation
         let result = operation.execute(&mut context, vec![].as_slice()).await;
@@ -148,13 +155,33 @@ mod tests {
         let result = &operation.last_executed;
         assert_ne!(&None, result, "expected `last_executed` to have been set");
 
-        // check if the in-flight operation has been set
-        let result = operation.in_flight.len();
-        assert_eq!(1, result, "expected `in_flight` to have one operation");
+        // check if the active task has been added
+        let result = operation.active_tasks.len();
+        assert_eq!(1, result, "expected `active_tasks` to have one operation");
 
         // run the operation again
         let result = operation.execute(&mut context, vec![].as_slice()).await;
         assert_eq!(TorrentOperationResult::Continue, result);
+
+        // run till completion
+        timeout!(
+            async {
+                loop {
+                    let _ = operation.execute(&mut context, vec![].as_slice()).await;
+                    if operation.active_tasks.len() == 0 {
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(10)).await;
+                }
+            },
+            Duration::from_millis(250),
+            "expected the operation to complete"
+        );
+        assert_eq!(
+            0,
+            operation.active_tasks.len(),
+            "expected `active_tasks` to be empty"
+        );
     }
 
     mod should_retrieve_peers {
@@ -174,7 +201,7 @@ mod tests {
                 vec![],
                 None
             );
-            let operation = TorrentDhtPeersOperation::new();
+            let operation = TorrentDhtPeersOperation::new(None);
 
             let result = operation.should_retrieve_peers(&context).await;
             assert_eq!(
@@ -202,7 +229,7 @@ mod tests {
                 vec![],
                 Some(dht)
             );
-            let mut operation = TorrentDhtPeersOperation::new();
+            let mut operation = TorrentDhtPeersOperation::new(None);
 
             // when the operation has not been executed yet, it should return true
             operation.last_executed = None;

@@ -749,9 +749,9 @@ impl FxTorrentSessionBuilder {
                 #[cfg(feature = "dht")]
                 TorrentOperationFactory::new(|| Box::new(TorrentDhtNodesOperation::new())),
                 #[cfg(feature = "dht")]
-                TorrentOperationFactory::new(|| Box::new(TorrentDhtPeersOperation::new())),
+                TorrentOperationFactory::new(|| Box::new(TorrentDhtPeersOperation::new(None))),
                 TorrentOperationFactory::new(|| Box::new(TorrentConnectPeersOperation::new(true))),
-                TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new())),
+                TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new(None))),
                 TorrentOperationFactory::new(|| {
                     Box::new(TorrentCreatePiecesAndFilesOperation::new())
                 }),
@@ -1082,7 +1082,7 @@ pub mod tests {
             .extensions(DEFAULT_TORRENT_EXTENSIONS())
             .operations(vec![
                 TorrentOperationFactory::new(|| Box::new(TorrentConnectPeersOperation::new(true))),
-                TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new())),
+                TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new(None))),
                 TorrentOperationFactory::new(|| {
                     Box::new(TorrentCreatePiecesAndFilesOperation::new())
                 }),

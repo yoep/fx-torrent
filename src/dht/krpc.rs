@@ -1,6 +1,6 @@
 use crate::dht::compact::{CompactIPv4Nodes, CompactIPv6Nodes};
 use crate::dht::{Error, NodeId, NodeToken, Result};
-use crate::{CompactIpAddr, InfoHash};
+use crate::{CompactIpAddr, InfoHash, Sha1Hash};
 use bitmask_enum::bitmask;
 use log::debug;
 use serde::de::{DeserializeOwned, IgnoredAny, MapAccess, SeqAccess};
@@ -453,7 +453,8 @@ pub struct PutResponse {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct GetRequest {
     pub id: NodeId,
-    pub target: String,
+    #[serde(with = "serde_bytes")]
+    pub target: Sha1Hash,
     #[serde(default, rename = "seq", skip_serializing_if = "Option::is_none")]
     pub sequence_nr: Option<u64>,
 }

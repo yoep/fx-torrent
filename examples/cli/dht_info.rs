@@ -3,7 +3,8 @@ use crate::widgets::InputWidget;
 use async_trait::async_trait;
 use crossterm::event::KeyCode;
 use fx_callback::{Callback, Subscription};
-use fx_torrent::dht::{DhtEvent, DhtTracker, Node, NodeState};
+use fx_torrent::dht::{DhtEvent, DhtTracker, Node, NodeState, PeerEntry};
+use fx_torrent::peer::Peer;
 use fx_torrent::{format_bytes, InfoHash};
 use ratatui::layout::Constraint::{Fill, Length, Percentage};
 use ratatui::layout::{Layout, Rect};
@@ -14,7 +15,7 @@ use ratatui::widgets::{
     Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Sparkline, Table, TableState, Widget,
 };
 use ratatui::Frame;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -23,11 +24,13 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 pub(crate) const DHT_INFO_WIDGET_NAME: &str = "DHT";
 const CHECKMARK_CHAR: &str = "\u{2713}";
+const UPDATE_INTERVAL: Duration = Duration::from_secs(20);
 
 #[derive(Debug)]
 pub struct DhtInfoWidget {
     data: DhtData,
     dht: DhtTracker,
+    last_updated: Instant,
     state: DhtInfoState,
     node_info_widget: DhtNodeInfoWidget,
     add_node_widget: DhtAddNodeWidget,
@@ -44,6 +47,7 @@ impl DhtInfoWidget {
         Self {
             data: Default::default(),
             dht,
+            last_updated: Instant::now(),
             state: DhtInfoState::Nodes,
             node_info_widget: DhtNodeInfoWidget::new(nodes),
             add_node_widget: DhtAddNodeWidget::new(command_sender),
@@ -64,11 +68,18 @@ impl DhtInfoWidget {
                     self.node_info_widget.add_node(node);
                 }
             }
+            DhtEvent::InfoHashAdded(info_hash) => {
+                self.peers_widget.add_info_hash(info_hash);
+            }
+            DhtEvent::PeerUpdated(info_hash, addr) => {
+                self.peers_widget.update_peer(info_hash, addr);
+            }
             DhtEvent::Stats(metrics) => {
                 self.data.total_nodes = metrics.nodes.get();
                 self.data.pending_queries = metrics.pending_queries.get();
                 self.data.errors = metrics.errors.total();
                 self.data.discovered_peers = metrics.discovered_peers.get();
+                self.data.discovered_info_hashes = metrics.discovered_info_hashes.get();
 
                 self.data.bytes_in.push(metrics.bytes_in.get());
                 if self.data.bytes_in.len() >= PERFORMANCE_HISTORY {
@@ -96,6 +107,13 @@ impl DhtInfoWidget {
             }
         }
     }
+
+    /// Execute a full info update of the DHT network.
+    async fn on_update(&mut self) {
+        let peers = self.dht.peers().await;
+        self.peers_widget.tick(peers).await;
+        self.last_updated = Instant::now();
+    }
 }
 
 #[async_trait]
@@ -112,11 +130,10 @@ impl FXWidget for DhtInfoWidget {
             self.handle_command_event(command).await;
         }
 
-        let info_hashes = self.dht.info_hashes().await;
-        self.data.discovered_info_hashes = info_hashes.len() as u64;
-
         self.node_info_widget.tick().await;
-        self.peers_widget.tick(info_hashes).await;
+        if self.last_updated.elapsed() >= UPDATE_INTERVAL {
+            self.on_update().await;
+        }
     }
 
     fn on_key_event(&mut self, mut event: FXKeyEvent) {
@@ -510,12 +527,26 @@ impl DhtPeerStorageWidget {
         }
     }
 
-    async fn tick(&mut self, info_hashes: Vec<InfoHash>) {
-        for info_hash in info_hashes {
-            self.info_hashes
-                .entry(info_hash)
-                .or_insert_with(PeerStorageData::default);
+    async fn tick(&mut self, peers: HashMap<InfoHash, HashSet<PeerEntry>>) {
+        for (info_hash, peers) in peers {
+            let data = self.get_or_insert(&info_hash);
+            data.peers.extend(peers.into_iter().map(|e| e.addr));
         }
+    }
+
+    fn add_info_hash(&mut self, info_hash: &InfoHash) {
+        let _ = self.get_or_insert(info_hash);
+    }
+
+    fn update_peer(&mut self, info_hash: &InfoHash, peer: &SocketAddr) {
+        let data = self.get_or_insert(info_hash);
+        data.peers.insert(*peer);
+    }
+
+    fn get_or_insert(&mut self, info_hash: &InfoHash) -> &mut PeerStorageData {
+        self.info_hashes
+            .entry(info_hash.clone())
+            .or_insert_with(PeerStorageData::default)
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
@@ -527,7 +558,9 @@ impl DhtPeerStorageWidget {
         let rows = self
             .info_hashes
             .iter()
-            .map(|(info_hash, data)| Row::new(vec![info_hash.to_string(), data.peers.to_string()]))
+            .map(|(info_hash, data)| {
+                Row::new(vec![info_hash.to_string(), data.peers.len().to_string()])
+            })
             .collect::<Vec<Row>>();
 
         Widget::render(
@@ -548,5 +581,5 @@ fn info_header_style() -> Style {
 
 #[derive(Debug, Default)]
 struct PeerStorageData {
-    peers: usize,
+    peers: HashSet<SocketAddr>,
 }

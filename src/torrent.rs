@@ -3601,7 +3601,7 @@ mod tests {
                 vec![
                     Box::new(TorrentStatsOperation::new()),
                     Box::new(TorrentConnectPeersOperation::new(false)),
-                    Box::new(TorrentMetadataOperation::new())
+                    Box::new(TorrentMetadataOperation::new(None))
                 ],
                 vec![Box::new(TcpPeerDiscovery::new().await.unwrap())],
                 |_| { Box::new(MemoryStorage::new()) },

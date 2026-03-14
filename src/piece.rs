@@ -201,7 +201,7 @@ impl Piece {
 
     /// Mark this piece as fully completed.
     pub(crate) fn mark_completed(&mut self) {
-        self.completed_parts.set_all();
+        self.completed_parts.fill(true);
     }
 
     /// Mark a part of this piece as completed
