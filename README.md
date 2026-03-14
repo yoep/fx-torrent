@@ -1,7 +1,7 @@
 # FX-Torrent
 
 ![Build](https://github.com/yoep/fx-torrent/workflows/Build/badge.svg)
-![Version](https://img.shields.io/github/v/tag/yoep/fx-torrent?label=version)
+[![Version](https://img.shields.io/github/v/tag/yoep/fx-torrent?label=version)](https://github.com/yoep/fx-torrent/releases/tag/v0.5.1)
 [![Crates](https://img.shields.io/crates/v/fx-torrent)](https://crates.io/crates/fx-torrent)
 [![License: Apache-2.0](https://img.shields.io/github/license/yoep/fx-torrent)](./LICENSE)
 [![Documentation](https://docs.rs/fx-torrent/badge.svg)](https://docs.rs/fx-torrent/0.5.1/fx_torrent/)
