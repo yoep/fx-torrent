@@ -1,53 +1,138 @@
 use crate::operation::{TorrentOperation, TorrentOperationResult};
 use crate::peer::PeerDiscovery;
-use crate::{TorrentContext, TorrentFlags, TorrentState};
+use crate::{InnerTorrent, TorrentContext, TorrentFlags, TorrentMetadataInfo, TorrentState};
 use async_trait::async_trait;
-use log::trace;
+use log::{debug, info, trace, warn};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::time::{Duration, Instant};
+use tokio::task::JoinHandle;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
+
+const OPERATION_NAME: &str = "retrieve metadata operation";
+const RETRIEVE_INTERVAL: Duration = Duration::from_secs(20);
+const RETRIEVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The torrent metadata operation is responsible for checking if the metadata for a torrent is present and if not, retrieving it from peers.
 #[derive(Debug)]
 pub struct TorrentMetadataOperation {
-    info: Mutex<MetadataInfo>,
+    metadata_present: bool,
+    active_tasks: Vec<JoinHandle<()>>,
+    last_executed: Option<Instant>,
+    retrieve_timeout: Duration,
 }
 
 impl TorrentMetadataOperation {
-    pub fn new() -> Self {
+    /// Create a new torrent metadata operation.
+    pub fn new(retrieve_timeout: Option<Duration>) -> Self {
         Self {
-            info: Mutex::new(MetadataInfo {
-                requesting_metadata: false,
-                metadata_present: false,
-            }),
+            metadata_present: false,
+            active_tasks: Vec::new(),
+            last_executed: None,
+            retrieve_timeout: retrieve_timeout.unwrap_or(RETRIEVE_TIMEOUT),
         }
     }
 
-    async fn is_metadata_known(&self, torrent: &TorrentContext) -> bool {
-        // check if we've already checked for the presence of the metadata before
-        // if so, use the cached information
-        if self.info.lock().await.metadata_present {
-            return true;
-        }
+    /// Returns `true` if the metadata should be retrieved, else `false`.
+    fn should_retrieve_metadata(&self, torrent: &TorrentContext) -> bool {
+        let is_execute_tick_allowed = self
+            .last_executed
+            .map_or(true, |last| last.elapsed() >= RETRIEVE_INTERVAL);
 
-        if torrent.metadata().info.is_some() {
-            self.info.lock().await.metadata_present = true;
-            return true;
-        }
-
-        false
+        torrent.options().contains(TorrentFlags::Metadata) && is_execute_tick_allowed
     }
 
-    async fn is_metadata_retrieval_enabled(&self, torrent: &TorrentContext) -> bool {
-        torrent.options().contains(TorrentFlags::Metadata)
+    /// Periodically remove handles for tasks that have already finished
+    fn cleanup_finished_tasks(&mut self) {
+        self.active_tasks.retain(|handle| !handle.is_finished());
+    }
+
+    /// Synchronizes the internal `metadata_present` flag with the [`TorrentContext`].
+    fn update_local_state(&mut self, torrent: &TorrentContext) {
+        let metadata = torrent.metadata();
+        self.metadata_present = metadata.info.is_some();
+    }
+
+    /// Try to retrieve the metadata from either peers or the DHT network if enabled.
+    async fn retrieve_metadata(&mut self, torrent: &mut TorrentContext) {
+        debug!("Torrent {} initiating metadata retrieval", torrent);
+        self.retrieve_peer_metadata(torrent).await;
+        self.retrieve_dht_metadata(torrent).await;
+        self.last_executed = Some(Instant::now());
+    }
+
+    #[cfg(feature = "extension-metadata")]
+    async fn retrieve_peer_metadata(&self, torrent: &TorrentContext) {
+        // check if there have been any peers discovered yet
+        // if not, we want to retrieve the peers from trackers
+        if torrent.discovered_peers().await.len() == 0 {
+            trace!("No peers discovered yet, requesting from trackers");
+            torrent.make_announce_all().await;
+        }
+
+        // once at least 1 connection is established,
+        // the peer [MetadataExtensionMessage] handles metadata retrieval, if enabled
+    }
+
+    #[cfg(not(feature = "extension-metadata"))]
+    async fn retrieve_peer_metadata(&self, _: &TorrentContext) {
+        // no-op, as we're unable to retrieve metadata from peers without the metadata extension
+    }
+
+    #[cfg(feature = "dht")]
+    async fn retrieve_dht_metadata(&mut self, torrent: &TorrentContext) {
+        let dht = match torrent.dht().inner.as_ref() {
+            None => return,
+            Some(dht) => dht.clone(),
+        };
+
+        let info_hash = torrent.metadata().info_hash.clone();
+        let torrent = InnerTorrent::new(
+            torrent.handle(),
+            torrent.command_sender().clone(),
+            torrent.callbacks().clone(),
+        );
+        let timeout = self.retrieve_timeout;
+        self.active_tasks.push(tokio::spawn(async move {
+            trace!("Torrent {} retrieving metadata from DHT network", torrent);
+            let result = dht
+                .get::<TorrentMetadataInfo>(info_hash.short_info_hash_bytes(), timeout, 5)
+                .await;
+
+            match result {
+                Ok(Some(metadata)) => {
+                    torrent.set_metadata(metadata).await;
+                    info!(
+                        "Torrent {} DHT network retrieved metadata for {}",
+                        torrent, info_hash
+                    );
+                }
+                Ok(None) => {
+                    debug!(
+                        "Torrent {} DHT network couldn't find metadata for {}",
+                        torrent, info_hash
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "Torrent {} DHT network failed to retrieve metadata for {}, {}",
+                        torrent, info_hash, e
+                    );
+                }
+            };
+        }));
+    }
+
+    #[cfg(not(feature = "dht"))]
+    async fn retrieve_dht_metadata(&self, _: &TorrentContext) {
+        // no-op, as we're unable to retrieve metadata from the DHT network without the dht feature enabled
     }
 }
 
 #[async_trait]
 impl TorrentOperation for TorrentMetadataOperation {
     fn name(&self) -> &str {
-        "retrieve metadata operation"
+        OPERATION_NAME
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
@@ -56,45 +141,45 @@ impl TorrentOperation for TorrentMetadataOperation {
         torrent: &mut TorrentContext,
         _: &[Arc<dyn PeerDiscovery>],
     ) -> TorrentOperationResult {
-        let is_metadata_known = self.is_metadata_known(&torrent).await;
-
-        if is_metadata_known {
+        self.cleanup_finished_tasks();
+        self.update_local_state(torrent);
+        if self.metadata_present {
             return TorrentOperationResult::Continue;
         }
 
-        // check if the metadata should be retrieved from peers
-        if self.is_metadata_retrieval_enabled(&torrent).await
-            && !self.info.lock().await.requesting_metadata
-        {
-            // update the state of the torrent
+        if self.should_retrieve_metadata(torrent) {
             torrent.update_state(TorrentState::RetrievingMetadata);
-
-            // check if there have been any peers discovered yet
-            // if not, we want to retrieve the peers from trackers
-            if torrent.discovered_peers().await.len() == 0 {
-                trace!("No peers discovered yet, requesting from trackers");
-                torrent.make_announce_all().await;
-            }
-
-            self.info.lock().await.requesting_metadata = true;
+            self.retrieve_metadata(torrent).await;
         }
 
+        // in both cases, we want to stop the operations chain as the torrent cannot continue
+        // until the metadata is known
         TorrentOperationResult::Stop
     }
 }
 
-#[derive(Debug)]
-struct MetadataInfo {
-    requesting_metadata: bool,
-    metadata_present: bool,
+impl Drop for TorrentMetadataOperation {
+    fn drop(&mut self) {
+        self.active_tasks
+            .drain(..)
+            .for_each(|handle| handle.abort());
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent_context;
+    use crate::dht::DhtTracker;
     use crate::init_logger;
+    use crate::{create_torrent_context, timeout};
     use tempfile::tempdir;
+    use tokio::time;
+
+    #[test]
+    fn test_name() {
+        let operation = TorrentMetadataOperation::new(None);
+        assert_eq!(OPERATION_NAME, operation.name());
+    }
 
     #[tokio::test]
     async fn test_execute_metadata_known() {
@@ -106,9 +191,10 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
-            vec![]
+            vec![],
+            DhtOption::none()
         );
-        let mut operation = TorrentMetadataOperation::new();
+        let mut operation = TorrentMetadataOperation::new(None);
 
         let result = operation.execute(&mut context, vec![].as_slice()).await;
 
@@ -126,12 +212,78 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
-            vec![]
+            vec![],
+            DhtOption::none()
         );
-        let mut operation = TorrentMetadataOperation::new();
+        let mut operation = TorrentMetadataOperation::new(None);
 
         let result = operation.execute(&mut context, vec![].as_slice()).await;
 
         assert_eq!(TorrentOperationResult::Stop, result);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "dht")]
+    async fn test_execute_dht() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
+        let dht = DhtTracker::builder()
+            .enable_indexing(false)
+            .default_routing_nodes()
+            .build()
+            .await
+            .unwrap();
+        let (mut context, _) = create_torrent_context!(
+            uri,
+            temp_path,
+            TorrentFlags::Metadata,
+            TorrentConfig::builder().build(),
+            vec![],
+            DhtOption::new(dht)
+        );
+        let mut operation = TorrentMetadataOperation::new(Some(Duration::from_millis(100)));
+
+        // execute the operation to create a new DHT operation
+        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        assert_eq!(TorrentOperationResult::Stop, result);
+        assert_ne!(
+            None, operation.last_executed,
+            "expected last_executed to been set"
+        );
+        assert_eq!(
+            1,
+            operation.active_tasks.len(),
+            "expected a DHT operation to have been in_flight"
+        );
+
+        // execute it again, the in_flight should not have been updated
+        let _ = operation.execute(&mut context, vec![].as_slice()).await;
+        assert_eq!(
+            1,
+            operation.active_tasks.len(),
+            "expected a DHT operation to still be in_flight"
+        );
+
+        // run till completion
+        timeout!(
+            async {
+                loop {
+                    let _ = operation.execute(&mut context, vec![].as_slice()).await;
+                    if operation.active_tasks.is_empty() {
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(10)).await;
+                }
+            },
+            Duration::from_millis(200),
+            "expected the DHT operation to have been completed"
+        );
+        assert_eq!(
+            0,
+            operation.active_tasks.len(),
+            "expected the DHT operation to be completed"
+        );
     }
 }

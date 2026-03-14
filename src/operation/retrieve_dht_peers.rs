@@ -14,20 +14,22 @@ use tracing::instrument;
 
 const RETRIEVE_INTERVAL: Duration = Duration::from_secs(90);
 const RETRIEVE_SHORT_INTERVAL: Duration = Duration::from_secs(30);
-const RETRIEVE_TIMEOUT: Duration = Duration::from_secs(10);
+const RETRIEVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Retrieve potential peer addresses for the torrent through the DHT network.
 #[derive(Debug)]
 pub struct TorrentDhtPeersOperation {
     last_executed: Option<Instant>,
     in_flight: FuturesUnordered<BoxFuture<'static, ()>>,
+    retrieve_timeout: Duration,
 }
 
 impl TorrentDhtPeersOperation {
-    pub fn new() -> Self {
+    pub fn new(retrieve_timeout: Option<Duration>) -> Self {
         Self {
             last_executed: Default::default(),
             in_flight: Default::default(),
+            retrieve_timeout: retrieve_timeout.unwrap_or(RETRIEVE_TIMEOUT),
         }
     }
 
@@ -67,9 +69,10 @@ impl TorrentDhtPeersOperation {
             context.command_sender().clone(),
             context.callbacks().clone(),
         );
+        let timeout = self.retrieve_timeout;
         self.in_flight.push(Box::pin(async move {
             let result = dht
-                .get_peers(&info_hash, 3, RETRIEVE_TIMEOUT)
+                .get_peers(&info_hash, 3, timeout)
                 .await
                 .map_err(|_| Error::Timeout);
             match result {
@@ -138,7 +141,7 @@ mod tests {
             vec![],
             Some(dht)
         );
-        let mut operation = TorrentDhtPeersOperation::new();
+        let mut operation = TorrentDhtPeersOperation::new(None);
 
         // execute the operation
         let result = operation.execute(&mut context, vec![].as_slice()).await;
@@ -174,7 +177,7 @@ mod tests {
                 vec![],
                 None
             );
-            let operation = TorrentDhtPeersOperation::new();
+            let operation = TorrentDhtPeersOperation::new(None);
 
             let result = operation.should_retrieve_peers(&context).await;
             assert_eq!(
@@ -202,7 +205,7 @@ mod tests {
                 vec![],
                 Some(dht)
             );
-            let mut operation = TorrentDhtPeersOperation::new();
+            let mut operation = TorrentDhtPeersOperation::new(None);
 
             // when the operation has not been executed yet, it should return true
             operation.last_executed = None;

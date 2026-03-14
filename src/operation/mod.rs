@@ -35,9 +35,9 @@ pub(crate) const DEFAULT_OPERATIONS: fn() -> Vec<Box<dyn TorrentOperation>> = ||
         #[cfg(feature = "dht")]
         Box::new(TorrentDhtNodesOperation::new()),
         #[cfg(feature = "dht")]
-        Box::new(TorrentDhtPeersOperation::new()),
+        Box::new(TorrentDhtPeersOperation::new(None)),
         Box::new(TorrentConnectPeersOperation::new(true)),
-        Box::new(TorrentMetadataOperation::new()),
+        Box::new(TorrentMetadataOperation::new(None)),
         Box::new(TorrentCreatePiecesAndFilesOperation::new()),
         Box::new(TorrentFileValidationOperation::new()),
     ]

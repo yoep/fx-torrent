@@ -468,7 +468,7 @@ impl App {
             TorrentOperationFactory::new(move || {
                 Box::new(TorrentConnectPeersOperation::new(webseeds_enabled))
             }),
-            TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new())),
+            TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new(None))),
             TorrentOperationFactory::new(|| Box::new(TorrentCreatePiecesAndFilesOperation::new())),
             TorrentOperationFactory::new(|| Box::new(TorrentFileValidationOperation::new())),
         ];
@@ -490,7 +490,7 @@ impl App {
             operation_index += 1;
             operations.insert(
                 operation_index,
-                TorrentOperationFactory::new(|| Box::new(TorrentDhtPeersOperation::new())),
+                TorrentOperationFactory::new(|| Box::new(TorrentDhtPeersOperation::new(None))),
             );
         }
 
