@@ -701,24 +701,21 @@ impl DhtTracker {
 
         let mut item_stream = futures::stream::iter(nodes)
             .map(|node| async move {
-                select! {
-                    _ = time::sleep(timeout) => Err(Error::Timeout),
-                    result = self.internal_get_item(
-                        &hash,
-                        None,
-                        None,
-                        None,
-                        &node,
-                        n_depth
-                    ) => result,
-                }
+                self.internal_get_item(&hash, None, None, None, &node, n_depth, timeout)
+                    .await
             })
             .buffer_unordered(5);
 
         while let Some(item) = item_stream.next().await {
-            if let Some(item) = item.ok().flatten() {
-                let bytes = serde_bencode::to_bytes(&item)?;
-                return Ok(Some(serde_bencode::from_bytes::<V>(bytes.as_slice())?));
+            match item {
+                Ok(Some(item)) => {
+                    let bytes = serde_bencode::to_bytes(&item)?;
+                    return Ok(Some(serde_bencode::from_bytes::<V>(bytes.as_slice())?));
+                }
+                Err(e) => {
+                    trace!("{} failed to get item, {}", self, e);
+                }
+                _ => {}
             }
         }
 
@@ -761,25 +758,30 @@ impl DhtTracker {
                 let fn_sequence_nr = sequence_nr.as_ref();
                 let fn_salt = salt.as_ref().map(|e| e.as_ref());
                 async move {
-                    select! {
-                        _ = time::sleep(timeout) => Err(Error::Timeout),
-                        result = self.internal_get_item(
-                            &hash,
-                            fn_sequence_nr,
-                            Some(public_key),
-                            fn_salt,
-                            &node,
-                            n_depth
-                        ) => result,
-                    }
+                    self.internal_get_item(
+                        &hash,
+                        fn_sequence_nr,
+                        Some(public_key),
+                        fn_salt,
+                        &node,
+                        n_depth,
+                        timeout,
+                    )
+                    .await
                 }
             })
             .buffer_unordered(5);
 
         while let Some(item) = item_stream.next().await {
-            if let Some(item) = item.ok().flatten() {
-                let bytes = serde_bencode::to_bytes(&item)?;
-                return Ok(Some(serde_bencode::from_bytes::<V>(bytes.as_slice())?));
+            match item {
+                Ok(Some(item)) => {
+                    let bytes = serde_bencode::to_bytes(&item)?;
+                    return Ok(Some(serde_bencode::from_bytes::<V>(bytes.as_slice())?));
+                }
+                Err(e) => {
+                    trace!("{} failed to get item, {}", self, e);
+                }
+                _ => {}
             }
         }
 
@@ -923,17 +925,19 @@ impl DhtTracker {
         salt: Option<&[u8]>,
         node: &NodeKey,
         depth_left: usize,
+        timeout: Duration,
     ) -> Result<Option<Value>> {
         const MAX_IN_FLIGHT: usize = 5;
-        let result = self
-            .do_get_item(
+        let result = select! {
+            _ = time::sleep(timeout) => Err(Error::Timeout),
+            result = self.do_get_item(
                 hash.clone(),
                 sequence_nr.as_ref().map(|e| **e),
                 public_key.map(|e| e.clone()),
                 salt.map(|e| e.to_vec()),
                 node,
-            )
-            .await?;
+            ) => result,
+        }?;
         if let Some(value) = result.value {
             return Ok(Some(value));
         }
@@ -956,6 +960,7 @@ impl DhtTracker {
                     salt,
                     &node,
                     depth_left.saturating_sub(1),
+                    timeout,
                 )
                 .await
                 .ok()
@@ -1470,6 +1475,7 @@ impl TrackerContext {
         }
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn bootstrap(&mut self, traversal: &mut TraversalAlgorithm) {
         traversal.run(self.routing_table.id, self).await;
     }
@@ -3328,6 +3334,7 @@ impl TrackerContext {
         };
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn stats_tick(&self) {
         self.callbacks
             .invoke(DhtEvent::Stats(self.metrics.snapshot()));
@@ -4063,7 +4070,7 @@ mod tests {
             // announce the peers to the target node
             let peer1 = (Ipv4Addr::LOCALHOST, 8080).into();
             let peer2 = (Ipv4Addr::LOCALHOST, 17000).into();
-            source
+            let _ = source
                 .announce_peer_to(&info_hash, &peer1, false, &target_key)
                 .await
                 .unwrap();
@@ -4089,8 +4096,9 @@ mod tests {
             let result = target.peers().await;
             assert!(
                 result.contains_key(info_hash),
-                "expected the info hash {} to be present",
-                info_hash
+                "expected the info hash {} to be present, {:?}",
+                info_hash,
+                result
             );
 
             // verify if all announced peers are present
@@ -4557,7 +4565,21 @@ mod tests {
                 .expect("expected the announce to succeed");
 
             // retrieve the known info hashes from the target storage
-            let result = target.info_hashes().await;
+            // due to some strange race condition in Github, we'll try a few times to retrieve the info hashes
+            let result: Vec<InfoHash> = {
+                let mut attempt = 0;
+                let mut result = vec![];
+                while attempt < 3 {
+                    result = target.info_hashes().await;
+                    if result.len() == 2 {
+                        break;
+                    }
+
+                    attempt += 1;
+                    time::sleep(Duration::from_millis(2)).await;
+                }
+                result
+            };
             for info_hash in &[info_hash1, info_hash2] {
                 assert!(
                     result.contains(info_hash),
