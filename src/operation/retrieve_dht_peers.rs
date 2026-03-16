@@ -70,7 +70,7 @@ impl TorrentDhtPeersOperation {
         let timeout = self.retrieve_timeout;
         self.active_tasks.push(tokio::spawn(async move {
             let result = dht
-                .get_peers(&info_hash, 3, timeout)
+                .get_peers(&info_hash, 5, timeout)
                 .await
                 .map_err(|_| Error::Timeout);
             match result {

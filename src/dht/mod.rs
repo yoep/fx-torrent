@@ -1,3 +1,28 @@
+/*!
+# DHT
+
+The DHT module of fx-torrent.
+This module can be used as a standalone DHT implementation and doesn't require any interaction with
+other modules in this crate.
+
+## Node Modes
+
+The DHT module supports 2 node modes:
+
+- `client`: This mode is a **read-only** node that can be used to query the DHT network (BEP43).
+- `server`: This mode is used to act as a DHT node and provide services to other nodes in the network.
+
+_example_
+```rust
+use fx_torrent::dht::{DhtTracker, Mode};
+
+DhtTracker::builder()
+    .mode(Mode::Client)
+    .build()
+    .await
+```
+*/
+
 pub use config::*;
 pub use ed25519::*;
 pub use errors::*;
