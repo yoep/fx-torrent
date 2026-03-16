@@ -171,5 +171,55 @@ mod tests {
                 result
             );
         }
+
+        #[tokio::test]
+        async fn test_store() {
+            let value = Value::Int(67);
+            let mut node = DhtNodeHandler::client();
+
+            let result = node.store(value, None);
+
+            assert_eq!(Err(Error::Unsupported), result);
+        }
+    }
+
+    mod server {
+        use super::*;
+        use fx_callback::MultiThreadedCallback;
+        use itertools::Itertools;
+        use std::str::FromStr;
+
+        #[tokio::test]
+        async fn test_register() {
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let mut node = DhtNodeHandler::server(ServerNode::new(
+                Default::default(),
+                (Ipv4Addr::LOCALHOST, 9000).into(),
+                MultiThreadedCallback::new(),
+                16,
+            ));
+
+            // register a new torrent
+            node.register(&info_hash);
+
+            // retrieve the torrents
+            let torrents = node.torrents().collect_vec();
+
+            assert_eq!(1, torrents.len());
+            assert_eq!(&info_hash, torrents[0]);
+        }
+
+        #[tokio::test]
+        async fn test_tick() {
+            let mut node = DhtNodeHandler::server(ServerNode::new(
+                Default::default(),
+                (Ipv4Addr::LOCALHOST, 9000).into(),
+                MultiThreadedCallback::new(),
+                16,
+            ));
+
+            node.tick().await;
+        }
     }
 }
