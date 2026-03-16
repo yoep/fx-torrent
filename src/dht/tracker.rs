@@ -12,8 +12,8 @@ use crate::dht::routing_table::RoutingTable;
 use crate::dht::storage::{DhtStorage, MutableItemProperties};
 use crate::dht::traversal::TraversalAlgorithm;
 use crate::dht::{
-    DhtMetrics, Error, ItemSignature, Node, NodeId, NodeKey, NodeState, NodeToken, PeerEntry,
-    PublicKey, Result, SecretKey, DEFAULT_ROUTING_NODE_SERVERS,
+    Config, DhtMetrics, Error, ItemSignature, Mode, Node, NodeId, NodeKey, NodeState, NodeToken,
+    PeerEntry, PublicKey, Result, SecretKey, DEFAULT_ROUTING_NODE_SERVERS,
 };
 use crate::metrics::Metric;
 use crate::{CompactIpAddr, CompactIpv4Addr, CompactIpv6Addr, InfoHash, Sha1Hash};
@@ -52,10 +52,8 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(60 * 15);
 const BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 5);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
-const INDEX_INFO_HASHES_INTERVAL: Duration = Duration::from_secs(60);
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_BUCKET_SIZE: usize = 8;
-const DEFAULT_MAX_TORRENTS: usize = 16524;
 
 #[derive(Debug)]
 pub enum DhtEvent {
@@ -93,48 +91,39 @@ impl DhtTracker {
 
     /// Create a new DHT node server with the given node ID.
     /// This function allows creating a server with a specific node id.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The node ID of the DHT server.
-    /// * `max_torrents` - The maximum number of torrents that can be tracked by the DHT server.
-    /// * `info_hash_indexing_enabled` - Whether to enable indexing of info hashes within the DHT network.
-    /// * `info_hash_indexing_interval` - The interval at which to index info hashes within the DHT network.
-    /// * `item_verifier` - The verifier to use to validate mutable items in the DHT network.
-    /// * `routing_nodes` - The routing nodes to use to bootstrap the DHT network.
-    pub async fn new(
-        id: NodeId,
-        max_torrents: usize,
-        info_hash_indexing_enabled: bool,
-        info_hash_indexing_interval: Duration,
-        item_verifier: ItemSignature,
-        routing_nodes: Vec<SocketAddr>,
-    ) -> Result<Self> {
+    pub async fn new(config: Config) -> Result<Self> {
         let socket = Arc::new(Self::bind_socket().await?);
         let socket_addr = socket.local_addr()?;
         let (command_sender, command_receiver) = channel!(256);
+        let item_signature = match config.item_signature {
+            None => ItemSignature::new()?,
+            Some(e) => e,
+        };
         let mut context = TrackerContext::new(
-            id,
+            config.id,
             socket,
             socket_addr,
-            info_hash_indexing_enabled,
-            item_verifier,
+            config.info_hash_indexing_enabled,
+            item_signature,
         );
         let metrics = context.metrics.clone();
         let callbacks = context.callbacks.clone();
         let cancellation_token = context.cancellation_token.clone();
 
         // create the observer and traversal algorithm for the node
-        let storage = DhtStorage::new(max_torrents);
+        let storage = DhtStorage::new(config.max_torrents);
         let observer = Observer::new(command_sender.clone());
-        let traversal =
-            TraversalAlgorithm::new(DEFAULT_BUCKET_SIZE, routing_nodes, command_sender.clone());
+        let traversal = TraversalAlgorithm::new(
+            DEFAULT_BUCKET_SIZE,
+            config.routing_nodes,
+            command_sender.clone(),
+        );
 
         // start the context in a separate task
         tokio::spawn(async move {
             context
                 .run(
-                    info_hash_indexing_interval,
+                    config.info_hash_indexing_interval,
                     storage,
                     observer,
                     traversal,
@@ -1044,7 +1033,8 @@ impl Clone for DhtTracker {
 
 #[derive(Debug, Default)]
 pub struct DhtTrackerBuilder {
-    node_id: Option<NodeId>,
+    id: Option<NodeId>,
+    mode: Option<Mode>,
     public_ip: Option<IpAddr>,
     routing_nodes: Vec<SocketAddr>,
     routing_node_urls: Vec<String>,
@@ -1057,13 +1047,19 @@ pub struct DhtTrackerBuilder {
 impl DhtTrackerBuilder {
     /// Set the ID of the node server.
     pub fn node_id(&mut self, id: NodeId) -> &mut Self {
-        self.node_id = Some(id);
+        self.id = Some(id);
         self
     }
 
     /// Set the public ip address of the dht tracker.
     pub fn public_ip(&mut self, ip: IpAddr) -> &mut Self {
         self.public_ip = Some(ip);
+        self
+    }
+
+    /// Set the mode of the DHT node.
+    pub fn mode(&mut self, mode: Mode) -> &mut Self {
+        self.mode = Some(mode);
         self
     }
 
@@ -1139,19 +1135,22 @@ impl DhtTrackerBuilder {
     /// This method panics if no [ItemSignature] has been set and no crypto provider features are enabled.
     /// For more info, see [ItemSignature::new].
     pub async fn build(&mut self) -> Result<DhtTracker> {
-        let node_id = self.node_id.take().unwrap_or_else(|| {
+        let defaults = Config::default();
+        let id = self.id.take().unwrap_or_else(|| {
             self.public_ip
                 .take()
                 .map(|e| NodeId::from_ip(&e))
-                .unwrap_or(NodeId::new())
+                .unwrap_or(defaults.id)
         });
-        let max_torrents = self.max_torrents.unwrap_or(DEFAULT_MAX_TORRENTS);
-        let enable_indexing = self.enable_indexing.unwrap_or(true);
-        let indexing_interval = self.indexing_interval.unwrap_or(INDEX_INFO_HASHES_INTERVAL);
-        let item_verifier = match self.verifier.take() {
-            Some(verifier) => verifier,
-            None => ItemSignature::new()?,
-        };
+        let mode = self.mode.take().unwrap_or(defaults.mode);
+        let max_torrents = self.max_torrents.unwrap_or(defaults.max_torrents);
+        let info_hash_indexing_enabled = self
+            .enable_indexing
+            .unwrap_or(defaults.info_hash_indexing_enabled);
+        let info_hash_indexing_interval = self
+            .indexing_interval
+            .unwrap_or(defaults.info_hash_indexing_interval);
+        let item_signature = self.verifier.take();
         let mut routing_nodes: HashSet<SocketAddr> = self.routing_nodes.drain(..).collect();
 
         for node_url in self.routing_node_urls.drain(..).filter_map(Self::host) {
@@ -1163,14 +1162,15 @@ impl DhtTrackerBuilder {
             }
         }
 
-        DhtTracker::new(
-            node_id,
+        DhtTracker::new(Config {
+            id,
+            mode,
             max_torrents,
-            enable_indexing,
-            indexing_interval,
-            item_verifier,
-            routing_nodes.into_iter().collect::<Vec<_>>(),
-        )
+            info_hash_indexing_enabled,
+            info_hash_indexing_interval,
+            item_signature,
+            routing_nodes: routing_nodes.into_iter().collect::<Vec<_>>(),
+        })
         .await
     }
 
@@ -3724,14 +3724,15 @@ mod tests {
             init_logger!();
             let node_id = NodeId::new();
             let verifier = ItemSignature::new().unwrap();
-            let tracker = DhtTracker::new(
-                node_id,
-                1,
-                true,
-                INDEX_INFO_HASHES_INTERVAL,
-                verifier,
-                vec![],
-            )
+            let tracker = DhtTracker::new(Config {
+                id: node_id,
+                mode: Mode::Server,
+                max_torrents: 1,
+                info_hash_indexing_enabled: true,
+                info_hash_indexing_interval: Duration::from_secs(20),
+                item_signature: Some(verifier),
+                routing_nodes: vec![],
+            })
             .await
             .expect("expected a new DHT server");
 
@@ -3885,7 +3886,7 @@ mod tests {
                 let (_sender, receiver) = channel!(1);
                 incoming
                     .run(
-                        INDEX_INFO_HASHES_INTERVAL,
+                        Duration::from_secs(60),
                         storage,
                         observer,
                         traversal,
@@ -3972,7 +3973,7 @@ mod tests {
 
                 context
                     .run(
-                        INDEX_INFO_HASHES_INTERVAL,
+                        Duration::from_secs(60),
                         storage,
                         Observer::new(sender.clone()),
                         TraversalAlgorithm::new(8, vec![], sender),
@@ -4184,7 +4185,7 @@ mod tests {
             let (sender, _receiver) = channel!(2);
             let mut traversal = TraversalAlgorithm::new(8, vec![], sender.clone());
             let mut observer = Observer::new(sender.clone());
-            let mut storage = DhtStorage::new(DEFAULT_MAX_TORRENTS);
+            let mut storage = DhtStorage::new(256);
             let (announcer, target) = create_node_server_pair!();
             let target_id = target.id().await.unwrap();
             let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();

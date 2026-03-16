@@ -92,7 +92,7 @@ It uses [Ratatui](https://ratatui.rs/) as the terminal UI library.
 - [x] [BEP33](https://www.bittorrent.org/beps/bep_0033.html) - DHT scrape
 - [x] [BEP40](https://www.bittorrent.org/beps/bep_0040.html) - Canonical Peer Priority
 - [x] [BEP42](https://www.bittorrent.org/beps/bep_0042.html) - DHT Security extension
-- [ ] [BEP43](https://www.bittorrent.org/beps/bep_0043.html) - Read-only DHT Nodes
+- [x] [BEP43](https://www.bittorrent.org/beps/bep_0043.html) - Read-only DHT Nodes
 - [x] [BEP44](https://www.bittorrent.org/beps/bep_0044.html) - Storing arbitrary data in the DHT
 - [x] [BEP47](https://www.bittorrent.org/beps/bep_0047.html) - Padding files and extended file attributes
 - [x] [BEP48](https://www.bittorrent.org/beps/bep_0048.html) - Tracker Protocol Extension: Scrape

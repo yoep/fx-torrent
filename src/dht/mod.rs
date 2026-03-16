@@ -1,3 +1,4 @@
+pub use config::*;
 pub use ed25519::*;
 pub use errors::*;
 pub use metrics::*;
@@ -11,6 +12,7 @@ pub use tracker::*;
 mod test_macros;
 
 mod compact;
+mod config;
 mod ed25519;
 mod errors;
 mod krpc;
