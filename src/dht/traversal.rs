@@ -155,7 +155,6 @@ mod tests {
     use crate::dht::observer::Observer;
     use crate::dht::storage::DhtStorage;
     use crate::dht::{DhtEvent, Event};
-    use crate::{channel, create_tracker_context, init_logger};
     use fx_callback::Callback;
     use std::net::Ipv4Addr;
     use std::time::Duration;

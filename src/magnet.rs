@@ -469,7 +469,6 @@ impl MagnetBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_logger;
 
     #[test]
     fn test_magnet_from_str() {

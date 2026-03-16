@@ -1029,10 +1029,9 @@ mod mock {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::init_logger;
+    use crate::create_torrent;
     use crate::tests::{read_test_file_to_bytes, test_resource_filepath};
     use crate::TorrentHealthState;
-    use crate::{create_torrent, timeout};
     use log::info;
     use std::net::Ipv4Addr;
     use std::time::Duration;

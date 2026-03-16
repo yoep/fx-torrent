@@ -103,11 +103,11 @@ impl Storage for MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::create_torrent_context;
     use crate::operation::{
         TorrentCreatePiecesAndFilesOperation, TorrentOperation, TorrentOperationResult,
     };
     use crate::tests::read_test_file_to_bytes;
-    use crate::{create_torrent_context, init_logger};
     use tempfile::tempdir;
 
     #[tokio::test]

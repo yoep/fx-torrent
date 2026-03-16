@@ -2808,10 +2808,7 @@ mod tests {
     use crate::tests::helpers::wait_for_torrent_pieces;
     use crate::tests::read_test_file_to_bytes;
     use crate::torrent::TorrentContext;
-    use crate::{
-        assert_timeout, channel, create_peer_pair, create_torrent, create_utp_socket_pair,
-        init_logger,
-    };
+    use crate::{create_peer_pair, create_torrent};
     use crate::{TorrentState, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS};
     use tempfile::tempdir;
     use tokio::sync::mpsc::channel;
@@ -2892,7 +2889,6 @@ mod tests {
 
     mod handshake {
         use super::*;
-        use crate::timeout;
         use std::net::Ipv4Addr;
         use tokio::net::TcpListener;
         use tokio::sync::oneshot;

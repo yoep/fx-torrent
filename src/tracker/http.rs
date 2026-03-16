@@ -631,11 +631,9 @@ impl FromStr for AnnounceParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
-
-    use crate::init_logger;
     use crate::peer::PeerId;
     use crate::tracker::{AnnounceEvent, TrackerListener, TrackerServer};
+    use std::net::Ipv4Addr;
 
     use log::info;
 

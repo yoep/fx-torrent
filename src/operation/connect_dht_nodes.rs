@@ -133,10 +133,8 @@ impl Debug for TorrentDhtNodesOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::create_torrent_context;
     use crate::dht::DhtTracker;
-    use crate::init_logger;
-    use crate::{create_torrent_context, timeout};
-    use std::time::Duration;
     use tempfile::tempdir;
 
     #[tokio::test]

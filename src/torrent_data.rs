@@ -1,7 +1,7 @@
 use crate::channel::{ChannelReceiver, ChannelSender, Reply};
 use crate::{
-    channel, File, FileAttributeFlags, FileIndex, FilePriority, PartIndex, Piece, PieceIndex,
-    PiecePart, PiecePriority,
+    File, FileAttributeFlags, FileIndex, FilePriority, PartIndex, Piece, PieceIndex, PiecePart,
+    PiecePriority,
 };
 use bit_vec::BitVec;
 use itertools::Itertools;
@@ -957,8 +957,6 @@ mod tests {
     mod pieces {
         use super::*;
 
-        use crate::init_logger;
-
         #[tokio::test]
         async fn test_pieces() {
             init_logger!();
@@ -1071,8 +1069,6 @@ mod tests {
     mod has_bytes {
         use super::*;
 
-        use crate::init_logger;
-
         #[tokio::test]
         async fn test_has_bytes() {
             init_logger!();
@@ -1102,8 +1098,6 @@ mod tests {
 
     mod prioritize_file {
         use super::*;
-
-        use crate::init_logger;
 
         #[tokio::test]
         async fn test_set_file_priorities_single_file() {
@@ -1191,7 +1185,6 @@ mod tests {
 
     mod is_end_game {
         use super::*;
-        use crate::init_logger;
 
         #[tokio::test]
         async fn test_end_game_not_reached() {

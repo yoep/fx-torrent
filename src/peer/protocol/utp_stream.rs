@@ -1074,13 +1074,7 @@ fn is_less_than(a: u16, b: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::peer::protocol::tests::UtpPacketCaptureExtension;
-    use crate::{
-        assert_timeout, create_utp_socket, create_utp_socket_pair, create_utp_stream_pair,
-        init_logger, timeout,
-    };
-
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc::unbounded_channel;
 

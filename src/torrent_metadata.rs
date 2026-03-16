@@ -1300,8 +1300,6 @@ pub mod serde_piece_layers {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::init_logger;
     use std::str::FromStr;
 
     #[test]

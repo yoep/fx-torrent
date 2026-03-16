@@ -586,7 +586,6 @@ pub struct UtpSocketId {
 mod tests {
     use super::*;
     use crate::peer::protocol::UtpStreamState;
-    use crate::{assert_timeout, create_utp_socket, create_utp_socket_pair, init_logger};
     use std::net::Ipv4Addr;
     use std::time::{SystemTime, UNIX_EPOCH};
 

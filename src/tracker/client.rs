@@ -895,10 +895,6 @@ struct TrackerTorrent {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::timeout;
-    use crate::{assert_timeout, init_logger};
-
     use std::str::FromStr;
     use tokio::sync::mpsc::unbounded_channel;
     use url::Url;
