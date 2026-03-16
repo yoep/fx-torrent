@@ -9,7 +9,7 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
 use futures::StreamExt;
 use futures::{future, FutureExt};
 use fx_callback::{Callback, Subscription};
-use fx_torrent::dht::DhtTracker;
+use fx_torrent::dht::{DhtTracker, Mode};
 use fx_torrent::operation::{
     TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation, TorrentDhtNodesOperation,
     TorrentDhtPeersOperation, TorrentFileValidationOperation, TorrentMetadataOperation,
@@ -183,6 +183,7 @@ impl App {
         match command {
             AppCommand::AddTorrentUri(uri) => self.add_torrent_uri(uri.as_str()).await,
             AppCommand::DhtEnabled(enabled) => self.update_dht(enabled).await,
+            AppCommand::DhtClientMode(enabled) => self.update_dht_client_mode(enabled).await,
             AppCommand::DhtBootstrapNodesEnabled(enabled) => {
                 self.update_dht_bootstrap_nodes_enabled(enabled).await
             }
@@ -323,6 +324,11 @@ impl App {
 
     async fn update_dht(&mut self, enabled: bool) {
         self.settings.dht_enabled = enabled;
+        self.recreate_session().await;
+    }
+
+    async fn update_dht_client_mode(&mut self, enabled: bool) {
+        self.settings.dht_client_mode = enabled;
         self.recreate_session().await;
     }
 
@@ -471,6 +477,25 @@ impl App {
             TorrentOperationFactory::new(|| Box::new(TorrentFileValidationOperation::new())),
         ];
         let mut operation_index = 0;
+        let dht = if settings.dht_enabled {
+            let mode = if settings.dht_client_mode {
+                Mode::Client
+            } else {
+                Mode::Server
+            };
+
+            DhtOption::new(
+                DhtTracker::builder()
+                    .mode(mode)
+                    .enable_indexing(settings.dht_info_hash_indexing_enabled)
+                    .enable_default_routing_nodes(settings.dht_bootstrap_nodes_enabled)
+                    .build()
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+            )
+        } else {
+            DhtOption::none()
+        };
 
         // add the initial configurable operations
         if settings.trackers_enabled {
@@ -503,18 +528,7 @@ impl App {
             )
             .session_cache(FxSessionCache::new(SESSION_CACHE_LIMIT))
             .operations(operations)
-            .dht(if settings.dht_enabled {
-                DhtOption::new(
-                    DhtTracker::builder()
-                        .enable_indexing(settings.dht_info_hash_indexing_enabled)
-                        .enable_default_routing_nodes(settings.dht_bootstrap_nodes_enabled)
-                        .build()
-                        .await
-                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
-                )
-            } else {
-                DhtOption::none()
-            })
+            .dht(dht)
             .build()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
@@ -526,6 +540,8 @@ pub enum AppCommand {
     AddTorrentUri(String),
     /// Set if DHT is enabled
     DhtEnabled(bool),
+    /// Set if the DHT node should be a client (read-only) node.
+    DhtClientMode(bool),
     /// Set if DHT should bootstrap through the default routing nodes.
     DhtBootstrapNodesEnabled(bool),
     /// Set if the DHT tracker should enable torrent info hash indexing.

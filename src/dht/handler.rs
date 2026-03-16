@@ -29,6 +29,14 @@ impl DhtNodeHandler {
         Self::Server(server)
     }
 
+    /// Return `true` if the node is a read-only node handler, else `false`.
+    pub fn is_read_only(&self) -> bool {
+        match self {
+            DhtNodeHandler::Client => true,
+            DhtNodeHandler::Server(_) => false,
+        }
+    }
+
     /// Returns the total number of peers stored in the storage.
     pub fn peers_len(&self) -> usize {
         match self {

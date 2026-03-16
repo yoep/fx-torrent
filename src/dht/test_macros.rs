@@ -14,7 +14,7 @@ macro_rules! node {
         let addr: SocketAddr = $addr;
         let state: NodeState = $state;
 
-        Node::new_with_opts(node_id, addr, false, state)
+        Node::new_with_opts(node_id, addr, state)
     }};
 }
 

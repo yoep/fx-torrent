@@ -3,8 +3,7 @@ use crate::widgets::InputWidget;
 use async_trait::async_trait;
 use crossterm::event::KeyCode;
 use fx_callback::{Callback, Subscription};
-use fx_torrent::dht::{DhtEvent, DhtTracker, Node, NodeState, PeerEntry};
-use fx_torrent::peer::Peer;
+use fx_torrent::dht::{DhtEvent, DhtMetrics, DhtTracker, Mode, Node, NodeState, PeerEntry};
 use fx_torrent::{format_bytes, InfoHash};
 use ratatui::layout::Constraint::{Fill, Length, Percentage};
 use ratatui::layout::{Layout, Rect};
@@ -57,6 +56,113 @@ impl DhtInfoWidget {
         }
     }
 
+    fn render_network_data(&self, frame: &mut Frame, area: Rect) {
+        let block = Block::new()
+            .title(" DHT network ")
+            .title_bottom(" Press A to add DHT node ")
+            .borders(Borders::ALL);
+        let layout = Layout::horizontal([Percentage(50), Percentage(50)]);
+        let [metadata, queries] = layout.areas(block.inner(area));
+        let mode = self.dht.mode();
+
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::from("IP: ").bold(),
+                self.data
+                    .ip
+                    .map(|e| e.to_string())
+                    .unwrap_or("--.--.--.--".to_string())
+                    .into(),
+            ]),
+            Line::from(vec![
+                Span::from("Port: ").bold(),
+                self.dht.port().to_string().into(),
+            ]),
+            Line::from(vec![
+                Span::from("Nodes: ").bold(),
+                self.data.total_nodes.to_string().into(),
+            ]),
+            Line::from(vec![
+                Span::from("Pending queries: ").bold(),
+                self.data.pending_queries.to_string().into(),
+            ]),
+            Line::from(vec![
+                Span::from("Discovered peers: ").bold(),
+                self.data.metrics.discovered_peers.get().to_string().into(),
+            ]),
+            Line::from(vec![
+                Span::from("Discovered info hashes: ").bold(),
+                self.data
+                    .metrics
+                    .discovered_info_hashes
+                    .get()
+                    .to_string()
+                    .into(),
+            ]),
+            Line::from(vec![
+                Span::from("Errors: ").bold(),
+                self.data.errors.to_string().into(),
+            ]),
+        ])
+        .render(metadata, frame.buffer_mut());
+
+        if mode == Mode::Server {
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::from("Ping queries: ").bold(),
+                    self.data.metrics.ping_requests.total().to_string().into(),
+                ]),
+                Line::from(vec![
+                    Span::from("Find node queries: ").bold(),
+                    self.data
+                        .metrics
+                        .find_node_requests
+                        .total()
+                        .to_string()
+                        .into(),
+                ]),
+                Line::from(vec![
+                    Span::from("Get peers queries: ").bold(),
+                    self.data
+                        .metrics
+                        .get_peers_requests
+                        .total()
+                        .to_string()
+                        .into(),
+                ]),
+                Line::from(vec![
+                    Span::from("Announce queries: ").bold(),
+                    self.data
+                        .metrics
+                        .announce_peer_requests
+                        .total()
+                        .to_string()
+                        .into(),
+                ]),
+                Line::from(vec![
+                    Span::from("Sample info hashes queries: ").bold(),
+                    self.data
+                        .metrics
+                        .sample_info_hashes_requests
+                        .total()
+                        .to_string()
+                        .into(),
+                ]),
+                Line::from(vec![
+                    Span::from("Put queries: ").bold(),
+                    self.data.metrics.put_requests.total().to_string().into(),
+                ]),
+                Line::from(vec![
+                    Span::from("Get queries: ").bold(),
+                    self.data.metrics.get_requests.total().to_string().into(),
+                ]),
+            ])
+            .render(queries, frame.buffer_mut());
+        }
+
+        block.render(area, frame.buffer_mut());
+    }
+
     async fn handle_event(&mut self, event: &DhtEvent) {
         match event {
             DhtEvent::IDChanged => {}
@@ -78,8 +184,7 @@ impl DhtInfoWidget {
                 self.data.total_nodes = metrics.nodes.get();
                 self.data.pending_queries = metrics.pending_queries.get();
                 self.data.errors = metrics.errors.total();
-                self.data.discovered_peers = metrics.discovered_peers.get();
-                self.data.discovered_info_hashes = metrics.discovered_info_hashes.get();
+                self.data.metrics = metrics.clone();
 
                 self.data.bytes_in.push(metrics.bytes_in.get());
                 if self.data.bytes_in.len() >= PERFORMANCE_HISTORY {
@@ -172,52 +277,12 @@ impl FXWidget for DhtInfoWidget {
         let [nodes_area, peer_area] = details_layout.areas(details_area);
 
         // render the DHT network data
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::from("IP: ").bold(),
-                self.data
-                    .ip
-                    .map(|e| e.to_string())
-                    .unwrap_or("--.--.--.--".to_string())
-                    .into(),
-            ]),
-            Line::from(vec![
-                Span::from("Port: ").bold(),
-                self.dht.port().to_string().into(),
-            ]),
-            Line::from(vec![
-                Span::from("Nodes: ").bold(),
-                self.data.total_nodes.to_string().into(),
-            ]),
-            Line::from(vec![
-                Span::from("Pending queries: ").bold(),
-                self.data.pending_queries.to_string().into(),
-            ]),
-            Line::from(vec![
-                Span::from("Discovered peers: ").bold(),
-                self.data.discovered_peers.to_string().into(),
-            ]),
-            Line::from(vec![
-                Span::from("Discovered info hashes: ").bold(),
-                self.data.discovered_info_hashes.to_string().into(),
-            ]),
-            Line::from(vec![
-                Span::from("Errors: ").bold(),
-                self.data.errors.to_string().into(),
-            ]),
-        ])
-        .block(
-            Block::new()
-                .title("DHT network")
-                .title_bottom(" Press A to add DHT node ")
-                .borders(Borders::ALL),
-        )
-        .render(data_area, frame.buffer_mut());
+        self.render_network_data(frame, data_area);
 
         // render the performance
         Sparkline::default()
             .block(Block::bordered().title(format!(
-                "Down: {}/s",
+                " Down: {}/s ",
                 format_bytes(self.data.bytes_in.last().map(|e| *e as usize).unwrap_or(0))
             )))
             .data(&self.data.bytes_in)
@@ -225,7 +290,7 @@ impl FXWidget for DhtInfoWidget {
             .render(down_performance, frame.buffer_mut());
         Sparkline::default()
             .block(Block::bordered().title(format!(
-                "Up: {}/s",
+                " Up: {}/s ",
                 format_bytes(self.data.bytes_out.last().map(|e| *e as usize).unwrap_or(0))
             )))
             .data(&self.data.bytes_out)
@@ -259,8 +324,7 @@ struct DhtData {
     total_nodes: u64,
     pending_queries: u64,
     errors: u64,
-    discovered_peers: u64,
-    discovered_info_hashes: u64,
+    metrics: DhtMetrics,
     bytes_in: Vec<u64>,
     bytes_out: Vec<u64>,
 }
@@ -374,7 +438,7 @@ impl DhtNodeInfoWidget {
             ],
         )
         .header(header)
-        .block(Block::bordered().title("Nodes"))
+        .block(Block::bordered().title(" Nodes "))
         .row_highlight_style(Style::new().bg(Color::LightYellow).fg(Color::DarkGray))
         .highlight_spacing(HighlightSpacing::Always);
 
@@ -488,13 +552,13 @@ impl DhtAddNodeWidget {
 
         // render the input widget
         let block = Block::new()
-            .title("Enter DHT node address")
+            .title(" Enter DHT node address ")
             .borders(Borders::ALL);
         self.input.render(frame, block.inner(input_area));
         frame.render_widget(block, input_area);
 
         // render the help info
-        Text::from("Press Esc to return, Enter to add node")
+        Text::from(" Press Esc to return, Enter to add node ")
             .style(Style::new().italic())
             .render(help_area, frame.buffer_mut());
 
@@ -566,7 +630,7 @@ impl DhtPeerStorageWidget {
         Widget::render(
             Table::new(rows, [Fill(1), Length(6)])
                 .header(header)
-                .block(Block::bordered().title("Discovered info hashes"))
+                .block(Block::bordered().title(" Discovered info hashes "))
                 .row_highlight_style(Style::new().bg(Color::LightYellow).fg(Color::DarkGray))
                 .highlight_spacing(HighlightSpacing::Always),
             area,

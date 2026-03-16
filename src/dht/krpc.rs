@@ -943,7 +943,12 @@ pub struct Message {
     /// The node's external port
     #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
     pub port: Option<[u8; 2]>, // this field is present in libtorrent, but not documented in a BEP
-    #[serde(default, rename = "ro", skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        rename = "ro",
+        with = "serde_int_bool",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub read_only: bool,
 }
 

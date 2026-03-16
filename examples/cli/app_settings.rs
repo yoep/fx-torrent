@@ -9,6 +9,7 @@ const DEFAULT_TORRENT_FLAGS: fn() -> TorrentFlags =
 pub(crate) struct AppSettings {
     pub storage: PathBuf,
     pub dht_enabled: bool,
+    pub dht_client_mode: bool,
     pub dht_bootstrap_nodes_enabled: bool,
     pub dht_info_hash_indexing_enabled: bool,
     pub trackers_enabled: bool,
@@ -23,6 +24,7 @@ impl Default for AppSettings {
         Self {
             storage: PathBuf::from(APP_DEFAULT_STORAGE),
             dht_enabled: true,
+            dht_client_mode: false,
             dht_bootstrap_nodes_enabled: true,
             dht_info_hash_indexing_enabled: false,
             trackers_enabled: true,

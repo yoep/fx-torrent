@@ -131,28 +131,17 @@ pub struct Node {
 impl Node {
     /// Create a new node for the given ID and address.
     pub fn new(id: NodeId, addr: SocketAddr) -> Self {
-        Self::new_with_read_only(id, addr, false)
-    }
-
-    /// Create a new node for the given ID and address.
-    pub fn new_with_read_only(id: NodeId, addr: SocketAddr, read_only: bool) -> Self {
-        Self::new_with_opts(id, addr, read_only, NodeState::Good)
+        Self::new_with_opts(id, addr, NodeState::Good)
     }
 
     /// Create a new node for the given ID and address.
     /// This fn allow settings additional properties of the node.
-    pub(crate) fn new_with_opts(
-        id: NodeId,
-        addr: SocketAddr,
-        read_only: bool,
-        state: NodeState,
-    ) -> Self {
+    pub(crate) fn new_with_opts(id: NodeId, addr: SocketAddr, state: NodeState) -> Self {
         Self {
             inner: Arc::new(InnerNode {
                 key: NodeKey { id, addr },
                 token: RwLock::new(TokenSecret::new()),
                 announce_token: Default::default(),
-                read_only,
                 state: Mutex::new(state),
                 last_seen: Mutex::new(Instant::now()),
                 last_indexed: Default::default(),
@@ -185,12 +174,6 @@ impl Node {
     /// Returns the current state of this node.
     pub async fn state(&self) -> NodeState {
         *self.inner.state.lock().await
-    }
-
-    /// Returns `true` when the node is a read-only node, else `false`.
-    /// For more info, see [BEP43](https://www.bittorrent.org/beps/bep_0043.html).
-    pub fn is_read_only(&self) -> bool {
-        self.inner.read_only
     }
 
     /// Returns the last time we received a message from this node.
@@ -301,8 +284,6 @@ struct InnerNode {
     token: RwLock<TokenSecret>,
     /// The token to use for announcing a peer
     announce_token: Mutex<Option<NodeToken>>,
-    /// Whether the node is read-only.
-    read_only: bool,
     /// The current state of the node
     state: Mutex<NodeState>,
     /// The last time we received a message from the node

@@ -1,6 +1,6 @@
 use crate::bloom_filter::BloomFilter;
 use crate::channel::{ChannelReceiver, ChannelSender, Reply, Response};
-use crate::dht::compact::{CompactIPv4Node, CompactIPv4Nodes, CompactIPv6Node, CompactIPv6Nodes};
+use crate::dht::compact::{CompactIPv4Nodes, CompactIPv6Nodes};
 use crate::dht::krpc::{
     AnnouncePeerRequest, AnnouncePeerResponse, ErrorMessage, FindNodeRequest, FindNodeResponse,
     GetPeersRequest, GetPeersResponse, GetRequest, GetResponse, Message, MessagePayload,
@@ -18,7 +18,7 @@ use crate::dht::{
 };
 use crate::dht::{DhtNodeHandler, QueryResult};
 use crate::metrics::Metric;
-use crate::{CompactIpv4Addr, CompactIpv6Addr, InfoHash, Sha1Hash};
+use crate::{InfoHash, Sha1Hash};
 use derive_more::Display;
 use ed25519::SignatureBytes;
 use futures::StreamExt;
@@ -77,6 +77,7 @@ pub enum DhtEvent {
 #[display("DHT node [{}]", addr.port())]
 pub struct DhtTracker {
     addr: SocketAddr,
+    mode: Mode,
     metrics: DhtMetrics,
     pub(crate) sender: ChannelSender<TrackerCommand>,
     callbacks: MultiThreadedCallback<DhtEvent>,
@@ -134,6 +135,7 @@ impl DhtTracker {
 
         Ok(Self {
             addr: socket_addr,
+            mode: config.mode,
             metrics,
             sender: command_sender,
             callbacks,
@@ -150,19 +152,24 @@ impl DhtTracker {
         response.await.map_err(|_| Error::Closed)
     }
 
-    /// Get the socket address on which this DHT server is running.
+    /// Returns the socket address on which this DHT node is running.
     pub fn addr(&self) -> &SocketAddr {
         &self.addr
     }
 
-    /// Get the port on which the DHT server is running.
+    /// Returns the port on which the DHT node is running.
     pub fn port(&self) -> u16 {
         self.addr.port()
     }
 
-    /// Get the DHT network metrics of the DHT server.
+    /// Returns the DHT network metrics of the node.
     pub fn metrics(&self) -> &DhtMetrics {
         &self.metrics
+    }
+
+    /// Returns the mode of the DHT node.
+    pub fn mode(&self) -> Mode {
+        self.mode
     }
 
     /// Get the number of nodes within the routing table.
@@ -359,7 +366,7 @@ impl DhtTracker {
             .unwrap_or_default();
         let mut found_peers = self.internal_get_peers(info_hash, node, n_depth).await?;
         peers.append(&mut found_peers);
-        Ok(peers)
+        Ok(peers.into_iter().unique().collect())
     }
 
     /// Returns the peer addresses for the given torrent info hash within the network.
@@ -402,7 +409,7 @@ impl DhtTracker {
             .flat_map(|result| result.ok())
             .concat();
         peers.append(&mut found_peers);
-        Ok(peers)
+        Ok(peers.into_iter().unique().collect())
     }
 
     /// Scrape the downloaders and seeders for the given info hash.
@@ -1016,6 +1023,7 @@ impl Clone for DhtTracker {
     fn clone(&self) -> Self {
         Self {
             addr: self.addr.clone(),
+            mode: self.mode,
             metrics: self.metrics.clone(),
             sender: self.sender.clone(),
             callbacks: self.callbacks.clone(),
@@ -1570,7 +1578,11 @@ impl TrackerContext {
         }
 
         if let Some(id) = node_id {
-            self.update_node(id, addr, read_only, traversal).await;
+            // do not add read-only nodes to the routing
+            // as they cannot be queried
+            if !read_only {
+                self.update_node(id, addr, traversal).await;
+            }
         }
         Ok(())
     }
@@ -2266,37 +2278,6 @@ impl TrackerContext {
         Response::from(rx)
     }
 
-    /// Try to find the node within the routing table for the request.
-    /// If the node is not found, an error response is returned to the requester.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    async fn find_node_in_routing_table(
-        &self,
-        node_id: &NodeId,
-        addr: &SocketAddr,
-        transaction_id: &TransactionId,
-    ) -> Result<Option<&Node>> {
-        match self.routing_table.find_node_by_key(&NodeKey {
-            id: *node_id,
-            addr: *addr,
-        }) {
-            None => {
-                trace!(
-                    "{} failed to find node for get request from {:?}",
-                    self,
-                    addr
-                );
-                self.send_error(
-                    transaction_id.clone(),
-                    ErrorMessage::Server("Invalid node".to_string()),
-                    &addr,
-                )
-                .await
-                .map(|_| None)
-            }
-            Some(node) => Ok(Some(node)),
-        }
-    }
-
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn find_node_internal(
         &mut self,
@@ -2619,6 +2600,7 @@ impl TrackerContext {
         let message = match Message::builder()
             .transaction_id(id.clone())
             .payload(MessagePayload::Query(query))
+            .read_only(self.handler.is_read_only())
             .build()
         {
             Ok(message) => message,
@@ -2700,6 +2682,7 @@ impl TrackerContext {
             .payload(MessagePayload::error(error))
             .ip((*addr).into())
             .port(addr.port())
+            .read_only(self.handler.is_read_only())
             .build()?;
 
         self.send(message, addr).await
@@ -2766,7 +2749,6 @@ impl TrackerContext {
         &mut self,
         id: NodeId,
         addr: SocketAddr,
-        read_only: bool,
         traversal: &mut TraversalAlgorithm,
     ) {
         match self.routing_table.find_node(&id) {
@@ -2774,7 +2756,7 @@ impl TrackerContext {
                 node.seen().await;
             }
             None => {
-                let node = Node::new_with_read_only(id, addr, read_only);
+                let node = Node::new(id, addr);
                 let node_key = node.key().clone();
 
                 // traverse the node
@@ -2976,46 +2958,12 @@ impl TrackerContext {
             .await;
 
         nodes_with_state.into_iter().flat_map(|(node, state)| {
-            if !node.is_read_only() && state != NodeState::Bad {
+            if state != NodeState::Bad {
                 Some(node)
             } else {
                 None
             }
         })
-    }
-
-    /// Returns the nodes closest to the given target node id.
-    /// It creates a pair of compact IPv4 and IPv6 nodes based on the nodes within the bucket closest to the target.
-    fn closest_node_pairs(
-        routing_table: &RoutingTable,
-        target: &NodeId,
-    ) -> (CompactIPv4Nodes, CompactIPv6Nodes) {
-        let mut compact_nodes = Vec::new();
-        let mut compact_nodes6 = Vec::new();
-        for node in routing_table.find_bucket_nodes(&target) {
-            let addr = node.addr();
-            match addr.ip() {
-                IpAddr::V4(ip) => {
-                    compact_nodes.push(CompactIPv4Node {
-                        id: *node.id(),
-                        addr: CompactIpv4Addr {
-                            ip,
-                            port: addr.port(),
-                        },
-                    });
-                }
-                IpAddr::V6(ip) => {
-                    compact_nodes6.push(CompactIPv6Node {
-                        id: *node.id(),
-                        addr: CompactIpv6Addr {
-                            ip,
-                            port: addr.port(),
-                        },
-                    });
-                }
-            }
-        }
-        (compact_nodes.into(), compact_nodes6.into())
     }
 
     /// Collect the IPv4 and IPv6 nodes from the compact nodes.
@@ -3160,7 +3108,7 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn test_tracker_new() {
+        async fn test_new() {
             init_logger!();
             let node_id = NodeId::new();
             let verifier = ItemSignature::new().unwrap();
@@ -3186,6 +3134,39 @@ mod tests {
                 0,
                 tracker.port(),
                 "expected a server port to have been present"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_read_only() {
+            init_logger!();
+            let source_config = {
+                let mut config = Config::default();
+                config.mode = Mode::Client;
+                config
+            };
+            let source = DhtTracker::new(source_config).await.unwrap();
+            let target = DhtTracker::new(Config::default()).await.unwrap();
+            let source_id = source.id().await.expect("expected a source node id");
+            let source_addr = (Ipv4Addr::LOCALHOST, source.addr().port()).into();
+            let target_addr = (Ipv4Addr::LOCALHOST, target.addr().port()).into();
+
+            // ping the target node
+            let _ = source
+                .ping(target_addr)
+                .await
+                .expect("expected the ping to succeed");
+
+            // retrieve the node info from the target
+            let key = NodeKey {
+                id: source_id,
+                addr: source_addr,
+            };
+            let result = target.node(&key).await;
+
+            assert_eq!(
+                None, result,
+                "expected the read-only node to not have been added to the routing table"
             );
         }
     }
@@ -3310,7 +3291,6 @@ mod tests {
                 .update_node(
                     nearby_node,
                     ([132, 141, 45, 30], 8090).into(),
-                    false,
                     &mut traversal,
                 )
                 .await;
@@ -3386,6 +3366,7 @@ mod tests {
             let mut context = create_tracker_context!();
             let tracker = DhtTracker {
                 addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 7890)),
+                mode: Mode::Server,
                 metrics: Default::default(),
                 sender: sender.clone(),
                 callbacks: MultiThreadedCallback::new(),
@@ -3621,7 +3602,7 @@ mod tests {
 
             // add the target to the source node
             source
-                .update_node(target_id, target_addr, false, &mut traversal)
+                .update_node(target_id, target_addr, &mut traversal)
                 .await;
 
             // subscribe to the events

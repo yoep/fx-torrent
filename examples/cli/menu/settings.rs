@@ -140,6 +140,14 @@ impl MenuSettings {
                 ))),
                 SettingsMenuItem::Title("DHT options".to_string()),
                 SettingsMenuItem::Option(Box::new(ToggleSetting::new(
+                    "Client (read-only) mode",
+                    default_settings.dht_client_mode,
+                    |enabled, sender| {
+                        let _ = sender.send(AppCommand::DhtClientMode(enabled));
+                    },
+                    app_sender.clone(),
+                ))),
+                SettingsMenuItem::Option(Box::new(ToggleSetting::new(
                     "Enable bootstrap nodes",
                     default_settings.dht_bootstrap_nodes_enabled,
                     |enabled, sender| {
