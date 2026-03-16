@@ -19,10 +19,7 @@ impl<T> ChannelSender<T> {
     /// Returns `true` if the channel has been closed.
     /// In this case, the channel will no longer accept any messages.
     pub fn is_closed(&self) -> bool {
-        match &self.inner {
-            InnerSenderChannel::Bounded(e) => e.is_closed(),
-            InnerSenderChannel::Unbounded(e) => e.is_closed(),
-        }
+        self.inner.0.is_closed()
     }
 
     /// Send the given message closure to the channel.
@@ -60,6 +57,7 @@ pub struct ChannelReceiver<T> {
     inner: InnerReceiverChannel<T>,
 }
 
+#[allow(dead_code)]
 impl<T> ChannelReceiver<T> {
     /// Receives the next value from the channel.
     pub async fn recv(&mut self) -> Option<T> {
@@ -228,17 +226,11 @@ impl<T> Reply<T> {
 }
 
 #[derive(Debug)]
-enum InnerSenderChannel<T> {
-    Bounded(mpsc::Sender<T>),
-    Unbounded(mpsc::UnboundedSender<T>),
-}
+struct InnerSenderChannel<T>(mpsc::Sender<T>);
 
 impl<T> InnerSenderChannel<T> {
     async fn send(&self, value: T) -> Result<()> {
-        match self {
-            Self::Bounded(sender) => sender.send(value).await.map_err(|_| Self::closed()),
-            Self::Unbounded(sender) => sender.send(value).map_err(|_| Self::closed()),
-        }
+        self.0.send(value).await.map_err(|_| Self::closed())
     }
 
     fn closed() -> io::Error {
@@ -248,37 +240,28 @@ impl<T> InnerSenderChannel<T> {
 
 impl<T> Clone for InnerSenderChannel<T> {
     fn clone(&self) -> Self {
-        match self {
-            Self::Bounded(sender) => Self::Bounded(sender.clone()),
-            Self::Unbounded(sender) => Self::Unbounded(sender.clone()),
-        }
+        Self(self.0.clone())
     }
 }
 
 #[derive(Debug)]
-enum InnerReceiverChannel<T> {
-    Bounded(mpsc::Receiver<T>),
-    Unbounded(mpsc::UnboundedReceiver<T>),
-}
+struct InnerReceiverChannel<T>(mpsc::Receiver<T>);
 
 impl<T> InnerReceiverChannel<T> {
     async fn recv(&mut self) -> Option<T> {
-        match self {
-            Self::Bounded(receiver) => receiver.recv().await,
-            Self::Unbounded(receiver) => receiver.recv().await,
-        }
+        self.0.recv().await
     }
 }
 
 /// Create a new channel for sending and receiving messages between torrent tasks.
 ///
 /// This macro supports:
-/// - `channel!()` for an unbounded channel
+/// - `channel!()` for a bounded (backpressure) channel with default capacity `256`.
 /// - `channel!(N)` for a bounded (backpressure) channel with capacity `N`.
 #[macro_export]
 macro_rules! channel {
     () => {{
-        crate::channel::unbounded_channel()
+        crate::channel!(256)
     }};
     ($limit:expr) => {{
         let limit: usize = $limit;
@@ -291,23 +274,10 @@ pub fn channel<T>(limit: usize) -> (ChannelSender<T>, ChannelReceiver<T>) {
     let (sender, receiver) = mpsc::channel(limit);
     (
         ChannelSender {
-            inner: InnerSenderChannel::Bounded(sender),
+            inner: InnerSenderChannel(sender),
         },
         ChannelReceiver {
-            inner: InnerReceiverChannel::Bounded(receiver),
-        },
-    )
-}
-
-/// Create a new unbounded channel for sending and receiving messages between torrent tasks.
-pub fn unbounded_channel<T>() -> (ChannelSender<T>, ChannelReceiver<T>) {
-    let (sender, receiver) = mpsc::unbounded_channel();
-    (
-        ChannelSender {
-            inner: InnerSenderChannel::Unbounded(sender),
-        },
-        ChannelReceiver {
-            inner: InnerReceiverChannel::Unbounded(receiver),
+            inner: InnerReceiverChannel(receiver),
         },
     )
 }
@@ -381,38 +351,6 @@ mod tests {
             select! {
                 _ = time::sleep(Duration::from_millis(100)) => assert!(false, "expected the second message to be processed"),
                 _ = &mut future => {},
-            }
-        }
-    }
-
-    mod unbounded {
-        use super::*;
-
-        #[tokio::test]
-        async fn test_send_and_receive() {
-            let arg = 13;
-            let (sender, receiver) = channel!();
-
-            let response = sender
-                .send(|tx| TestCommand::RequestWithArgAndResponse { arg, response: tx })
-                .await;
-
-            validate_response(arg, response, receiver).await;
-        }
-
-        #[tokio::test]
-        async fn test_fire_and_forget() {
-            let (sender, receiver) = channel!();
-            let (tx, rx) = oneshot::channel();
-            start_receiver_processor(receiver);
-
-            sender
-                .fire_and_forget(TestCommand::FireAndForget { tx })
-                .await;
-
-            select! {
-                _ = time::sleep(Duration::from_millis(250)) => assert!(false, "expected the fire and forget to have been processed"),
-                _ = rx => {},
             }
         }
     }
