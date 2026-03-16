@@ -1,8 +1,11 @@
+pub use config::*;
 pub use ed25519::*;
 pub use errors::*;
+use handler::*;
 pub use metrics::*;
 pub use node::*;
 pub use node_id::*;
+use server::*;
 pub use storage_data::*;
 pub use tracker::*;
 
@@ -11,18 +14,21 @@ pub use tracker::*;
 mod test_macros;
 
 mod compact;
+mod config;
 mod ed25519;
 mod errors;
+mod handler;
 mod krpc;
 mod metrics;
 mod node;
 mod node_id;
 mod observer;
 mod routing_table;
-mod storage;
+mod server;
 mod storage_data;
 mod tracker;
 mod traversal;
+mod utils;
 
 const DEFAULT_ROUTING_NODE_SERVERS: fn() -> Vec<&'static str> = || {
     vec![

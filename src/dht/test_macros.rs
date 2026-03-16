@@ -1,3 +1,23 @@
+/// Create a new DHT node.
+macro_rules! node {
+    ($addr:expr) => {{
+        node!(crate::dht::NodeId::new(), $addr)
+    }};
+    ($node_id:expr, $addr:expr) => {{
+        node!($node_id, $addr, crate::dht::NodeState::Good)
+    }};
+    ($node_id:expr, $addr:expr, $state:expr) => {{
+        use crate::dht::{Node, NodeId, NodeState};
+        use std::net::SocketAddr;
+
+        let node_id: NodeId = $node_id;
+        let addr: SocketAddr = $addr;
+        let state: NodeState = $state;
+
+        Node::new_with_opts(node_id, addr, false, state)
+    }};
+}
+
 /// Create a new DHT tracker server pair.
 macro_rules! create_node_server_pair {
     () => {{
@@ -42,6 +62,7 @@ macro_rules! create_tracker_context {
     ($node_id:expr, $enable_indexing:expr) => {{
         use crate::dht::DhtTracker;
         use crate::dht::ItemSignature;
+        use crate::dht::Mode;
         use crate::dht::NodeId;
         use crate::dht::TrackerContext;
         use std::sync::Arc;
@@ -53,6 +74,14 @@ macro_rules! create_tracker_context {
         let socket_addr = socket.local_addr().unwrap();
         let item_verifier = ItemSignature::new().unwrap();
 
-        TrackerContext::new(id, socket, socket_addr, enable_indexing, item_verifier)
+        TrackerContext::new(
+            id,
+            socket,
+            socket_addr,
+            Mode::Server,
+            enable_indexing,
+            item_verifier,
+            128,
+        )
     }};
 }

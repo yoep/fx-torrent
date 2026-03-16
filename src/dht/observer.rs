@@ -12,12 +12,12 @@ const MIN_REPORTERS: usize = 3;
 /// The maximum number of observed external IP addresses to keep in memory
 const MAX_OBSERVED: usize = 15;
 
-/// Observe the external IP address of the server from received node messages.
+/// Observe the external IP address of the dht node from received node messages.
 #[derive(Debug)]
 pub struct Observer {
-    /// The observed external IP address of the server
+    /// The observed external IP address of the node
     external_ip: Option<IpAddr>,
-    /// The observed external IP addresses of the server (target_addr, own_addr)
+    /// The observed external IP addresses of the node (target_addr, own_addr)
     observed_addrs: HashSet<ObservedAddress>,
     sender: ChannelSender<TrackerCommand>,
 }
