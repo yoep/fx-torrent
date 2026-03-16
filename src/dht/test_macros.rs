@@ -1,3 +1,23 @@
+/// Create a new DHT node.
+macro_rules! node {
+    ($addr:expr) => {{
+        node!(crate::dht::NodeId::new(), $addr)
+    }};
+    ($node_id:expr, $addr:expr) => {{
+        node!($node_id, $addr, crate::dht::NodeState::Good)
+    }};
+    ($node_id:expr, $addr:expr, $state:expr) => {{
+        use crate::dht::{Node, NodeId, NodeState};
+        use std::net::SocketAddr;
+
+        let node_id: NodeId = $node_id;
+        let addr: SocketAddr = $addr;
+        let state: NodeState = $state;
+
+        Node::new_with_opts(node_id, addr, false, state)
+    }};
+}
+
 /// Create a new DHT tracker server pair.
 macro_rules! create_node_server_pair {
     () => {{

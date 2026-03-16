@@ -201,7 +201,6 @@ impl Bucket {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
-    use std::net::SocketAddr;
 
     mod routing_table {
         use super::*;
@@ -279,13 +278,15 @@ mod tests {
         async fn test_add_bucket_full() {
             let node = Node::new(NodeId::new(), (Ipv4Addr::LOCALHOST, 8900).into());
             let mut bucket = Bucket::new(2);
-            bucket.nodes.push(create_node_with_state(
+            bucket.nodes.push(node!(
+                NodeId::new(),
                 ([198, 168, 0, 1], 8900).into(),
-                NodeState::Good,
+                NodeState::Good
             ));
-            bucket.nodes.push(create_node_with_state(
+            bucket.nodes.push(node!(
+                NodeId::new(),
                 ([198, 168, 0, 2], 8900).into(),
-                NodeState::Good,
+                NodeState::Good
             ));
 
             let result = bucket.add(node).await;
@@ -301,22 +302,20 @@ mod tests {
         async fn test_add_bucket_full_with_bad_node() {
             let node = Node::new(NodeId::new(), (Ipv4Addr::LOCALHOST, 8900).into());
             let mut bucket = Bucket::new(2);
-            bucket.nodes.push(create_node_with_state(
+            bucket.nodes.push(node!(
+                NodeId::new(),
                 ([198, 168, 0, 1], 8900).into(),
-                NodeState::Bad,
+                NodeState::Bad
             ));
-            bucket.nodes.push(create_node_with_state(
+            bucket.nodes.push(node!(
+                NodeId::new(),
                 ([198, 168, 0, 2], 8900).into(),
-                NodeState::Good,
+                NodeState::Good
             ));
 
             let result = bucket.add(node).await;
 
             assert!(result.is_ok(), "expected Ok, but got {:?} instead", result);
         }
-    }
-
-    fn create_node_with_state(addr: SocketAddr, state: NodeState) -> Node {
-        Node::new_with_state(NodeId::new(), addr, state)
     }
 }

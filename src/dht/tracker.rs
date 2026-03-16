@@ -1543,6 +1543,7 @@ impl TrackerContext {
         );
         let node_id = message.id().cloned();
         let transaction_id = message.transaction_id;
+        let read_only = message.read_only;
         let key = TransactionKey {
             id: transaction_id.clone(),
             addr,
@@ -1655,7 +1656,7 @@ impl TrackerContext {
         }
 
         if let Some(id) = node_id {
-            self.update_node(id, addr, traversal).await;
+            self.update_node(id, addr, read_only, traversal).await;
         }
         Ok(())
     }
@@ -3288,6 +3289,7 @@ impl TrackerContext {
         &mut self,
         id: NodeId,
         addr: SocketAddr,
+        read_only: bool,
         traversal: &mut TraversalAlgorithm,
     ) {
         match self.routing_table.find_node(&id) {
@@ -3295,7 +3297,7 @@ impl TrackerContext {
                 node.seen().await;
             }
             None => {
-                let node = Node::new(id, addr);
+                let node = Node::new_with_read_only(id, addr, read_only);
                 let node_key = node.key().clone();
 
                 // traverse the node
@@ -3504,7 +3506,7 @@ impl TrackerContext {
             .await;
 
         nodes_with_state.into_iter().flat_map(|(node, state)| {
-            if state != NodeState::Bad {
+            if !node.is_read_only() && state != NodeState::Bad {
                 Some(node)
             } else {
                 None
@@ -3873,6 +3875,7 @@ mod tests {
                 .update_node(
                     nearby_node,
                     ([132, 141, 45, 30], 8090).into(),
+                    false,
                     &mut traversal,
                 )
                 .await;
@@ -4192,7 +4195,7 @@ mod tests {
 
             // add the target to the source node
             source
-                .update_node(target_id, target_addr, &mut traversal)
+                .update_node(target_id, target_addr, false, &mut traversal)
                 .await;
 
             // run the indexer
