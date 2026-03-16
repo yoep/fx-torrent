@@ -1,7 +1,6 @@
 use crate::dht::krpc::{ErrorMessage, QueryMessage, ResponseMessage};
 use crate::dht::routing_table::RoutingTable;
-use crate::dht::server::ServerNode;
-use crate::dht::storage::{ItemEntry, MutableItemProperties};
+use crate::dht::server::{ItemEntry, MutableItemProperties, ServerNode};
 use crate::dht::{Error, PeerEntry, Result};
 use crate::{InfoHash, Sha1Hash};
 use itertools::Either;

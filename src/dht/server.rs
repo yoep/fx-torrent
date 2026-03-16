@@ -7,17 +7,18 @@ use crate::dht::krpc::{
     PutResponse, QueryMessage, ResponseMessage, SampleInfoHashesRequest, SampleInfoHashesResponse,
 };
 use crate::dht::routing_table::RoutingTable;
-use crate::dht::storage::{DhtStorage, ItemEntry, MutableItemProperties};
-use crate::dht::utils::parse_mutable_item_properties;
+use crate::dht::utils::{generate_mutable_item_key, parse_mutable_item_properties};
 use crate::dht::{
     DhtEvent, DhtMetrics, Error, Node, NodeId, NodeKey, NodeToken, PeerEntry, PublicKey, Result,
 };
 use crate::{CompactIpAddr, CompactIpv4Addr, CompactIpv6Addr, InfoHash, Sha1Hash};
 use derive_more::Display;
+use ed25519::SignatureBytes;
 use fx_callback::MultiThreadedCallback;
 use log::{debug, trace, warn};
 use serde_bencode::value::Value;
 use sha1::{Digest, Sha1};
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 #[cfg(feature = "tracing")]
@@ -33,9 +34,13 @@ const PEER_ENTRY_EXPIRED_AFTER: Duration = Duration::from_mins(30);
 #[display("DHT node server [{}]", socket_addr.port())]
 pub struct ServerNode {
     socket_addr: SocketAddr,
-    storage: DhtStorage,
     metrics: DhtMetrics,
+    peers: HashMap<InfoHash, HashSet<PeerEntry>>,
+    items: HashMap<Sha1Hash, ItemEntry>,
+    /// The last time the storage was cleaned up.
     last_cleanup: Instant,
+    /// The total number of torrents to track from the DHT.
+    max_torrents: usize,
     callbacks: MultiThreadedCallback<DhtEvent>,
 }
 
@@ -50,31 +55,41 @@ impl ServerNode {
     ) -> Self {
         Self {
             socket_addr,
-            storage: DhtStorage::new(max_torrents),
             metrics,
+            peers: Default::default(),
+            items: Default::default(),
             last_cleanup: Instant::now(),
+            max_torrents,
             callbacks,
         }
     }
 
     /// Returns the total number of peers stored in the storage.
     pub fn peers_len(&self) -> usize {
-        self.storage.peers_len()
+        self.peers.values().map(|e| e.len()).sum()
+    }
+
+    /// Returns the number of torrents stored in the storage.
+    pub fn torrents_len(&self) -> usize {
+        self.peers.len()
     }
 
     /// Returns the torrent slice over all known info hashes.
     pub fn torrents(&self) -> impl Iterator<Item = &InfoHash> {
-        self.storage.torrents()
+        self.peers.keys()
     }
 
     /// Returns the peers slice for the given torrent.
     pub fn peers(&self, info_hash: &InfoHash) -> impl Iterator<Item = &PeerEntry> {
-        self.storage.peers(info_hash)
+        self.peers
+            .get(info_hash)
+            .map(|e| e.iter())
+            .unwrap_or_default()
     }
 
     /// Get an item from the storage based on the given sha1 key.
     pub fn get(&self, key: &Sha1Hash) -> Option<&ItemEntry> {
-        self.storage.get(key)
+        self.items.get(key)
     }
 
     /// Handle an incoming query from a remote node.
@@ -111,12 +126,26 @@ impl ServerNode {
 
     /// Updates the peer information for the given info hash.
     pub fn update_peer(&mut self, info_hash: InfoHash, addr: SocketAddr, seed: bool) {
-        self.storage.update_peer(info_hash, addr, seed);
+        if !self.peers.contains_key(&info_hash) && self.torrents_len() >= self.max_torrents {
+            trace!("DHT storage is full, ignoring info hash {}", info_hash);
+            return;
+        }
+
+        let entry = self.peers.entry(info_hash).or_default();
+        entry.insert(PeerEntry::new(addr, seed));
     }
 
     /// Register a new info hash entry.
     pub fn register(&mut self, info_hash: &InfoHash) {
-        self.storage.register(info_hash);
+        if self.torrents_len() >= self.max_torrents {
+            trace!("DHT storage is full, ignoring info hash {}", info_hash);
+            return;
+        }
+
+        if !self.peers.contains_key(info_hash) {
+            self.peers.insert(info_hash.clone(), Default::default());
+            trace!("Added info hash {} to the storage", info_hash);
+        }
     }
 
     /// Store the given value item.
@@ -128,7 +157,38 @@ impl ServerNode {
         value: Value,
         mutable_properties: Option<MutableItemProperties>,
     ) -> Result<Sha1Hash> {
-        self.storage.store(value, mutable_properties)
+        let key: Sha1Hash = match mutable_properties.as_ref() {
+            None => Self::generate_value_key(&value)?,
+            Some(properties) => generate_mutable_item_key(
+                properties.public_key.as_slice(),
+                properties.salt.as_ref().map(|e| e.as_slice()),
+            )?,
+        };
+        if let Some(item) = self.items.get(&key) {
+            // if the mutable properties are not set, this item is immutable
+            // otherwise, verify that the sequence number is higher than the current one
+            match (
+                item.mutable_properties.as_ref(),
+                mutable_properties.as_ref(),
+            ) {
+                (None, _) => return Err(Error::AlreadyExists),
+                (Some(existing), Some(updated)) => {
+                    if existing.sequence_nr >= updated.sequence_nr {
+                        return Err(Error::InvalidSequenceNr);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        self.items.insert(
+            key.clone(),
+            ItemEntry {
+                value,
+                mutable_properties,
+            },
+        );
+        Ok(key)
     }
 
     /// Handle a periodic tick.
@@ -209,7 +269,6 @@ impl ServerNode {
         };
 
         let mut peers = self
-            .storage
             .peers(&request.info_hash)
             .filter(|e| e.addr.is_ipv4() == self.socket_addr.is_ipv4())
             .collect::<Vec<_>>();
@@ -286,8 +345,7 @@ impl ServerNode {
             peer_addr,
             info_hash
         );
-        self.storage
-            .update_peer(info_hash.clone(), peer_addr, request.seed);
+        self.update_peer(info_hash.clone(), peer_addr, request.seed);
         self.callbacks
             .invoke(DhtEvent::PeerUpdated(info_hash, peer_addr));
         self.metrics.discovered_peers.inc();
@@ -308,13 +366,8 @@ impl ServerNode {
         routing_table: &RoutingTable,
     ) -> Result<QueryResult> {
         self.metrics.sample_info_hashes_requests.inc();
-        let num = self.storage.torrents().count();
-        let samples = self
-            .storage
-            .torrents()
-            .take(20)
-            .cloned()
-            .collect::<Vec<_>>();
+        let num = self.torrents().count();
+        let samples = self.torrents().take(20).cloned().collect::<Vec<_>>();
         let (nodes, nodes6) = Self::closest_node_pairs(routing_table, &request.target);
 
         Ok(ResponseMessage::SampleInfoHashes {
@@ -386,7 +439,7 @@ impl ServerNode {
             }
         };
 
-        if let Err(e) = self.storage.store(request.value, mutable_properties) {
+        if let Err(e) = self.store(request.value, mutable_properties) {
             warn!("{} failed to store immutable item, {}", self, e);
             return Ok(ErrorMessage::Server("Internal Server Error".to_string()).into());
         }
@@ -431,7 +484,7 @@ impl ServerNode {
             }
         };
         let token = node.generate_token().await;
-        let (value, mutable_properties) = match self.storage.get(&hash) {
+        let (value, mutable_properties) = match self.get(&hash) {
             Some(item) => (Some(item.value.clone()), item.mutable_properties.clone()),
             None => (None, None),
         };
@@ -475,11 +528,28 @@ impl ServerNode {
         })
     }
 
-    /// Execute a cleanup cycle of the storage.
-    fn do_cleanup(&mut self) {
-        let removed_peers = self.storage.do_cleanup();
-        debug!("{} removed {} peers from storage", self, removed_peers);
+    /// Purge old peers within the storage.
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    pub fn do_cleanup(&mut self) {
+        let mut removed = 0;
+        for entry in self.peers.values_mut() {
+            let initial = entry.len();
+            entry.retain(|e| e.added.elapsed() <= PEER_ENTRY_EXPIRED_AFTER);
+            removed += initial - entry.len();
+        }
+        debug!("{} removed {} peers from storage", self, removed);
         self.last_cleanup = Instant::now();
+    }
+
+    /// Try to generate the hash key from the given value.
+    /// Returns the [Sha1Hash] for the [Value], else an error.
+    fn generate_value_key(value: &Value) -> Result<Sha1Hash> {
+        serde_bencode::to_bytes(&value)
+            .map_err(|e| Error::Parse(e.to_string()))
+            .and_then(|bytes| {
+                Sha1Hash::try_from(Sha1::digest(bytes.as_slice()))
+                    .map_err(|e| Error::Parse(e.to_string()))
+            })
     }
 
     fn hash_ip_addr(addr: &SocketAddr) -> Vec<u8> {
@@ -532,11 +602,43 @@ impl ServerNode {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ItemEntry {
+    pub value: Value,
+    pub mutable_properties: Option<MutableItemProperties>,
+}
+
+impl PartialEq for ItemEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value && self.mutable_properties == other.mutable_properties
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MutableItemProperties {
+    pub sequence_nr: u64,
+    /// The public key of the item.
+    pub public_key: PublicKey,
+    /// The salt used to generate the item's hash.
+    pub salt: Option<Vec<u8>>,
+    /// The validation signature of the item.
+    pub signature: SignatureBytes,
+}
+
+impl PartialEq for MutableItemProperties {
+    fn eq(&self, other: &Self) -> bool {
+        self.sequence_nr == other.sequence_nr
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519::Signature;
+    use std::net::Ipv4Addr;
+    use std::str::FromStr;
 
-    mod server_node {
+    mod torrents {
         use super::*;
         use itertools::Itertools;
         use std::net::Ipv4Addr;
@@ -565,6 +667,258 @@ mod tests {
                 "expected the torrent to have been returned"
             );
             assert_eq!(&info_hash, result[0]);
+        }
+    }
+    mod update_peer {
+        use super::*;
+        use itertools::Itertools;
+        use std::net::Ipv4Addr;
+
+        #[test]
+        fn test_new_peer() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let addr: SocketAddr = (Ipv4Addr::LOCALHOST, 6881).into();
+            let mut node = ServerNode::new(
+                DhtMetrics::new(),
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)),
+                MultiThreadedCallback::new(),
+                16,
+            );
+
+            node.update_peer(info_hash.clone(), addr, false);
+
+            let result = node.peers(&info_hash).find(|e| e.addr == addr);
+            assert!(
+                result.is_some(),
+                "expected peer {} to be present within the storage",
+                addr
+            );
+
+            let result = node.peers_len();
+            assert_eq!(1, result, "expected the storage to contain one peer");
+        }
+
+        #[test]
+        fn test_torrent_limit() {
+            init_logger!();
+            let info_hash1 =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let info_hash2 =
+                InfoHash::from_str("urn:btih:2C6B6858D61DA9543D4231A71DB4B1C9264B0685").unwrap();
+            let mut node = ServerNode::new(
+                DhtMetrics::new(),
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)),
+                MultiThreadedCallback::new(),
+                1,
+            );
+
+            // add the initial info hash
+            node.update_peer(
+                info_hash1.clone(),
+                (Ipv4Addr::LOCALHOST, 6881).into(),
+                false,
+            );
+            assert_eq!(
+                1,
+                node.torrents_len(),
+                "expected the torrent to have been added"
+            );
+            assert_eq!(
+                true,
+                node.torrents().contains(&info_hash1),
+                "expected the torrent to be present within the storage"
+            );
+
+            // try to add the second info hash, which should be ignored
+            node.update_peer(
+                info_hash2.clone(),
+                (Ipv4Addr::LOCALHOST, 6882).into(),
+                false,
+            );
+            assert_eq!(
+                1,
+                node.torrents_len(),
+                "expected the torrent to have been ignored"
+            );
+            assert_eq!(
+                false,
+                node.torrents().contains(&info_hash2),
+                "expected the torrent to not have been added to the storage"
+            );
+        }
+    }
+
+    mod store {
+        use super::*;
+        use rand::{rng, Rng};
+        use std::net::Ipv4Addr;
+
+        #[tokio::test]
+        async fn test_non_existing() {
+            let expected_result = Value::Int(13);
+            let mut node = ServerNode::new(
+                DhtMetrics::new(),
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)),
+                MultiThreadedCallback::new(),
+                16,
+            );
+
+            let key = node
+                .store(expected_result.clone(), None)
+                .expect("expected the item to have been stored");
+
+            let result = node
+                .get(&key)
+                .expect("expected the item to be present within the storage");
+            assert_eq!(expected_result, result.value);
+        }
+
+        #[tokio::test]
+        async fn test_existing_immutable_item() {
+            let expected_result = Value::Int(69);
+            let mut node = ServerNode::new(
+                DhtMetrics::new(),
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)),
+                MultiThreadedCallback::new(),
+                16,
+            );
+
+            // store the item as immutable
+            let _ = node
+                .store(expected_result.clone(), None)
+                .expect("expected the item to have been stored");
+
+            // try to store the item a second time
+            let result = node
+                .store(expected_result.clone(), None)
+                .expect_err("expected the item to be immutable");
+            assert_eq!(Error::AlreadyExists, result);
+        }
+
+        #[test]
+        fn test_existing_mutable_item() {
+            let initial_value = Value::Int(69);
+            let updated_value = Value::Int(70);
+            let mut public_key = PublicKey::default();
+            rng().fill_bytes(&mut public_key);
+            let initial_properties = MutableItemProperties {
+                sequence_nr: 0,
+                public_key: public_key.clone(),
+                salt: Some("FooBar".as_bytes().to_vec()),
+                signature: [0u8; Signature::BYTE_SIZE],
+            };
+            let updated_properties = MutableItemProperties {
+                sequence_nr: 1,
+                public_key,
+                salt: Some("FooBar".as_bytes().to_vec()),
+                signature: [0u8; Signature::BYTE_SIZE],
+            };
+            let mut node = ServerNode::new(
+                DhtMetrics::new(),
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)),
+                MultiThreadedCallback::new(),
+                16,
+            );
+
+            // store the initial value as mutable
+            // this should return a key based on the public key
+            let key = node
+                .store(initial_value.clone(), Some(initial_properties))
+                .expect("expected the item to have been stored");
+            let result = node
+                .get(&key)
+                .expect("expected the item to be present within the storage");
+            assert_eq!(
+                initial_value, result.value,
+                "expected the initial value match"
+            );
+
+            // try to update the mutable item
+            let result = node
+                .store(updated_value.clone(), Some(updated_properties))
+                .expect("expected the item to have been updated");
+            assert_eq!(key, result, "expected the key to be the same");
+            let result = node.get(&key).unwrap();
+            assert_eq!(
+                updated_value, result.value,
+                "expected the value to have been updated"
+            );
+        }
+    }
+
+    mod mutable_properties {
+        use super::*;
+
+        #[test]
+        fn test_partial_eq() {
+            let properties1 = create_properties(0);
+            let properties2 = create_properties(0);
+            let properties3 = create_properties(1);
+
+            assert_eq!(
+                properties1, properties2,
+                "expected the mutable properties to be equal"
+            );
+            assert_ne!(
+                properties1, properties3,
+                "expected the mutable properties to not be equal"
+            );
+        }
+    }
+
+    mod generate_key {
+        use super::*;
+
+        /// BEP44: test 3 (immutable)
+        #[test]
+        fn test_generate_value_key() {
+            let item = "Hello World!";
+            let expected_result = Sha1Hash::try_from(
+                hex::decode("e5f96f6f38320f0f33959cb4d3d656452117aadb").unwrap(),
+            )
+            .unwrap();
+            let bencode = serde_bencode::to_string(&item.to_string())
+                .expect("expected the item to be serialized");
+            let value = serde_bencode::from_str::<Value>(&bencode)
+                .expect("expected the item to be deserialized");
+
+            let result = ServerNode::generate_value_key(&value)
+                .expect("expected the value key to be generated");
+
+            assert_eq!(expected_result, result);
+        }
+    }
+
+    #[test]
+    fn test_register() {
+        init_logger!();
+        let info_hash =
+            InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+        let mut node = ServerNode::new(
+            DhtMetrics::new(),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)),
+            MultiThreadedCallback::new(),
+            16,
+        );
+
+        node.register(&info_hash);
+
+        let result = node.torrents().cloned().collect::<Vec<_>>();
+        assert!(
+            result.contains(&info_hash),
+            "expected info hash {} to have been present within the storage",
+            info_hash
+        );
+    }
+
+    fn create_properties(sequence_nr: u64) -> MutableItemProperties {
+        MutableItemProperties {
+            sequence_nr,
+            public_key: PublicKey::default(),
+            salt: None,
+            signature: [0u8; Signature::BYTE_SIZE],
         }
     }
 }

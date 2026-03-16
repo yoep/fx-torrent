@@ -25,7 +25,6 @@ mod node_id;
 mod observer;
 mod routing_table;
 mod server;
-mod storage;
 mod storage_data;
 mod tracker;
 mod traversal;

@@ -1,4 +1,4 @@
-use crate::dht::storage::MutableItemProperties;
+use crate::dht::server::MutableItemProperties;
 use crate::dht::{Error, PublicKey, Result};
 use crate::Sha1Hash;
 use ed25519::SignatureBytes;
