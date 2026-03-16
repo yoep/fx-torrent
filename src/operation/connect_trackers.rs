@@ -148,11 +148,9 @@ impl TorrentOperation for TorrentTrackersOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::timeout;
+    use crate::create_torrent_context;
     use crate::tracker::TrackerClientEvent;
-    use crate::{create_torrent_context, init_logger};
     use fx_callback::Callback;
-    use std::time::Duration;
     use tempfile::tempdir;
     use tokio::sync::mpsc::unbounded_channel;
 

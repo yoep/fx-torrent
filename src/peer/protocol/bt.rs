@@ -811,7 +811,6 @@ fn is_false(b: &bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_logger;
     use std::str::FromStr;
 
     #[test]

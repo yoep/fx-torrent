@@ -16,7 +16,7 @@ use crate::dht::{
     PublicKey, Result, SecretKey, DEFAULT_ROUTING_NODE_SERVERS,
 };
 use crate::metrics::Metric;
-use crate::{channel, CompactIpAddr, CompactIpv4Addr, CompactIpv6Addr, InfoHash, Sha1Hash};
+use crate::{CompactIpAddr, CompactIpv4Addr, CompactIpv6Addr, InfoHash, Sha1Hash};
 use derive_more::Display;
 use ed25519::SignatureBytes;
 use futures::StreamExt;
@@ -3712,8 +3712,6 @@ struct TransactionKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_node_server_pair;
-    use crate::{init_logger, timeout};
     use std::net::Ipv4Addr;
 
     mod new {
@@ -3815,7 +3813,6 @@ mod tests {
 
     mod find_node {
         use super::*;
-        use crate::create_tracker_context;
 
         #[tokio::test]
         async fn test_find_node() {
@@ -3906,7 +3903,6 @@ mod tests {
     mod get_peers {
         use super::*;
         use crate::channel::channel;
-        use crate::create_tracker_context;
         use std::str::FromStr;
 
         #[tokio::test]
@@ -4174,7 +4170,6 @@ mod tests {
 
     mod scrape_info_hashes {
         use super::*;
-        use crate::create_tracker_context;
         use std::str::FromStr;
 
         #[tokio::test]

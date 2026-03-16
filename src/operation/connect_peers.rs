@@ -354,7 +354,6 @@ impl Drop for TorrentConnectPeersOperation {
 mod tests {
     use super::*;
     use crate::create_torrent_context;
-    use crate::init_logger;
     use tempfile::tempdir;
 
     #[tokio::test]

@@ -587,7 +587,6 @@ impl<'de> Visitor<'de> for InfoHashVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_logger;
     use crate::tests::read_test_file_to_bytes;
     use crate::{Magnet, TorrentMetadata};
     use rand::{rng, Rng};

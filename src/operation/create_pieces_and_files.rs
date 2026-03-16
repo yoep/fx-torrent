@@ -216,7 +216,6 @@ impl TorrentOperation for TorrentCreatePiecesAndFilesOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_logger;
     use tempfile::tempdir;
 
     mod create_pieces {

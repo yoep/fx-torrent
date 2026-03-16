@@ -387,8 +387,6 @@ impl Ord for PeerInfo {
 mod tests {
     use super::*;
 
-    use crate::init_logger;
-
     mod peer_pool {
         use super::*;
         use crate::peer::tests::MockPeer;

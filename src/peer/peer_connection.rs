@@ -373,21 +373,16 @@ where
 mod tests {
     use super::*;
 
-    use crate::create_utp_socket_pair;
-    use crate::init_logger;
     use crate::peer::protocol::tests::UtpPacketCaptureExtension;
     use crate::peer::protocol::Piece;
     use crate::peer::ProtocolExtensionFlags;
     use crate::InfoHash;
-
     use std::net::Ipv4Addr;
     use std::str::FromStr;
     use tokio::net::TcpListener;
 
     mod utp {
         use super::*;
-        use crate::{create_utp_stream_pair, timeout};
-        use std::time::Duration;
 
         #[tokio::test]
         async fn test_peer_connection_receive() {
@@ -515,9 +510,6 @@ mod tests {
 
     mod peer_reader {
         use super::*;
-
-        use crate::timeout;
-
         use std::pin::Pin;
         use std::task::{Context, Poll};
         use tokio::io::ReadBuf;

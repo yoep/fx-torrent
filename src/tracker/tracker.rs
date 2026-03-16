@@ -518,7 +518,6 @@ struct InnerTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_logger;
     use crate::tests::read_test_file_to_bytes;
     use crate::tracker::http::HttpServer;
     use crate::tracker::TrackerServer;

@@ -200,7 +200,6 @@ impl Bucket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_logger;
     use std::net::Ipv4Addr;
     use std::net::SocketAddr;
 

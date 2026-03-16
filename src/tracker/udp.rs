@@ -647,12 +647,8 @@ struct ScrapeFileMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::peer::PeerId;
-    use crate::tests::create_metadata;
     use crate::TorrentMetadata;
-
-    use crate::init_logger;
     use tokio::net::lookup_host;
 
     #[test]
@@ -682,7 +678,7 @@ mod tests {
     #[tokio::test]
     async fn test_udp_tracker_announce() {
         init_logger!();
-        let torrent_info = create_metadata("debian-udp.torrent");
+        let torrent_info = metadata!("debian-udp.torrent");
         let announce = Announcement {
             info_hash: torrent_info.info_hash.clone(),
             peer_id: PeerId::new(),
@@ -716,7 +712,7 @@ mod tests {
     #[tokio::test]
     async fn test_udp_tracker_scrape() {
         init_logger!();
-        let torrent_info = create_metadata("debian-udp.torrent");
+        let torrent_info = metadata!("debian-udp.torrent");
         let mut connection = create_connection(&torrent_info).await;
 
         connection

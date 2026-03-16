@@ -249,7 +249,6 @@ impl Debug for TorrentFileValidationOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_logger;
     use crate::operation::TorrentCreatePiecesAndFilesOperation;
     use crate::storage::DiskStorage;
     use crate::tests::copy_test_file;

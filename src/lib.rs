@@ -86,8 +86,13 @@ pub use torrent_peer::*;
 
 use std::ops::Range;
 
-mod bloom_filter;
+#[cfg(test)]
+#[macro_use]
+mod test_macros;
+#[macro_use]
 mod channel;
+
+mod bloom_filter;
 mod compact;
 mod config;
 #[cfg(feature = "dht")]
@@ -233,33 +238,15 @@ where
 #[cfg(test)]
 pub mod tests {
     use super::*;
-
     use crate::peer::tests::new_tcp_peer_discovery;
     use crate::peer::{BitTorrentPeer, PeerDiscovery, PeerId, PeerStream};
-
     use log::trace;
     use std::net::SocketAddr;
     use std::path::PathBuf;
-    use std::str::FromStr;
-    use std::sync::Once;
     use std::time::Duration;
     use std::{env, fs};
     use tokio::net::TcpStream;
     use tokio::sync::mpsc::unbounded_channel;
-
-    pub static INIT: Once = Once::new();
-
-    /// Create the torrent metadata from the given uri.
-    /// The uri can either point to a `.torrent` file or a magnet link.
-    pub fn create_metadata(uri: &str) -> TorrentMetadata {
-        if uri.starts_with("magnet:") {
-            let magnet = Magnet::from_str(uri).unwrap();
-            TorrentMetadata::try_from(magnet).unwrap()
-        } else {
-            let torrent_info_data = read_test_file_to_bytes(uri);
-            TorrentMetadata::try_from(torrent_info_data.as_slice()).unwrap()
-        }
-    }
 
     #[macro_export]
     macro_rules! create_torrent_context {
@@ -311,7 +298,6 @@ pub mod tests {
         }};
         ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr, $storage:expr) => {{
             use crate::peer::PeerDiscovery;
-            use crate::tests::create_metadata;
             use crate::torrent_data::DataPool;
             use crate::tracker::TrackerClient;
             use crate::{
@@ -325,7 +311,7 @@ pub mod tests {
             let config: TorrentConfig = $config;
             let discoveries: Vec<Box<dyn PeerDiscovery>> = $discoveries;
             let dht: DhtOption = DhtOption::from($dht);
-            let metadata: TorrentMetadata = create_metadata(uri);
+            let metadata: TorrentMetadata = metadata!(uri);
             let info_hash = metadata.info_hash.clone();
             let tracker_manager = TrackerClient::new(Duration::from_secs(2));
             let config = TorrentConfig::builder()
@@ -337,7 +323,7 @@ pub mod tests {
                 .peers_in_flight(config.peers_in_flight)
                 .build();
             let data_pool = DataPool::new();
-            let (command_sender, receiver) = crate::channel!();
+            let (command_sender, receiver) = channel!(512);
 
             (
                 TorrentContext::new(
@@ -440,7 +426,6 @@ pub mod tests {
             use crate::dht::DhtTracker;
             use crate::operation::TorrentOperation;
             use crate::peer::PeerDiscovery;
-            use crate::tests::create_metadata;
             use crate::{DhtOption, Torrent, TorrentConfig, TorrentFlags};
 
             let uri: &str = $uri;
@@ -449,7 +434,7 @@ pub mod tests {
             let operations: Vec<Box<dyn TorrentOperation>> = $operations;
             let discoveries: Vec<Box<dyn PeerDiscovery>> = $discoveries;
             let dht: Option<DhtTracker> = $dht;
-            let torrent_info = create_metadata(uri);
+            let torrent_info = metadata!(uri);
             let tracker_manager = $tracker_manager;
             let config = TorrentConfig::builder()
                 .path($temp_dir)
@@ -470,69 +455,6 @@ pub mod tests {
                 .dht(DhtOption::from(dht))
                 .build()
                 .unwrap()
-        }};
-    }
-
-    /// A macro wrapper for [`tokio::time::timeout`] that awaits a future with a timeout duration.
-    ///
-    /// # Returns
-    ///
-    /// It returns the future result or timeout.
-    #[macro_export]
-    macro_rules! timeout {
-        ($future:expr, $duration:expr) => {{
-            use std::io;
-            use tokio::time::timeout;
-            let future = $future;
-            let duration = $duration;
-
-            timeout(duration, future)
-                .await
-                .map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!("after {}.{:03}s", duration.as_secs(), duration.as_millis()),
-                    )
-                })
-                .expect("operation timed-out")
-        }};
-        ($future:expr, $duration:expr, $message:expr) => {{
-            use std::io;
-            use tokio::time::timeout;
-            let future = $future;
-            let duration = $duration;
-
-            timeout(duration, future)
-                .await
-                .map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!("after {}.{:03}s", duration.as_secs(), duration.as_millis()),
-                    )
-                })
-                .expect($message)
-        }};
-    }
-
-    /// Receive a message result from the given receiver, or panic if the timeout is reached.
-    /// Accepts an optional custom (panic) error message.
-    #[macro_export]
-    macro_rules! recv_timeout {
-        ($receiver:expr, $duration:expr) => {{
-            use crate::timeout;
-            use tokio::pin;
-            let receiver = $receiver;
-            let future = pin!(receiver.recv());
-
-            timeout!(future, $duration).unwrap()
-        }};
-        ($receiver:expr, $duration:expr, $message:expr) => {{
-            use crate::timeout;
-            use tokio::pin;
-            let receiver = $receiver;
-            let future = pin!(receiver.recv());
-
-            timeout!(future, $duration, $message).unwrap()
         }};
     }
 
@@ -657,70 +579,6 @@ pub mod tests {
         fs::copy(&source, &destination).unwrap();
 
         destination.to_str().unwrap().to_string()
-    }
-
-    /// Initializes the logger with the specified log level.
-    #[macro_export]
-    macro_rules! init_logger {
-        () => {{
-            init_logger!(log::LevelFilter::Trace)
-        }};
-        ($level:expr) => {{
-            use log4rs::config::runtime::{Appender, Config, Logger, Root};
-            use log4rs::append::console::ConsoleAppender;
-            use log4rs::encode::pattern::PatternEncoder;
-            use log::LevelFilter;
-
-            let level: LevelFilter = $level;
-
-            crate::tests::INIT.call_once(|| {
-                log4rs::init_config(Config::builder()
-                    .appender(Appender::builder().build("stdout", Box::new(ConsoleAppender::builder()
-                        .encoder(Box::new(PatternEncoder::new("\x1B[37m{d(%Y-%m-%d %H:%M:%S%.3f)}\x1B[0m {h({l:>5.5})} \x1B[35m{I:>6.6}\x1B[0m \x1B[37m---\x1B[0m \x1B[37m[{T:>15.15}]\x1B[0m \x1B[36m{t:<60.60}\x1B[0m \x1B[37m:\x1B[0m {m}{n}")))
-                        .build())))
-                    .logger(Logger::builder().build("axum", LevelFilter::Info))
-                    .logger(Logger::builder().build("fx_callback", LevelFilter::Info))
-                    .logger(Logger::builder().build("hyper_util", LevelFilter::Info))
-                    .logger(Logger::builder().build("mio", LevelFilter::Info))
-                    .logger(Logger::builder().build("reqwest", LevelFilter::Info))
-                    .build(Root::builder().appender("stdout").build(level))
-                    .unwrap())
-                    .unwrap();
-            })
-        }};
-    }
-
-    #[macro_export]
-    macro_rules! assert_timeout {
-        ($timeout:expr, $condition:expr) => {{
-            assert_timeout!($timeout, $condition, "")
-        }};
-        ($timeout:expr, $condition:expr, $message:expr) => {{
-            use std::time::Duration;
-            use tokio::select;
-            use tokio::time;
-
-            let result = select! {
-                _ = time::sleep($timeout) => false,
-                result = async {
-                    loop {
-                        if $condition {
-                            return true;
-                        }
-
-                        time::sleep(Duration::from_millis(10)).await;
-                    }
-                } => result,
-            };
-
-            if !result {
-                assert!(
-                    false,
-                    concat!("Timeout assertion failed after {:?}: ", $message),
-                    $timeout
-                );
-            }
-        }};
     }
 
     mod overlapping_range {

@@ -295,7 +295,6 @@ struct TorrentPeer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_logger;
     use std::net::Ipv4Addr;
     use std::str::FromStr;
 

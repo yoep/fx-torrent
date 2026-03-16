@@ -110,9 +110,7 @@ impl TorrentOperation for TorrentStatsOperation {
 mod tests {
     use super::*;
     use crate::peer::Peer;
-    use crate::{
-        create_peer_pair, create_torrent, create_torrent_context, init_logger, TorrentEvent,
-    };
+    use crate::{create_peer_pair, create_torrent, create_torrent_context, TorrentEvent};
     use fx_callback::Callback;
     use std::time::Duration;
     use tempfile::tempdir;

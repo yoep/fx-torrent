@@ -347,10 +347,7 @@ impl HttpPeerContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::create_torrent;
-    use crate::init_logger;
-
     use crate::tests::read_test_file_to_bytes;
     use tempfile::tempdir;
 

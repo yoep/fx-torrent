@@ -258,10 +258,9 @@ impl<T> InnerReceiverChannel<T> {
 /// This macro supports:
 /// - `channel!()` for a bounded (backpressure) channel with default capacity `256`.
 /// - `channel!(N)` for a bounded (backpressure) channel with capacity `N`.
-#[macro_export]
 macro_rules! channel {
     () => {{
-        crate::channel!(256)
+        channel!(256)
     }};
     ($limit:expr) => {{
         let limit: usize = $limit;

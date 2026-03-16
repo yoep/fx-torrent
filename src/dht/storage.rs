@@ -201,7 +201,6 @@ impl PartialEq for MutableItemProperties {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_logger;
     use ed25519::Signature;
     use std::net::Ipv4Addr;
     use std::str::FromStr;

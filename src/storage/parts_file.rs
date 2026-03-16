@@ -186,7 +186,6 @@ struct PartSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_logger;
     use tempfile::tempdir;
 
     #[tokio::test]

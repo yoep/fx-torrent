@@ -121,8 +121,8 @@ impl Drop for TorrentDhtPeersOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::create_torrent_context;
     use crate::dht::DhtTracker;
-    use crate::{create_torrent_context, init_logger, timeout};
     use tempfile::tempdir;
     use tokio::time;
 

@@ -15,9 +15,9 @@ use crate::tracker::{
     AnnounceEvent, AnnouncementResult, TrackerClient, TrackerClientEvent, TrackerEntry,
 };
 use crate::{
-    channel, DhtOption, FileAttributeFlags, FileIndex, InfoHash, Metrics, Piece, PieceChunkPool,
-    PieceIndex, PiecePart, PiecePriority, Sha1Hash, Sha256Hash, TorrentError, TorrentFlags,
-    TorrentMetadata, TorrentMetadataInfo, TorrentPeer, DEFAULT_TORRENT_EXTENSIONS,
+    DhtOption, FileAttributeFlags, FileIndex, InfoHash, Metrics, Piece, PieceChunkPool, PieceIndex,
+    PiecePart, PiecePriority, Sha1Hash, Sha256Hash, TorrentError, TorrentFlags, TorrentMetadata,
+    TorrentMetadataInfo, TorrentPeer, DEFAULT_TORRENT_EXTENSIONS,
     DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
 };
 use bit_vec::BitVec;
@@ -3393,6 +3393,8 @@ impl PartialEq for TorrentContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::create_torrent;
+    use crate::create_torrent_context;
     use crate::operation::{
         TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation,
         TorrentFileValidationOperation, TorrentStatsOperation,
@@ -3401,8 +3403,6 @@ mod tests {
     use crate::storage::MemoryStorage;
     use crate::tests::helpers::{wait_for_torrent_pieces, wait_for_torrent_state};
     use crate::tests::{copy_test_file, read_test_file_to_bytes};
-    use crate::{create_torrent, timeout};
-    use crate::{create_torrent_context, init_logger};
     use crate::{InfoHash, Magnet};
     use std::net::Ipv4Addr;
     use std::ops::Sub;
