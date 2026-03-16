@@ -30,6 +30,8 @@ pub enum Error {
     Response(u16, String),
     #[error("timed-out while waiting for a response from the node")]
     Timeout,
+    #[error("method is unsupported")]
+    Unsupported,
     #[error("failed to parse message, {0}")]
     Parse(String),
     #[error("an io error occurred, {0}")]
@@ -69,6 +71,7 @@ impl PartialEq for Error {
             (Self::MissingCryptoProvider, Self::MissingCryptoProvider) => true,
             (Self::Response(code, _), Self::Response(other_code, _)) => code == other_code,
             (Self::Timeout, Self::Timeout) => true,
+            (Self::Unsupported, Self::Unsupported) => true,
             (Self::Parse(_), Self::Parse(_)) => true,
             (Self::Io(_), Self::Io(_)) => true,
             (Self::Closed, Self::Closed) => true,

@@ -1,3 +1,4 @@
+use crate::dht::utils::generate_mutable_item_key;
 use crate::dht::{Error, PeerEntry, PublicKey, Result};
 use crate::{InfoHash, Sha1Hash};
 use ed25519::SignatureBytes;
@@ -72,7 +73,7 @@ impl DhtStorage {
     ) -> Result<Sha1Hash> {
         let key: Sha1Hash = match mutable_properties.as_ref() {
             None => Self::generate_value_key(&value)?,
-            Some(properties) => Self::generate_mutable_key(
+            Some(properties) => generate_mutable_item_key(
                 properties.public_key.as_slice(),
                 properties.salt.as_ref().map(|e| e.as_slice()),
             )?,
@@ -102,11 +103,6 @@ impl DhtStorage {
             },
         );
         Ok(key)
-    }
-
-    /// Calculate the hash key for the given public key and optional salt.
-    pub fn calculate_hash(&self, public_key: &PublicKey, salt: Option<&[u8]>) -> Result<Sha1Hash> {
-        Self::generate_mutable_key(public_key.as_ref(), salt)
     }
 
     /// Updates the peer information for the given info hash.
@@ -154,18 +150,6 @@ impl DhtStorage {
                 Sha1Hash::try_from(Sha1::digest(bytes.as_slice()))
                     .map_err(|e| Error::Parse(e.to_string()))
             })
-    }
-
-    /// Try to generate the hash key from the given `public key` and optional `salt`.
-    ///
-    /// Returns the [Sha1Hash] for the [MutableItemProperties], else an error.   
-    fn generate_mutable_key(public_key: &[u8], salt: Option<&[u8]>) -> Result<Sha1Hash> {
-        let mut bytes = public_key.to_vec();
-        if let Some(salt) = salt.as_ref() {
-            bytes.extend_from_slice(salt);
-        }
-
-        Sha1Hash::try_from(Sha1::digest(bytes.as_slice())).map_err(|e| Error::Parse(e.to_string()))
     }
 }
 
@@ -395,61 +379,6 @@ mod tests {
 
             let result = DhtStorage::generate_value_key(&value)
                 .expect("expected the value key to be generated");
-
-            assert_eq!(expected_result, result);
-        }
-
-        /// BEP44: test 2 (mutable with salt)
-        #[test]
-        fn test_generate_mutable_key() {
-            let expected_result = Sha1Hash::try_from(
-                hex::decode("411eba73b6f087ca51a3795d9c8c938d365e32c1").unwrap(),
-            )
-            .unwrap();
-            let public_key: PublicKey = PublicKey::try_from(
-                hex::decode("77ff84905a91936367c01360803104f92432fcd904a43511876df5cdf3e7e548")
-                    .unwrap(),
-            )
-            .unwrap();
-            let salt = b"foobar";
-
-            let result = DhtStorage::generate_mutable_key(&public_key, Some(salt))
-                .expect("expected the value key to be generated");
-
-            assert_eq!(expected_result, result);
-        }
-    }
-
-    mod calculate_hash {
-        use super::*;
-        use rand::{rng, Rng};
-
-        #[test]
-        fn test_without_salt() {
-            let mut public_key: PublicKey = PublicKey::default();
-            rng().fill_bytes(&mut public_key);
-            let expected_result = Sha1Hash::try_from(Sha1::digest(public_key.as_ref())).unwrap();
-            let storage = DhtStorage::new(16);
-
-            let result = storage.calculate_hash(&public_key, None).unwrap();
-
-            assert_eq!(expected_result, result);
-        }
-
-        #[test]
-        fn test_with_salt() {
-            let mut public_key: PublicKey = PublicKey::default();
-            rng().fill_bytes(&mut public_key);
-            let salt = b"FooBar".to_vec();
-            let expected_result = Sha1Hash::try_from(Sha1::digest(
-                [public_key.as_ref(), salt.as_slice()].concat(),
-            ))
-            .unwrap();
-            let storage = DhtStorage::new(16);
-
-            let result = storage
-                .calculate_hash(&public_key, Some(salt.as_ref()))
-                .unwrap();
 
             assert_eq!(expected_result, result);
         }

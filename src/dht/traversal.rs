@@ -153,13 +153,11 @@ struct PendingQuery {
 mod tests {
     use super::*;
     use crate::dht::observer::Observer;
-    use crate::dht::storage::DhtStorage;
-    use crate::dht::{DhtEvent, Event};
+    use crate::dht::DhtEvent;
     use fx_callback::Callback;
     use std::net::Ipv4Addr;
     use std::time::Duration;
     use tokio::sync::oneshot;
-    use tokio::{select, time};
 
     #[test]
     fn test_new() {
@@ -209,9 +207,8 @@ mod tests {
         let mut source = create_tracker_context!();
         let mut target = create_tracker_context!();
         let source_id = source.routing_table.id;
-        let target_id = target.routing_table.id;
         let target_addr: SocketAddr = (Ipv4Addr::LOCALHOST, target.socket_addr.port()).into();
-        let (tx, mut rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         let (sender, _receiver) = channel!(2);
         let mut traversal = TraversalAlgorithm::new(8, vec![target_addr.clone()], sender.clone());
 
@@ -229,47 +226,30 @@ mod tests {
         // start the target main loop in a separate task
         tokio::spawn(async move {
             let (sender, receiver) = channel!(1);
-            let storage = DhtStorage::new(16);
             let observer = Observer::new(sender.clone());
             let traversal = TraversalAlgorithm::new(8, vec![], sender);
 
             target
-                .run(
-                    Duration::from_secs(60),
-                    storage,
-                    observer,
-                    traversal,
-                    receiver,
-                )
+                .run(Duration::from_secs(60), observer, traversal, receiver)
                 .await;
         });
 
         // run the traversal algorithm
         traversal.run(source_id, &mut source).await;
 
-        // process the incoming message
-        let mut observer = Observer::new(sender);
-        let mut peers = DhtStorage::new(16);
-        let timeout = time::sleep(Duration::from_millis(750));
-        tokio::pin!(timeout);
-        let result = loop {
-            select! {
-                _ = &mut timeout => {
-                    assert!(false, "timeout waiting for node to be added");
-                },
-                result = &mut rx => {
-                    break result;
-                },
-                Some(message) = source.receiver.recv() => {
-                    source.run_step(Event::Incoming(message), &mut observer, &mut traversal, &mut peers).await;
-                }
-            }
-        }
-            .unwrap();
-        assert_eq!(
-            target_id, result.id,
-            "expected the target node to have been added"
-        );
+        // start the source main loop in a separate task
+        tokio::spawn(async move {
+            let (sender, receiver) = channel!(1);
+            let observer = Observer::new(sender.clone());
+            let traversal = TraversalAlgorithm::new(8, vec![], sender);
+            source
+                .run(Duration::from_secs(60), observer, traversal, receiver)
+                .await
+        });
+
+        // wait for a node to be discovered
+        let _ =
+            timeout!(rx, Duration::from_millis(500)).expect("expected a node to have been added");
 
         // try to add the node again for traversing
         traversal.add_node(None, target_addr);
