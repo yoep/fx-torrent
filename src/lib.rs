@@ -1,22 +1,17 @@
 /*!
 # FX-Torrent
 
-![Build](https://github.com/yoep/fx-torrent/workflows/Build/badge.svg)
-![Version](https://img.shields.io/github/v/tag/yoep/fx-torrent?label=version)
-[![Crates](https://img.shields.io/crates/v/fx-torrent)](https://crates.io/crates/fx-torrent)
-[![License: Apache-2.0](https://img.shields.io/github/license/yoep/fx-torrent)](./LICENSE)
-[![codecov](https://codecov.io/gh/yoep/fx-torrent/graph/badge.svg?token=CDT6SG6YEL)](https://codecov.io/gh/yoep/fx-torrent)
-
 FX-Torrent is the most complete BitTorrent implementation fully written in Rust, which supports both Linux, MacOS, and Windows.
 It supports most of the Bittorrent protocol specifications, such as multi-file torrents, validating existing files, resuming torrent files,
 and is based on the `libtorrent` library for functionality and naming convention.
 
 ## Getting Started
 
-Create a new [FxTorrentSession] which manages one or more torrents.
-A [Torrent] can be created from a magnet link, torrent file, or passing the raw [TorrentMetadata].
+The entry point for the `fx_torrent` crate is the [`FxTorrentSession`].
+A session manages the lifecycle of multiple torrents.
 
-_create a new session with torrent_
+### Basic Usage
+
 ```rust
 use std::io;
 use fx_torrent::{FxTorrentSession, Session, SessionConfig, TorrentFlags, TorrentMetadata};
@@ -28,27 +23,77 @@ async fn main() -> Result<(), io::Error> {
     let session = FxTorrentSession::builder()
         .config(
             SessionConfig::builder()
-                .base_path("/torrent/location/directory")
+                .base_path("/downloads")
                 .client_name("MyClient")
                 .build(),
         )
-        .build()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .build()?;
 
-    // Create a torrent from a magnet link
-    let magnet_torrent = session.add_torrent_from_uri("magnet:?XXX", TorrentFlags::default()).await;
+    // 1. Add a torrent via Magnet URI
+    let magnet_torrent = session
+        .add_torrent_from_uri("magnet:?xt=urn:btih:...", TorrentFlags::default())
+        .await;
 
-    // Create a torrent from a torrent file
-    let file_torrent = session.add_torrent_from_uri("/tmp/example.torrent", TorrentFlags::default()).await;
+    // 2. Add a torrent from a local .torrent file
+    let file_torrent = session
+        .add_torrent_from_uri("/path/to/file.torrent", TorrentFlags::default())
+        .await;
 
-    // Create a torrent from metadata info
-    let data: &[u8] = &[0; 1024];
-    let metadata: TorrentMetadata = TorrentMetadata::try_from(data)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let metadata_torrent = session.add_torrent_from_metadata(metadata, TorrentFlags::Paused).await;
+    // 3. Add a torrent from raw metadata bytes
+    let data: &[u8] = &[0; 1024]; // Replace with actual bencoded bytes
+    let metadata = TorrentMetadata::try_from(data)?;
+    let metadata_torrent = session
+        .add_torrent_from_metadata(metadata, TorrentFlags::Paused)
+        .await;
 
     Ok(())
 }
+```
+
+### Working with Magnets and Metadata
+
+#### Magnets
+
+You can parse a magnet string or construct one manually using the builder pattern.
+
+```rust
+# use fx_torrent::Magnet;
+# fn example() {
+    // Parsing from a string
+    match Magnet::from_str("magnet:?xt=urn:btih:2C6B6858D61DA9543D4231A71DB4B1C9264B0685&...") {
+        Ok(magnet) => println!("{:?}", magnet),
+        Err(e) => println!("{:?}", e),
+    }
+
+    // Using the builder
+    match Magnet::builder()
+        .exact_topic("xt=urn:btih:2C6B6858D61DA9543D4231A71DB4B1C9264B0685")
+        .build() {
+        Ok(magnet) => println!("{:?}", magnet),
+        Err(e) => println!("{:?}", e),
+    }
+# }
+```
+
+#### Metadata
+
+Metadata can be decoded from bencoded bytes (using `TorrentMetadata::try_from`) or constructed manually.
+
+```rust
+# use fx_torrent::TorrentMetadata;
+# fn example() {
+    // Parsing from bencoded bytes
+    match TorrentMetadata::try_from(&[0; 1024]) {
+        Ok(metadata) => println!("{:?}", metadata),
+        Err(e) => println!("{:?}", e),
+    }
+
+    // Using the builder
+    let metadata = TorrentMetadata::builder()
+        .name("MyTorrent")
+        .build();
+    println!("{:?}", metadata);
+# }
 ```
 
 ### Examples
