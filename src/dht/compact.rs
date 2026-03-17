@@ -477,6 +477,34 @@ impl From<CompactIPv6Node> for Node {
 mod tests {
     use super::*;
 
+    mod compact_nodes {
+        use super::*;
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
+        #[test]
+        fn test_is_empty() {
+            let nodes: CompactIpNodes = CompactIPv4Nodes::from(vec![CompactIPv4Node {
+                id: NodeId::new(),
+                addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 6881))
+                    .try_into()
+                    .unwrap(),
+            }])
+            .into();
+            let result = nodes.is_empty();
+            assert_eq!(false, result, "expected nodes to have been present");
+
+            let nodes: CompactIpNodes = CompactIPv6Nodes::from(vec![CompactIPv6Node {
+                id: NodeId::new(),
+                addr: SocketAddr::from((Ipv6Addr::LOCALHOST, 6881))
+                    .try_into()
+                    .unwrap(),
+            }])
+            .into();
+            let result = nodes.is_empty();
+            assert_eq!(false, result, "expected nodes to have been present");
+        }
+    }
+
     mod compact_ipv4 {
         use super::*;
 

@@ -372,8 +372,11 @@ impl Drop for TorrentConnectPeersOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent_context;
+    use crate::peer::MockPeerDiscovery;
+    use crate::{create_torrent_context, peer};
+    use std::net::Ipv4Addr;
     use tempfile::tempdir;
+    use tokio::time;
 
     #[tokio::test]
     async fn test_execute() {
@@ -452,6 +455,66 @@ mod tests {
             None, operation.bursting_since,
             "expected the bursting since to be set"
         );
+    }
+
+    #[tokio::test]
+    async fn test_peer_connection_failed() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let mut dialer = MockPeerDiscovery::new();
+        dialer.expect_dial().returning(|_, _, _, _, _, _, _| {
+            Err(peer::Error::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "timeout",
+            )))
+        });
+        let dialers: Vec<Arc<dyn PeerDiscovery>> = vec![Arc::new(dialer)];
+        let (mut context, mut receiver) = create_torrent_context!(
+            "debian.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![],
+            None
+        );
+        let mut operation = TorrentConnectPeersOperation::new(false);
+
+        // add an invalid peer address
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 13470));
+        context.peer_pool_mut().add_peer_addresses(vec![addr], None);
+
+        // execute the operation
+        let result = operation.execute(&mut context, dialers.as_slice()).await;
+        assert_eq!(TorrentOperationResult::Continue, result);
+
+        // wait for the in_flight operation to complete
+        timeout!(
+            async {
+                loop {
+                    operation.poll_in_flight(&context);
+                    if operation.in_flight.is_empty() {
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(5)).await;
+                }
+            },
+            Duration::from_secs(1),
+            "expected the in flight operation to complete"
+        );
+
+        let command = timeout!(receiver.recv(), Duration::from_millis(250))
+            .expect("expected a command to have been sent");
+        match command {
+            TorrentCommand::PeerClosed { reason, .. } => {
+                assert_eq!(CloseReason::ConnectionFailed, reason);
+            }
+            _ => assert!(
+                false,
+                "expected TorrentCommand::PeerClosed, but got {:?}",
+                command
+            ),
+        }
     }
 
     mod webseed_url {
