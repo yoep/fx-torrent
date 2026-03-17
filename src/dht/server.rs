@@ -374,7 +374,7 @@ impl ServerNode {
             response: SampleInfoHashesResponse {
                 id: routing_table.id,
                 interval: 360,
-                nodes,
+                nodes: nodes.into(),
                 nodes6,
                 num: num as u32,
                 samples,
@@ -503,7 +503,7 @@ impl ServerNode {
                 id: routing_table.id,
                 token: Some(token),
                 value,
-                nodes,
+                nodes: nodes.into(),
                 nodes6,
                 sequence_nr,
                 public_key,

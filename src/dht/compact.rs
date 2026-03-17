@@ -8,15 +8,87 @@ use std::fmt::{Display, Formatter};
 
 const IPV4_NODE_SIZE: usize = 26;
 const IPV6_NODE_SIZE: usize = 38;
+const COMPACT_NODES_TYPE_MESSAGE: &str =
+    "expected a byte slice matching a list of compact IPv4 or IPv6 nodes";
 
 pub trait CompactIpNode {
     /// Returns the underlying compact node address as a byte slice.
     fn as_bytes(&self) -> Vec<u8>;
 }
 
-pub trait CompactIpNodes {
-    /// Returns the underlying compact address nodes as a byte slice.
-    fn as_bytes(&self) -> Vec<u8>;
+/// A list of either ipv4 or ipv6 compact nodes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum CompactIpNodes {
+    IPv4(CompactIPv4Nodes),
+    IPv6(CompactIPv6Nodes),
+}
+
+impl CompactIpNodes {
+    /// Check if the node vector is empty.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            CompactIpNodes::IPv4(nodes) => nodes.is_empty(),
+            CompactIpNodes::IPv6(nodes) => nodes.is_empty(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CompactIpNodes {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct CompactIpNodesVisitor;
+        impl<'de> Visitor<'de> for CompactIpNodesVisitor {
+            type Value = CompactIpNodes;
+
+            fn expecting(&self, f: &mut Formatter) -> std::fmt::Result {
+                write!(f, "{}", COMPACT_NODES_TYPE_MESSAGE)
+            }
+
+            fn visit_bytes<E>(self, bytes: &[u8]) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if bytes.len() == 0 {
+                    return Ok(CompactIpNodes::IPv4(CompactIPv4Nodes::default()));
+                }
+                if bytes.len() % IPV6_NODE_SIZE == 0 {
+                    return CompactIPv6Nodes::try_from(bytes)
+                        .map(CompactIpNodes::IPv6)
+                        .map_err(serde::de::Error::custom);
+                }
+                if bytes.len() % IPV4_NODE_SIZE == 0 {
+                    return CompactIPv4Nodes::try_from(bytes)
+                        .map(CompactIpNodes::IPv4)
+                        .map_err(serde::de::Error::custom);
+                }
+
+                Err(serde::de::Error::custom(COMPACT_NODES_TYPE_MESSAGE))
+            }
+        }
+
+        deserializer.deserialize_any(CompactIpNodesVisitor)
+    }
+}
+
+impl From<CompactIPv4Nodes> for CompactIpNodes {
+    fn from(nodes: CompactIPv4Nodes) -> Self {
+        CompactIpNodes::IPv4(nodes)
+    }
+}
+
+impl From<CompactIPv6Nodes> for CompactIpNodes {
+    fn from(nodes: CompactIPv6Nodes) -> Self {
+        CompactIpNodes::IPv6(nodes)
+    }
+}
+
+impl Default for CompactIpNodes {
+    fn default() -> Self {
+        CompactIpNodes::IPv4(CompactIPv4Nodes::default())
+    }
 }
 
 /// A list of compact IPv4 nodes.
@@ -44,10 +116,9 @@ impl CompactIPv4Nodes {
     pub fn as_slice(&self) -> &[CompactIPv4Node] {
         self.0.as_slice()
     }
-}
 
-impl CompactIpNodes for CompactIPv4Nodes {
-    fn as_bytes(&self) -> Vec<u8> {
+    /// Returns the underlying compact address nodes as a byte slice.
+    pub fn as_bytes(&self) -> Vec<u8> {
         self.0.iter().map(CompactIpNode::as_bytes).concat()
     }
 }
@@ -306,10 +377,9 @@ impl CompactIPv6Nodes {
     pub fn as_slice(&self) -> &[CompactIPv6Node] {
         self.0.as_slice()
     }
-}
 
-impl CompactIpNodes for CompactIPv6Nodes {
-    fn as_bytes(&self) -> Vec<u8> {
+    /// Returns the underlying compact address nodes as a byte slice.
+    pub fn as_bytes(&self) -> Vec<u8> {
         self.0.iter().map(CompactIpNode::as_bytes).concat()
     }
 }

@@ -1,6 +1,6 @@
 use crate::bloom_filter::BloomFilter;
 use crate::channel::{ChannelReceiver, ChannelSender, Reply, Response};
-use crate::dht::compact::{CompactIPv4Nodes, CompactIPv6Nodes};
+use crate::dht::compact::{CompactIPv6Nodes, CompactIpNodes};
 use crate::dht::krpc::{
     AnnouncePeerRequest, AnnouncePeerResponse, ErrorMessage, FindNodeRequest, FindNodeResponse,
     GetPeersRequest, GetPeersResponse, GetRequest, GetResponse, Message, MessagePayload,
@@ -23,7 +23,7 @@ use derive_more::Display;
 use ed25519::SignatureBytes;
 use futures::StreamExt;
 use fx_callback::{Callback, MultiThreadedCallback, Subscriber, Subscription};
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use log::{debug, error, trace, warn};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -2978,14 +2978,23 @@ impl TrackerContext {
     }
 
     /// Collect the IPv4 and IPv6 nodes from the compact nodes.
-    fn collect_nodes(nodes: &CompactIPv4Nodes, nodes6: &CompactIPv6Nodes) -> Vec<NodeKey> {
+    fn collect_nodes(nodes: &CompactIpNodes, nodes6: &CompactIPv6Nodes) -> Vec<NodeKey> {
+        let nodes = match nodes {
+            CompactIpNodes::IPv4(nodes) => {
+                Either::Left(nodes.as_slice().into_iter().map(|e| NodeKey {
+                    id: e.id,
+                    addr: SocketAddr::from(&e.addr),
+                }))
+            }
+            CompactIpNodes::IPv6(nodes) => {
+                Either::Right(nodes.as_slice().into_iter().map(|e| NodeKey {
+                    id: e.id,
+                    addr: SocketAddr::from(&e.addr),
+                }))
+            }
+        };
+
         nodes
-            .as_slice()
-            .into_iter()
-            .map(|e| NodeKey {
-                id: e.id,
-                addr: SocketAddr::from(&e.addr),
-            })
             .chain(nodes6.as_slice().into_iter().map(|e| NodeKey {
                 id: e.id,
                 addr: SocketAddr::from(&e.addr),

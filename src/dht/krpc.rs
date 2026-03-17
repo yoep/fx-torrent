@@ -1,4 +1,4 @@
-use crate::dht::compact::{CompactIPv4Nodes, CompactIPv6Nodes};
+use crate::dht::compact::{CompactIPv4Nodes, CompactIPv6Nodes, CompactIpNodes};
 use crate::dht::{Error, NodeId, NodeToken, Result};
 use crate::{CompactIpAddr, InfoHash, Sha1Hash};
 use bitmask_enum::bitmask;
@@ -353,8 +353,8 @@ pub struct GetPeersResponse {
     pub token: Option<NodeToken>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub values: Vec<CompactIpAddr>,
-    #[serde(default, skip_serializing_if = "CompactIPv4Nodes::is_empty")]
-    pub nodes: CompactIPv4Nodes,
+    #[serde(default, skip_serializing_if = "CompactIpNodes::is_empty")]
+    pub nodes: CompactIpNodes,
     #[serde(default, skip_serializing_if = "CompactIPv6Nodes::is_empty")]
     pub nodes6: CompactIPv6Nodes,
     /// BEP33 - Bloom Filter representing all stored peers for the info hash.
@@ -401,8 +401,8 @@ pub struct SampleInfoHashesRequest {
 pub struct SampleInfoHashesResponse {
     pub id: NodeId,
     pub interval: u32,
-    #[serde(default, skip_serializing_if = "CompactIPv4Nodes::is_empty")]
-    pub nodes: CompactIPv4Nodes,
+    #[serde(default, skip_serializing_if = "CompactIpNodes::is_empty")]
+    pub nodes: CompactIpNodes,
     #[serde(default, skip_serializing_if = "CompactIPv6Nodes::is_empty")]
     pub nodes6: CompactIPv6Nodes,
     /// The number of info hashes in storage
@@ -466,8 +466,8 @@ pub struct GetResponse {
     pub token: Option<NodeToken>,
     #[serde(default, rename = "v", skip_serializing_if = "Option::is_none")]
     pub value: Option<Value>,
-    #[serde(default, skip_serializing_if = "CompactIPv4Nodes::is_empty")]
-    pub nodes: CompactIPv4Nodes,
+    #[serde(default, skip_serializing_if = "CompactIpNodes::is_empty")]
+    pub nodes: CompactIpNodes,
     #[serde(default, skip_serializing_if = "CompactIPv6Nodes::is_empty")]
     pub nodes6: CompactIPv6Nodes,
     /// The sequence number of the mutable item
