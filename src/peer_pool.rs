@@ -1,10 +1,11 @@
-use crate::peer::{Peer, PeerHandle, PeerState};
+use crate::peer::{CloseReason, Peer, PeerHandle, PeerState};
 use crate::{PeerPriority, TorrentHandle, TorrentPeer};
 use derive_more::Display;
 use itertools::Itertools;
-use log::{debug, warn};
+use log::{debug, trace, warn};
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -13,6 +14,34 @@ use tokio::time;
 
 const CONNECTION_FAILURE_THRESHOLD: usize = 3;
 
+/// The identifier of a peer within the peer pool.
+#[derive(Debug)]
+pub enum PeerIdentifier {
+    Addr(SocketAddr),
+    Handle(PeerHandle),
+}
+
+impl From<SocketAddr> for PeerIdentifier {
+    fn from(addr: SocketAddr) -> Self {
+        Self::Addr(addr)
+    }
+}
+
+impl From<PeerHandle> for PeerIdentifier {
+    fn from(handle: PeerHandle) -> Self {
+        Self::Handle(handle)
+    }
+}
+
+impl Display for PeerIdentifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PeerIdentifier::Addr(addr) => write!(f, "{}", addr),
+            PeerIdentifier::Handle(handle) => write!(f, "{}", handle),
+        }
+    }
+}
+
 /// The failure reason when adding a peer failed.
 #[derive(Debug, Error, PartialEq)]
 pub enum AddReason {
@@ -20,17 +49,6 @@ pub enum AddReason {
     Duplicate,
     #[error("pool limit has been reached")]
     LimitReached,
-}
-
-/// The reason why a peer has been closed.
-#[derive(Debug, PartialEq)]
-pub enum CloseReason {
-    /// Establishing a connection to the remote peer failed.
-    ConnectionFailed,
-    /// The client has closed the connection with the remote peer.
-    Client,
-    /// The remote peer has closed the connection.
-    Remote,
 }
 
 /// The torrent peer pool manager for a single torrent.
@@ -59,16 +77,6 @@ impl PeerPool {
         }
     }
 
-    /// Get the total amount of peer connections within the pool.
-    pub fn len(&self) -> usize {
-        self.peers.len()
-    }
-
-    /// Get the limit of the peer pool.
-    pub fn pool_limit(&self) -> usize {
-        self.limit
-    }
-
     /// Get a torrent peer for the given handle.
     ///
     /// It returns the torrent peer instance when found, else [None].
@@ -92,10 +100,17 @@ impl PeerPool {
     pub fn add_peer(&mut self, peer: Box<dyn Peer>) -> Result<(), AddReason> {
         let handle = peer.handle();
 
+        // update the peer info
+        {
+            let info = self.find_or_insert(&peer.addr(), None);
+            info.is_in_use = true;
+            info.last_connected = Some(Instant::now());
+        }
+
         // check if we've reached the pool limit
         if self.peers.len() >= self.limit {
             debug!(
-                "Peer pool {} is unable to add peer {}, pool limit reached",
+                "Torrent {} is unable to add peer {}, pool limit reached",
                 self, handle
             );
             return Err(AddReason::LimitReached);
@@ -109,13 +124,6 @@ impl PeerPool {
 
         self.peers.insert(handle, Arc::from(peer));
         Ok(())
-    }
-
-    /// Remove a torrent [Peer] from the pool by the given [PeerHandle].
-    ///
-    /// It returns the peer info when the peer was found and removed, else [None].
-    pub async fn remove_peer(&mut self, handle: &PeerHandle) -> Option<Arc<dyn Peer>> {
-        self.internal_remove_peer(handle).await
     }
 
     /// Get the total amount of candidates for creating new connections.
@@ -134,39 +142,72 @@ impl PeerPool {
             .filter(|addr| !self.peer_list.contains_key(addr))
             // filter out any existing connections
             .filter(|addr| !self.peers.iter().any(|(_, peer)| peer.addr() == *addr))
-            .map(|addr| {
-                if let Some(torrent_addr) = torrent_addr {
-                    (addr, PeerInfo::new_with_rank(addr, &torrent_addr))
-                } else {
-                    (addr, PeerInfo::new(addr))
-                }
-            })
             .collect();
         if addrs.is_empty() {
             return;
         }
 
         let total_addresses = addrs.len();
-        self.peer_list.extend(addrs);
+        for addr in addrs {
+            let _ = self.find_or_insert(&addr, torrent_addr);
+        }
         debug!(
             "Torrent {} added {} new peer addresses to the pool",
-            self.handle, total_addresses
+            self, total_addresses
         );
     }
 
-    /// Updates the given peer address to be no longer in use.
-    pub fn peer_connection_closed(&mut self, addr: &SocketAddr, reason: CloseReason) {
-        if let Some(peer) = self.peer_list.get_mut(addr) {
-            match reason {
-                CloseReason::ConnectionFailed => {
-                    peer.failure_count = peer.failure_count.saturating_add(1);
-                }
-                _ => {}
+    /// Inform the pool that a peer connection has been closed.
+    ///
+    /// Returns the removed peer from the pool, if found.
+    pub async fn peer_closed(
+        &mut self,
+        id: &PeerIdentifier,
+        reason: CloseReason,
+    ) -> Option<Arc<dyn Peer>> {
+        let (peer, info) = match id {
+            PeerIdentifier::Addr(addr) => (None, self.peer_list.get_mut(&addr)),
+            PeerIdentifier::Handle(handle) => self
+                .peers
+                .remove(&handle)
+                .map(|peer| {
+                    let addr = peer.addr();
+                    (Some(peer), self.peer_list.get_mut(&addr))
+                })
+                .unwrap_or((None, None)),
+        };
+        let info = match info {
+            Some(info) => info,
+            None => {
+                debug!("Torrent {} failed to find info for peer {}", self, id);
+                return None;
             }
+        };
 
-            peer.is_in_use = false;
-            peer.last_connected = Some(Instant::now());
+        trace!(
+            "Torrent {} peer {} connection closed, reason: {:?}",
+            self.handle,
+            id,
+            reason
+        );
+        match reason {
+            CloseReason::ConnectionFailed => {
+                info.failure_count += 1;
+            }
+            CloseReason::FastProtocol => {
+                info.failure_count += 1;
+                info.last_connected = Some(Instant::now());
+            }
+            _ => {
+                info.last_connected = Some(Instant::now());
+            }
         }
+        if let Some(peer) = peer.as_ref() {
+            info.is_seed = peer.is_seed().await;
+        }
+
+        info.is_in_use = false;
+        peer
     }
 
     /// Update the peer priority of the given address.
@@ -239,20 +280,28 @@ impl PeerPool {
             .collect();
 
         for (handle, state) in futures::future::join_all(futures).await {
-            if state == PeerState::Closed || state == PeerState::Error {
-                if let Some(peer) = self.internal_remove_peer(&handle).await {
-                    total_cleaned_peers += 1;
+            let reason = match state {
+                PeerState::Closed => CloseReason::Remote,
+                PeerState::Error => CloseReason::Error,
+                _ => continue,
+            };
+            let peer = match self
+                .peer_closed(&PeerIdentifier::Handle(handle), reason)
+                .await
+            {
+                Some(peer) => peer,
+                None => continue,
+            };
 
-                    if let Err(_) = time::timeout(Duration::from_secs(1), peer.close()).await {
-                        debug!(
-                            "Torrent peer pool {} failed to close peer {} connection, close operation timed out",
-                            self, peer
-                        );
-                    }
-
-                    removed_peers.push(peer);
-                }
+            total_cleaned_peers += 1;
+            if let Err(_) = time::timeout(Duration::from_secs(1), peer.close()).await {
+                debug!(
+                    "Torrent {} failed to close peer {} connection, close operation timed out",
+                    self, peer
+                );
             }
+
+            removed_peers.push(peer);
         }
 
         debug!("Cleaned a total of {} peers", total_cleaned_peers);
@@ -261,7 +310,7 @@ impl PeerPool {
 
     /// Shut down the peer pool, closing all peer connections.
     pub async fn shutdown(&mut self) {
-        debug!("Shutting down peer pool for {}", self.handle);
+        debug!("Torrent {} is shutting down peer pool", self);
 
         // clear all known peer list addresses
         self.peer_list.clear();
@@ -277,19 +326,21 @@ impl PeerPool {
         futures::future::join_all(futures).await;
     }
 
-    async fn internal_remove_peer(&mut self, handle: &PeerHandle) -> Option<Arc<dyn Peer>> {
-        if let Some(peer) = self.peers.remove(handle) {
-            let addr = peer.addr();
-
-            if let Some(info) = self.peer_list.get_mut(&addr) {
-                info.is_seed = peer.is_seed().await;
-                info.is_in_use = false;
+    /// Try to find the peer info for the given address.
+    ///
+    /// Returns the existing peer info if found, else creates a new entry.
+    fn find_or_insert(
+        &mut self,
+        addr: &SocketAddr,
+        torrent_addr: Option<SocketAddr>,
+    ) -> &mut PeerInfo {
+        self.peer_list.entry(*addr).or_insert_with(|| {
+            if let Some(torrent_addr) = torrent_addr {
+                PeerInfo::new_with_rank(*addr, &torrent_addr)
+            } else {
+                PeerInfo::new(*addr)
             }
-
-            Some(peer)
-        } else {
-            None
-        }
+        })
     }
 }
 
@@ -390,11 +441,12 @@ mod tests {
     mod peer_pool {
         use super::*;
         use crate::peer::tests::MockPeer;
+        use std::net::Ipv4Addr;
 
         mod add_peer {
             use super::*;
-
             use crate::peer::tests::MockPeer;
+            use std::net::Ipv4Addr;
 
             #[tokio::test]
             async fn test_add_peer() {
@@ -402,6 +454,8 @@ mod tests {
                 let peer_handle = PeerHandle::new();
                 let mut peer = MockPeer::new();
                 peer.expect_handle().return_const(peer_handle);
+                peer.expect_addr()
+                    .return_const(SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)));
                 let mut pool = PeerPool::new(TorrentHandle::new(), 2);
 
                 let result = pool.add_peer(Box::new(peer));
@@ -421,8 +475,14 @@ mod tests {
                 let peer_handle2 = PeerHandle::new();
                 let mut peer1 = MockPeer::new();
                 peer1.expect_handle().return_const(peer_handle1);
+                peer1
+                    .expect_addr()
+                    .return_const(SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)));
                 let mut peer2 = MockPeer::new();
                 peer2.expect_handle().return_const(peer_handle2);
+                peer2
+                    .expect_addr()
+                    .return_const(SocketAddr::from((Ipv4Addr::LOCALHOST, 8080)));
                 let mut pool = PeerPool::new(TorrentHandle::new(), 1);
 
                 let result = pool.add_peer(Box::new(peer1));
@@ -433,6 +493,78 @@ mod tests {
                     Err(AddReason::LimitReached),
                     result,
                     "expected the peer to not have been added"
+                );
+            }
+        }
+
+        mod peer_closed {
+            use super::*;
+            use std::net::Ipv4Addr;
+
+            #[tokio::test]
+            async fn test_reason_connection_failed() {
+                init_logger!();
+                let peer_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
+                let mut pool = PeerPool::new(TorrentHandle::new(), 16);
+
+                // add the peer address to the pool
+                pool.add_peer_addresses(vec![peer_addr.clone()], None);
+
+                // close the peer connection
+                let result = pool
+                    .peer_closed(&peer_addr.clone().into(), CloseReason::ConnectionFailed)
+                    .await;
+                assert!(
+                    result.is_none(),
+                    "expected no peer to have been removed, but got {:?}",
+                    result
+                );
+
+                let info = pool
+                    .peer_list
+                    .get(&peer_addr)
+                    .expect("expected the address info to have been found");
+                assert_eq!(
+                    1, info.failure_count,
+                    "expected the failure count to have been incremented"
+                );
+            }
+
+            #[tokio::test]
+            async fn test_reason_fast_protocol() {
+                init_logger!();
+                let peer_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
+                let mut peer = MockPeer::new();
+                peer.expect_handle().return_const(PeerHandle::new());
+                peer.expect_addr().return_const(peer_addr);
+                let mut pool = PeerPool::new(TorrentHandle::new(), 16);
+
+                // add the peer address to the pool
+                pool.add_peer_addresses(vec![peer_addr.clone()], None);
+                pool.add_peer(Box::new(peer))
+                    .expect("expected the peer to have been added");
+
+                // close the peer connection
+                let result = pool
+                    .peer_closed(&peer_addr.clone().into(), CloseReason::ConnectionFailed)
+                    .await;
+                assert!(
+                    result.is_none(),
+                    "expected no peer to have been removed, but got {:?}",
+                    result
+                );
+
+                let info = pool
+                    .peer_list
+                    .get(&peer_addr)
+                    .expect("expected the address info to have been found");
+                assert_eq!(
+                    1, info.failure_count,
+                    "expected the failure count to have been incremented"
+                );
+                assert!(
+                    info.last_connected.is_some(),
+                    "expected the last connected time to be set"
                 );
             }
         }
@@ -459,14 +591,16 @@ mod tests {
             peer1.expect_handle().return_const(peer1_handle);
             peer1
                 .expect_addr()
-                .return_const(SocketAddr::from(([127, 0, 0, 1], 6881)));
+                .return_const(SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)));
             peer1.expect_state().returning(|| PeerState::Closed);
             peer1.expect_close().return_const(());
+            peer1.expect_is_seed().returning(|| true);
             let mut peer2 = MockPeer::new();
             peer2.expect_handle().return_const(PeerHandle::new());
-            peer1
+            peer2
                 .expect_addr()
                 .return_const(SocketAddr::from(([127, 0, 0, 2], 6881)));
+            peer2.expect_is_seed().returning(|| false);
             peer2.expect_state().returning(|| PeerState::Idle);
             let mut pool = PeerPool::new(TorrentHandle::new(), 2);
 

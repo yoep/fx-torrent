@@ -1,4 +1,4 @@
-use crate::dht::compact::{CompactIPv4Nodes, CompactIPv6Nodes};
+use crate::dht::compact::{CompactIPv4Nodes, CompactIPv6Nodes, CompactIpNodes};
 use crate::dht::{Error, NodeId, NodeToken, Result};
 use crate::{CompactIpAddr, InfoHash, Sha1Hash};
 use bitmask_enum::bitmask;
@@ -353,8 +353,8 @@ pub struct GetPeersResponse {
     pub token: Option<NodeToken>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub values: Vec<CompactIpAddr>,
-    #[serde(default, skip_serializing_if = "CompactIPv4Nodes::is_empty")]
-    pub nodes: CompactIPv4Nodes,
+    #[serde(default, skip_serializing_if = "CompactIpNodes::is_empty")]
+    pub nodes: CompactIpNodes,
     #[serde(default, skip_serializing_if = "CompactIPv6Nodes::is_empty")]
     pub nodes6: CompactIPv6Nodes,
     /// BEP33 - Bloom Filter representing all stored peers for the info hash.
@@ -401,8 +401,8 @@ pub struct SampleInfoHashesRequest {
 pub struct SampleInfoHashesResponse {
     pub id: NodeId,
     pub interval: u32,
-    #[serde(default, skip_serializing_if = "CompactIPv4Nodes::is_empty")]
-    pub nodes: CompactIPv4Nodes,
+    #[serde(default, skip_serializing_if = "CompactIpNodes::is_empty")]
+    pub nodes: CompactIpNodes,
     #[serde(default, skip_serializing_if = "CompactIPv6Nodes::is_empty")]
     pub nodes6: CompactIPv6Nodes,
     /// The number of info hashes in storage
@@ -466,8 +466,8 @@ pub struct GetResponse {
     pub token: Option<NodeToken>,
     #[serde(default, rename = "v", skip_serializing_if = "Option::is_none")]
     pub value: Option<Value>,
-    #[serde(default, skip_serializing_if = "CompactIPv4Nodes::is_empty")]
-    pub nodes: CompactIPv4Nodes,
+    #[serde(default, skip_serializing_if = "CompactIpNodes::is_empty")]
+    pub nodes: CompactIpNodes,
     #[serde(default, skip_serializing_if = "CompactIPv6Nodes::is_empty")]
     pub nodes6: CompactIPv6Nodes,
     /// The sequence number of the mutable item
@@ -1414,6 +1414,53 @@ mod tests {
                 .and_then(|e| String::from_utf8(e).map_err(|e| serde_bencode::Error::custom(e)))
                 .unwrap();
             assert_eq!(payload, result.as_str());
+        }
+    }
+
+    mod get_peers {
+        use super::*;
+        use std::net::SocketAddr;
+
+        #[test]
+        fn test_deserialize_response() {
+            init_logger!();
+            let payload = "d1:rd2:id20:abcdefghij01234567895:token8:aoeusnth6:valuesl6:axje.u6:idhtnmee1:t2:aa1:y1:re";
+            let expected_peer1: CompactIpAddr =
+                SocketAddr::from(([97, 120, 106, 101], 11893)).into();
+            let expected_peer2: CompactIpAddr =
+                SocketAddr::from(([105, 100, 104, 116], 28269)).into();
+            let message =
+                serde_bencode::from_str::<Message>(payload).expect("expected a valid message");
+
+            // extract the response payload
+            let response = match message.payload {
+                MessagePayload::Response(response) => response,
+                _ => {
+                    assert!(
+                        false,
+                        "expected MessagePayload::Response, but got {:?}",
+                        message.payload
+                    );
+                    return;
+                }
+            };
+
+            // try to parse the response payload into a get_peers response
+            let result = response
+                .parse(MESSAGE_GET_PEERS)
+                .expect("expected a valid get_peers response");
+            match result {
+                ResponseMessage::GetPeers { response } => {
+                    assert_eq!(2, response.values.len());
+                    assert_eq!(expected_peer1, response.values[0]);
+                    assert_eq!(expected_peer2, response.values[1]);
+                }
+                _ => assert!(
+                    false,
+                    "expected ResponseMessage::GetPeers, but got {:?}",
+                    result
+                ),
+            }
         }
     }
 
