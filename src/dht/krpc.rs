@@ -1417,6 +1417,53 @@ mod tests {
         }
     }
 
+    mod get_peers {
+        use super::*;
+        use std::net::SocketAddr;
+
+        #[test]
+        fn test_deserialize_response() {
+            init_logger!();
+            let payload = "d1:rd2:id20:abcdefghij01234567895:token8:aoeusnth6:valuesl6:axje.u6:idhtnmee1:t2:aa1:y1:re";
+            let expected_peer1: CompactIpAddr =
+                SocketAddr::from(([97, 120, 106, 101], 11893)).into();
+            let expected_peer2: CompactIpAddr =
+                SocketAddr::from(([105, 100, 104, 116], 28269)).into();
+            let message =
+                serde_bencode::from_str::<Message>(payload).expect("expected a valid message");
+
+            // extract the response payload
+            let response = match message.payload {
+                MessagePayload::Response(response) => response,
+                _ => {
+                    assert!(
+                        false,
+                        "expected MessagePayload::Response, but got {:?}",
+                        message.payload
+                    );
+                    return;
+                }
+            };
+
+            // try to parse the response payload into a get_peers response
+            let result = response
+                .parse(MESSAGE_GET_PEERS)
+                .expect("expected a valid get_peers response");
+            match result {
+                ResponseMessage::GetPeers { response } => {
+                    assert_eq!(2, response.values.len());
+                    assert_eq!(expected_peer1, response.values[0]);
+                    assert_eq!(expected_peer2, response.values[1]);
+                }
+                _ => assert!(
+                    false,
+                    "expected ResponseMessage::GetPeers, but got {:?}",
+                    result
+                ),
+            }
+        }
+    }
+
     mod sample_infohashes {
         use super::*;
         use serde::de::Error;

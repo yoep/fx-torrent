@@ -12,7 +12,7 @@ use tracing::instrument;
 
 const RETRIEVE_INTERVAL: Duration = Duration::from_secs(90);
 const RETRIEVE_SHORT_INTERVAL: Duration = Duration::from_secs(30);
-const RETRIEVE_TIMEOUT: Duration = Duration::from_secs(15);
+const QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Retrieve potential peer addresses for the torrent through the DHT network.
 #[derive(Debug)]
@@ -23,11 +23,14 @@ pub struct TorrentDhtPeersOperation {
 }
 
 impl TorrentDhtPeersOperation {
-    pub fn new(retrieve_timeout: Option<Duration>) -> Self {
+    /// Create a new operation for retrieving peers from the DHT network.
+    ///
+    /// Each queried node will be limited to `query_timeout` if set (defaults to 8 seconds).
+    pub fn new(query_timeout: Option<Duration>) -> Self {
         Self {
             last_executed: Default::default(),
             active_tasks: Default::default(),
-            retrieve_timeout: retrieve_timeout.unwrap_or(RETRIEVE_TIMEOUT),
+            retrieve_timeout: query_timeout.unwrap_or(QUERY_TIMEOUT),
         }
     }
 

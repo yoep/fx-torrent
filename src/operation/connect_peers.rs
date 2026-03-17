@@ -1,7 +1,7 @@
 use crate::channel::ChannelSender;
 use crate::operation::{TorrentOperation, TorrentOperationResult};
 use crate::peer::webseed::HttpPeer;
-use crate::peer::PeerDiscovery;
+use crate::peer::{CloseReason, PeerDiscovery};
 use crate::torrent::InnerTorrent;
 use crate::{Result, TorrentCommand, TorrentContext, TorrentError};
 use async_trait::async_trait;
@@ -222,7 +222,7 @@ impl TorrentConnectPeersOperation {
                 dialer
                     .dial(
                         peer_id,
-                        peer_addr,
+                        peer_addr.clone(),
                         torrent,
                         data_pool,
                         protocol_extensions,
@@ -241,23 +241,42 @@ impl TorrentConnectPeersOperation {
 
         let command_sender = context.command_sender().clone();
         self.in_flight.spawn(async move {
-            while let Some(peer) = futures.next().await {
-                match peer {
-                    Err(e) => {
-                        debug!(
-                            "Torrent {} failed to create peer connection, {}",
-                            handle_info, e
-                        );
+            let peer = {
+                let mut result = None;
+                while let Some(peer) = futures.next().await {
+                    match peer {
+                        Err(e) => {
+                            debug!(
+                                "Torrent {} failed to create peer connection, {}",
+                                handle_info, e
+                            );
+                        }
+                        Ok(peer) => {
+                            result = Some(peer);
+                            break;
+                        }
                     }
-                    Ok(peer) => {
-                        command_sender
-                            .fire_and_forget(TorrentCommand::PeerConnected { peer })
-                            .await;
-                        break;
-                    }
+                }
+                result
+            };
+
+            match peer {
+                None => {
+                    command_sender
+                        .fire_and_forget(TorrentCommand::PeerClosed {
+                            peer: peer_addr.into(),
+                            reason: CloseReason::ConnectionFailed,
+                        })
+                        .await;
+                }
+                Some(peer) => {
+                    command_sender
+                        .fire_and_forget(TorrentCommand::PeerConnected { peer })
+                        .await;
                 }
             }
         });
+
         Ok(())
     }
 

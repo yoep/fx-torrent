@@ -5,10 +5,10 @@ use crate::file::File;
 use crate::operation::{TorrentOperation, TorrentOperationResult, DEFAULT_OPERATIONS};
 use crate::peer::extension::{Extension, Extensions};
 use crate::peer::{
-    BitTorrentPeer, Peer, PeerClientInfo, PeerDiscovery, PeerEntry, PeerHandle, PeerId,
-    ProtocolExtensionFlags,
+    BitTorrentPeer, CloseReason, Peer, PeerClientInfo, PeerDiscovery, PeerEntry, PeerHandle,
+    PeerId, ProtocolExtensionFlags,
 };
-use crate::peer_pool::PeerPool;
+use crate::peer_pool::{PeerIdentifier, PeerPool};
 use crate::storage::{Storage, StorageParams};
 use crate::torrent_data::DataPool;
 use crate::tracker::{
@@ -1378,9 +1378,9 @@ impl InnerTorrent {
     }
 
     /// Notify the torrent that a peer's connection is closed.
-    pub async fn peer_closed(&self, peer: &PeerHandle) {
+    pub(crate) async fn peer_closed(&self, peer: PeerIdentifier, reason: CloseReason) {
         self.sender
-            .fire_and_forget(TorrentCommand::PeerClosed { peer: *peer })
+            .fire_and_forget(TorrentCommand::PeerClosed { peer, reason })
             .await;
     }
 
@@ -1438,7 +1438,8 @@ pub enum TorrentCommand {
         addrs: Vec<SocketAddr>,
     },
     PeerClosed {
-        peer: PeerHandle,
+        peer: PeerIdentifier,
+        reason: CloseReason,
     },
     State {
         response: Reply<TorrentState>,
@@ -2251,20 +2252,28 @@ impl TorrentContext {
         }
     }
 
-    /// Remove the given peer from the torrent as it has been closed.
-    async fn remove_peer(&mut self, handle: &PeerHandle) {
-        trace!("Removing peer {} from torrent {}", handle, self);
-        if let Some(peer) = self.peer_pool.remove_peer(handle).await {
-            let bitfield = peer.remote_piece_bitfield().await;
+    /// Handle a closed torrent peer connection.
+    async fn on_peer_closed(&mut self, id: PeerIdentifier, reason: CloseReason) {
+        trace!(
+            "Torrent {} peer connection closed {:?}, reason: {:?}",
+            self,
+            id,
+            reason
+        );
+        let peer = match self.peer_pool.peer_closed(&id, reason).await {
+            None => return,
+            Some(peer) => peer,
+        };
 
-            // decrease the availability of the pieces that the peer had
-            for (piece_index, _) in bitfield.iter().enumerate().filter(|(_, value)| *value) {
-                self.data_pool.update_availability(&piece_index, -1).await;
-            }
+        let bitfield = peer.remote_piece_bitfield().await;
 
-            self.metrics.peers.dec();
-            self.invoke_event(TorrentEvent::PeerDisconnected(peer.client()));
+        // decrease the availability of the pieces that the peer had
+        for (piece_index, _) in bitfield.iter().enumerate().filter(|(_, value)| *value) {
+            self.data_pool.update_availability(&piece_index, -1).await;
         }
+
+        self.metrics.peers.dec();
+        self.invoke_event(TorrentEvent::PeerDisconnected(peer.client()));
     }
 
     /// Add the given metadata to the torrent.
@@ -2644,8 +2653,8 @@ impl TorrentContext {
             TorrentCommand::DecreasePeerPriority { addrs } => {
                 self.decrease_peer_addr_priority(addrs)
             }
-            TorrentCommand::PeerClosed { peer } => {
-                self.remove_peer(&peer).await;
+            TorrentCommand::PeerClosed { peer, reason } => {
+                self.on_peer_closed(peer, reason).await;
             }
             TorrentCommand::Metadata { response } => {
                 response.send(self.metadata.clone());

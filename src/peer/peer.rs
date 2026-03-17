@@ -988,7 +988,10 @@ impl PartialEq for BitTorrentPeer {
 
 /// The reason a peer connection is being closed
 #[derive(Debug, Display, PartialEq)]
-pub(crate) enum CloseReason {
+pub enum CloseReason {
+    /// Establishing a connection to the remote peer failed.
+    #[display("connection failed")]
+    ConnectionFailed,
     /// The client closed the peer connection
     #[display("client closed connection")]
     Client,
@@ -998,6 +1001,9 @@ pub(crate) enum CloseReason {
     /// The client has closed the connection due to an invalid received fast protocol message
     #[display("invalid fast protocol message received")]
     FastProtocol,
+    /// The client encountered an error while communicating with the remote peer
+    #[display("error")]
+    Error,
 }
 
 /// The piece that should be requested from the remote peer.
@@ -2754,7 +2760,9 @@ impl PeerContext {
 
         // notify the torrent that this peer is being closed
         if self.torrent.is_valid() {
-            self.torrent.peer_closed(&self.client.handle).await;
+            self.torrent
+                .peer_closed(self.client.handle.into(), reason)
+                .await;
         }
     }
 
