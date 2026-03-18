@@ -22,5 +22,8 @@ build-release: ## Build the release version of the cargo project
 fmt: ## Run the cargo formatter
 	@cargo fmt --all -- --check
 
+doc: ## Generate the crate documentation
+	@cargo doc --no-deps
+
 bump-%: ## Bump the (major, minor, patch) version of the application
 	@bump-my-version bump $*

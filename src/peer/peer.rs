@@ -289,7 +289,7 @@ pub enum PeerState {
 }
 
 /// The extension flags of the protocol.
-/// See BEP4 (https://www.bittorrent.org/beps/bep_0004.html) for more info.
+/// See BEP4 (<https://www.bittorrent.org/beps/bep_0004.html>) for more info.
 ///
 /// _The known collisions mentioned in BEP4, are ignored within these flags._
 #[bitmask(u16)]
