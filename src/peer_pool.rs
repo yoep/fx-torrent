@@ -2,45 +2,16 @@ use crate::peer::{CloseReason, Peer, PeerHandle, PeerState};
 use crate::{PeerPriority, TorrentHandle, TorrentPeer};
 use derive_more::Display;
 use itertools::Itertools;
-use log::{debug, trace, warn};
+use log::{debug, trace};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::net::SocketAddr;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::time;
 
 const CONNECTION_FAILURE_THRESHOLD: usize = 3;
-
-/// The identifier of a peer within the peer pool.
-#[derive(Debug)]
-pub enum PeerIdentifier {
-    Addr(SocketAddr),
-    Handle(PeerHandle),
-}
-
-impl From<SocketAddr> for PeerIdentifier {
-    fn from(addr: SocketAddr) -> Self {
-        Self::Addr(addr)
-    }
-}
-
-impl From<PeerHandle> for PeerIdentifier {
-    fn from(handle: PeerHandle) -> Self {
-        Self::Handle(handle)
-    }
-}
-
-impl Display for PeerIdentifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PeerIdentifier::Addr(addr) => write!(f, "{}", addr),
-            PeerIdentifier::Handle(handle) => write!(f, "{}", handle),
-        }
-    }
-}
 
 /// The failure reason when adding a peer failed.
 #[derive(Debug, Error, PartialEq)]
@@ -58,10 +29,8 @@ pub enum AddReason {
 pub struct PeerPool {
     /// The unique handle of the torrent
     handle: TorrentHandle,
-    /// The currently active peers within the pool
-    pub peers: HashMap<PeerHandle, Arc<dyn Peer>>,
-    /// The discovered torrent peers
-    peer_list: HashMap<SocketAddr, PeerInfo>,
+    /// The peers of the torrent.
+    peers: HashMap<SocketAddr, PeerInfo>,
     /// The maximum amount of peers allowed in the pool
     limit: usize,
 }
@@ -72,7 +41,6 @@ impl PeerPool {
         Self {
             handle,
             peers: Default::default(),
-            peer_list: Default::default(),
             limit: pool_limit,
         }
     }
@@ -81,15 +49,16 @@ impl PeerPool {
     ///
     /// It returns the torrent peer instance when found, else [None].
     pub fn get(&self, handle: &PeerHandle) -> Option<TorrentPeer> {
-        self.peers.get(&handle).map(|peer| TorrentPeer::new(peer))
+        self.peers
+            .values()
+            .filter_map(|e| e.connection.as_ref())
+            .find(|peer| peer.handle() == *handle)
+            .map(|peer| TorrentPeer::new(peer))
     }
 
-    /// Get all peers (_as weak references_) stored within the pool.
-    ///
-    /// These references can be dropped by the pool at any time,
-    /// even right after calling this fn.
-    pub fn peers(&self) -> Vec<Weak<dyn Peer>> {
-        self.peers.values().map(|e| Arc::downgrade(e)).collect()
+    /// Returns an iterator over the peers in the pool.
+    pub fn peers(&self) -> impl Iterator<Item = &Arc<dyn Peer>> {
+        self.peers.values().filter_map(|e| e.connection.as_ref())
     }
 
     /// Add the given [TcpPeer] to this peer pool.
@@ -99,15 +68,7 @@ impl PeerPool {
     /// It returns a [Subscription] to receive peer events when the peer is added to the pool.
     pub fn add_peer(&mut self, peer: Box<dyn Peer>) -> Result<(), AddReason> {
         let handle = peer.handle();
-
-        // update the peer info
-        {
-            let info = self.find_or_insert(&peer.addr(), None);
-            info.is_in_use = true;
-            info.last_connected = Some(Instant::now());
-        }
-
-        // check if we've reached the pool limit
+        // early exit if the pool is full
         if self.peers.len() >= self.limit {
             debug!(
                 "Torrent {} is unable to add peer {}, pool limit reached",
@@ -116,19 +77,17 @@ impl PeerPool {
             return Err(AddReason::LimitReached);
         }
 
-        // check if the peer already exists within the pool
-        if self.peers.contains_key(&handle) {
-            warn!("Peer pool {} detected duplicate peer {}", self, peer);
-            return Err(AddReason::Duplicate);
-        }
-
-        self.peers.insert(handle, Arc::from(peer));
+        // update the peer info
+        let info = self.find_or_insert(&peer.addr(), None);
+        info.is_in_use = true;
+        info.last_connected = Some(Instant::now());
+        info.connection = Some(Arc::from(peer));
         Ok(())
     }
 
     /// Get the total amount of candidates for creating new connections.
     pub fn num_connect_candidates(&self) -> usize {
-        self.peer_list
+        self.peers
             .iter()
             .filter(|(_, peer)| peer.is_connect_candidate())
             .count()
@@ -136,14 +95,17 @@ impl PeerPool {
 
     /// Add the given peer addresses to the pool's peer list.
     pub fn add_peer_addresses(&mut self, addrs: Vec<SocketAddr>, torrent_addr: Option<SocketAddr>) {
-        let addrs: Vec<_> = addrs
+        let addrs = addrs
             .into_iter()
-            // filter out duplicates
-            .filter(|addr| !self.peer_list.contains_key(addr))
-            // filter out any existing connections
-            .filter(|addr| !self.peers.iter().any(|(_, peer)| peer.addr() == *addr))
-            .collect();
+            // filter out already known peer addresses
+            .filter(|addr| !self.peers.contains_key(addr))
+            .unique()
+            .collect_vec();
         if addrs.is_empty() {
+            trace!(
+                "Torrent {} peer addresses are already known, skipping",
+                self
+            );
             return;
         }
 
@@ -162,24 +124,13 @@ impl PeerPool {
     /// Returns the removed peer from the pool, if found.
     pub async fn peer_closed(
         &mut self,
-        id: &PeerIdentifier,
+        addr: &SocketAddr,
         reason: CloseReason,
     ) -> Option<Arc<dyn Peer>> {
-        let (peer, info) = match id {
-            PeerIdentifier::Addr(addr) => (None, self.peer_list.get_mut(&addr)),
-            PeerIdentifier::Handle(handle) => self
-                .peers
-                .remove(&handle)
-                .map(|peer| {
-                    let addr = peer.addr();
-                    (Some(peer), self.peer_list.get_mut(&addr))
-                })
-                .unwrap_or((None, None)),
-        };
-        let info = match info {
+        let info = match self.peers.get_mut(&addr) {
             Some(info) => info,
             None => {
-                debug!("Torrent {} failed to find info for peer {}", self, id);
+                debug!("Torrent {} failed to find info for peer {}", self, addr);
                 return None;
             }
         };
@@ -187,7 +138,7 @@ impl PeerPool {
         trace!(
             "Torrent {} peer {} connection closed, reason: {:?}",
             self.handle,
-            id,
+            addr,
             reason
         );
         match reason {
@@ -202,9 +153,13 @@ impl PeerPool {
                 info.last_connected = Some(Instant::now());
             }
         }
-        if let Some(peer) = peer.as_ref() {
-            info.is_seed = peer.is_seed().await;
-        }
+        let peer = match info.connection.take() {
+            None => None,
+            Some(peer) => {
+                info.is_seed = peer.is_seed().await;
+                Some(peer)
+            }
+        };
 
         info.is_in_use = false;
         peer
@@ -212,7 +167,7 @@ impl PeerPool {
 
     /// Update the peer priority of the given address.
     pub fn update_peer_rank(&mut self, addr: &SocketAddr, change: i32) {
-        if let Some(peer) = self.peer_list.get_mut(addr) {
+        if let Some(peer) = self.peers.get_mut(addr) {
             let mut rank = peer.rank.take().unwrap_or(0);
 
             if change < 0 {
@@ -233,9 +188,9 @@ impl PeerPool {
     /// * `len` - The total number of peer list address to retrieve.
     pub fn new_connection_candidates(&mut self, len: usize) -> Vec<SocketAddr> {
         let remaining_slots = self.limit - self.peers.len();
-        let len = len.min(remaining_slots).min(self.peer_list.len());
+        let len = len.min(remaining_slots).min(self.peers.len());
 
-        self.peer_list
+        self.peers
             .iter_mut()
             .filter(|(_, peer)| peer.is_connect_candidate())
             .sorted()
@@ -251,9 +206,10 @@ impl PeerPool {
     pub async fn active_peer_connections(&self) -> usize {
         let futures = self
             .peers
-            .iter()
-            .map(|(_, peer)| peer.state())
-            .collect::<Vec<_>>();
+            .values()
+            .filter_map(|e| e.connection.as_ref())
+            .map(|peer| peer.state())
+            .collect_vec();
 
         futures::future::join_all(futures)
             .await
@@ -275,20 +231,18 @@ impl PeerPool {
 
         let futures: Vec<_> = self
             .peers
-            .iter()
-            .map(|(handle, peer)| async move { (*handle, peer.state().await) })
+            .values()
+            .filter_map(|e| e.connection.as_ref())
+            .map(|peer| async move { (peer.addr(), peer.state().await) })
             .collect();
 
-        for (handle, state) in futures::future::join_all(futures).await {
+        for (addr, state) in futures::future::join_all(futures).await {
             let reason = match state {
                 PeerState::Closed => CloseReason::Remote,
                 PeerState::Error => CloseReason::Error,
                 _ => continue,
             };
-            let peer = match self
-                .peer_closed(&PeerIdentifier::Handle(handle), reason)
-                .await
-            {
+            let peer = match self.peer_closed(&addr, reason).await {
                 Some(peer) => peer,
                 None => continue,
             };
@@ -313,10 +267,16 @@ impl PeerPool {
         debug!("Torrent {} is shutting down peer pool", self);
 
         // clear all known peer list addresses
-        self.peer_list.clear();
+        self.peers.clear();
         self.set_pool_limit(0);
 
-        let peers_to_close: Vec<Arc<dyn Peer>> = { self.peers.drain().map(|(_, e)| e).collect() };
+        let peers_to_close = {
+            self.peers
+                .drain()
+                .map(|(_, e)| e)
+                .filter_map(|mut info| info.connection.take())
+                .collect_vec()
+        };
 
         // close all peers within the pool
         let futures = peers_to_close
@@ -334,7 +294,7 @@ impl PeerPool {
         addr: &SocketAddr,
         torrent_addr: Option<SocketAddr>,
     ) -> &mut PeerInfo {
-        self.peer_list.entry(*addr).or_insert_with(|| {
+        self.peers.entry(*addr).or_insert_with(|| {
             if let Some(torrent_addr) = torrent_addr {
                 PeerInfo::new_with_rank(*addr, &torrent_addr)
             } else {
@@ -361,6 +321,8 @@ struct PeerInfo {
     rank: PeerPriority,
     /// The last time the peer connected or disconnected from the torrent
     last_connected: Option<Instant>,
+    /// The active connection to the remote peer.
+    connection: Option<Arc<dyn Peer>>,
 }
 
 impl PeerInfo {
@@ -374,6 +336,7 @@ impl PeerInfo {
             failure_count: 0,
             rank: PeerPriority::none(),
             last_connected: None,
+            connection: None,
         }
     }
 
@@ -389,6 +352,7 @@ impl PeerInfo {
             failure_count: 0,
             rank,
             last_connected: None,
+            connection: None,
         }
     }
 
@@ -521,7 +485,7 @@ mod tests {
                 );
 
                 let info = pool
-                    .peer_list
+                    .peers
                     .get(&peer_addr)
                     .expect("expected the address info to have been found");
                 assert_eq!(
@@ -537,6 +501,7 @@ mod tests {
                 let mut peer = MockPeer::new();
                 peer.expect_handle().return_const(PeerHandle::new());
                 peer.expect_addr().return_const(peer_addr);
+                peer.expect_is_seed().return_const(false);
                 let mut pool = PeerPool::new(TorrentHandle::new(), 16);
 
                 // add the peer address to the pool
@@ -546,16 +511,13 @@ mod tests {
 
                 // close the peer connection
                 let result = pool
-                    .peer_closed(&peer_addr.clone().into(), CloseReason::ConnectionFailed)
+                    .peer_closed(&peer_addr.clone().into(), CloseReason::FastProtocol)
                     .await;
-                assert!(
-                    result.is_none(),
-                    "expected no peer to have been removed, but got {:?}",
-                    result
-                );
+                assert!(result.is_some(), "expected the peer to have been removed");
 
+                // get the peer info
                 let info = pool
-                    .peer_list
+                    .peers
                     .get(&peer_addr)
                     .expect("expected the address info to have been found");
                 assert_eq!(
@@ -599,7 +561,7 @@ mod tests {
             peer2.expect_handle().return_const(PeerHandle::new());
             peer2
                 .expect_addr()
-                .return_const(SocketAddr::from(([127, 0, 0, 2], 6881)));
+                .return_const(SocketAddr::from(([127, 0, 0, 2], 6899)));
             peer2.expect_is_seed().returning(|| false);
             peer2.expect_state().returning(|| PeerState::Idle);
             let mut pool = PeerPool::new(TorrentHandle::new(), 2);
@@ -616,7 +578,7 @@ mod tests {
             // clean the peer pool
             pool.clean().await;
 
-            let result = pool.peers.len();
+            let result = pool.peers().count();
             assert_eq!(1, result, "expected the closed peer to have been removed");
         }
     }
@@ -624,32 +586,59 @@ mod tests {
     mod peer_info {
         use super::*;
 
+        macro_rules! peer_info {
+            ($addr:expr) => {{
+                peer_info!($addr, crate::torrent_peer::PeerPriority::none())
+            }};
+            ($addr:expr, $rank:expr) => {{
+                use crate::peer_pool::PeerInfo;
+                use std::net::SocketAddr;
+
+                let addr: SocketAddr = $addr;
+                let rank: PeerPriority = $rank;
+
+                PeerInfo {
+                    addr,
+                    is_in_use: false,
+                    is_seed: false,
+                    is_banned: false,
+                    failure_count: 0,
+                    rank: rank,
+                    last_connected: None,
+                    connection: None,
+                }
+            }};
+            ($addr:expr, $rank:expr, $in_use:expr) => {{
+                use crate::peer_pool::PeerInfo;
+                use std::net::SocketAddr;
+
+                let addr: SocketAddr = $addr;
+                let rank: PeerPriority = $rank;
+                let is_in_use: bool = $in_use;
+
+                PeerInfo {
+                    addr,
+                    is_in_use,
+                    is_seed: false,
+                    is_banned: false,
+                    failure_count: 0,
+                    rank,
+                    last_connected: None,
+                    connection: None,
+                }
+            }};
+        }
+
         #[test]
         fn test_is_connect_candidate() {
-            let peer = PeerInfo {
-                addr: ([127, 0, 0, 1], 8090).into(),
-                is_in_use: false,
-                is_seed: false,
-                is_banned: false,
-                failure_count: 0,
-                rank: PeerPriority::none(),
-                last_connected: None,
-            };
+            let peer = peer_info!(([127, 0, 0, 1], 8090).into());
             assert_eq!(
                 true,
                 peer.is_connect_candidate(),
                 "expected the peer to be a candidate"
             );
 
-            let peer = PeerInfo {
-                addr: ([127, 0, 0, 1], 8090).into(),
-                is_in_use: true,
-                is_seed: false,
-                is_banned: false,
-                failure_count: 0,
-                rank: PeerPriority::none(),
-                last_connected: None,
-            };
+            let peer = peer_info!(([127, 0, 0, 1], 8090).into(), PeerPriority::none(), true);
             assert_eq!(
                 false,
                 peer.is_connect_candidate(),
@@ -664,6 +653,7 @@ mod tests {
                 failure_count: 0,
                 rank: PeerPriority::none(),
                 last_connected: None,
+                connection: None,
             };
             assert_eq!(
                 false,
@@ -683,12 +673,12 @@ mod tests {
 
             // decrease the peer address priority
             pool.update_peer_rank(&peer_address, -1);
-            let mut result = pool.peer_list.get(&peer_address).cloned().unwrap();
+            let mut result = pool.peers.get(&peer_address).cloned().unwrap();
             assert_eq!(Some(0), result.rank.take());
 
             // increase the peer address priority
             pool.update_peer_rank(&peer_address, 1);
-            let mut result = pool.peer_list.get(&peer_address).cloned().unwrap();
+            let mut result = pool.peers.get(&peer_address).cloned().unwrap();
             assert_eq!(Some(1), result.rank.take());
         }
 
@@ -697,24 +687,8 @@ mod tests {
 
             #[test]
             fn test_rank() {
-                let peer1 = PeerInfo {
-                    addr: ([127, 0, 0, 1], 8090).into(),
-                    is_in_use: false,
-                    is_seed: false,
-                    is_banned: false,
-                    failure_count: 0,
-                    rank: PeerPriority::from(30),
-                    last_connected: None,
-                };
-                let peer2 = PeerInfo {
-                    addr: ([127, 0, 0, 1], 8090).into(),
-                    is_in_use: false,
-                    is_seed: false,
-                    is_banned: false,
-                    failure_count: 0,
-                    rank: PeerPriority::from(10),
-                    last_connected: None,
-                };
+                let peer1 = peer_info!(([127, 0, 0, 1], 8090).into(), PeerPriority::from(30));
+                let peer2 = peer_info!(([127, 0, 0, 1], 8090).into(), PeerPriority::from(10));
 
                 assert_eq!(Ordering::Less, peer1.cmp(&peer2));
                 assert_eq!(Ordering::Greater, peer2.cmp(&peer1));
@@ -722,15 +696,7 @@ mod tests {
 
             #[test]
             fn test_seed() {
-                let peer1 = PeerInfo {
-                    addr: ([127, 0, 0, 1], 8090).into(),
-                    is_in_use: false,
-                    is_seed: false,
-                    is_banned: false,
-                    failure_count: 0,
-                    rank: PeerPriority::none(),
-                    last_connected: None,
-                };
+                let peer1 = peer_info!(([127, 0, 0, 1], 8090).into());
                 let peer2 = PeerInfo {
                     addr: ([127, 0, 0, 1], 8090).into(),
                     is_in_use: false,
@@ -739,6 +705,7 @@ mod tests {
                     failure_count: 0,
                     rank: PeerPriority::none(),
                     last_connected: None,
+                    connection: None,
                 };
 
                 assert_eq!(Ordering::Greater, peer1.cmp(&peer2));
@@ -755,6 +722,7 @@ mod tests {
                     failure_count: 2,
                     rank: PeerPriority::none(),
                     last_connected: None,
+                    connection: None,
                 };
                 let peer2 = PeerInfo {
                     addr: ([127, 0, 0, 1], 8090).into(),
@@ -764,6 +732,7 @@ mod tests {
                     failure_count: 0,
                     rank: PeerPriority::none(),
                     last_connected: None,
+                    connection: None,
                 };
 
                 assert_eq!(Ordering::Greater, peer1.cmp(&peer2));

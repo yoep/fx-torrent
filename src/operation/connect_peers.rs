@@ -256,7 +256,7 @@ impl TorrentConnectPeersOperation {
                 None => {
                     command_sender
                         .fire_and_forget(TorrentCommand::PeerClosed {
-                            peer: peer_addr.into(),
+                            addr: peer_addr,
                             reason: CloseReason::ConnectionFailed,
                         })
                         .await;

@@ -2767,9 +2767,7 @@ impl PeerContext {
 
         // notify the torrent that this peer is being closed
         if self.torrent.is_valid() {
-            self.torrent
-                .peer_closed(self.client.handle.into(), reason)
-                .await;
+            self.torrent.peer_closed(self.client.addr, reason).await;
         }
     }
 

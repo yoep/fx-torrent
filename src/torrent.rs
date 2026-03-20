@@ -8,7 +8,7 @@ use crate::peer::{
     BitTorrentPeer, CloseReason, Peer, PeerClientInfo, PeerDiscovery, PeerEntry, PeerHandle,
     PeerId, ProtocolExtensionFlags,
 };
-use crate::peer_pool::{PeerIdentifier, PeerPool};
+use crate::peer_pool::PeerPool;
 use crate::storage::{Storage, StorageParams};
 use crate::torrent_data::DataPool;
 use crate::tracker::{
@@ -1386,9 +1386,9 @@ impl InnerTorrent {
     }
 
     /// Notify the torrent that a peer's connection is closed.
-    pub(crate) async fn peer_closed(&self, peer: PeerIdentifier, reason: CloseReason) {
+    pub(crate) async fn peer_closed(&self, addr: SocketAddr, reason: CloseReason) {
         self.sender
-            .fire_and_forget(TorrentCommand::PeerClosed { peer, reason })
+            .fire_and_forget(TorrentCommand::PeerClosed { addr, reason })
             .await;
     }
 
@@ -1446,7 +1446,7 @@ pub enum TorrentCommand {
         addrs: Vec<SocketAddr>,
     },
     PeerClosed {
-        peer: PeerIdentifier,
+        addr: SocketAddr,
         reason: CloseReason,
     },
     State {
@@ -2261,14 +2261,14 @@ impl TorrentContext {
     }
 
     /// Handle a closed torrent peer connection.
-    async fn on_peer_closed(&mut self, id: PeerIdentifier, reason: CloseReason) {
+    async fn on_peer_closed(&mut self, addr: SocketAddr, reason: CloseReason) {
         trace!(
             "Torrent {} peer connection closed {:?}, reason: {:?}",
             self,
-            id,
+            addr,
             reason
         );
-        let peer = match self.peer_pool.peer_closed(&id, reason).await {
+        let peer = match self.peer_pool.peer_closed(&addr, reason).await {
             None => return,
             Some(peer) => peer,
         };
@@ -2451,12 +2451,7 @@ impl TorrentContext {
             let mut peer_count = 0u32;
 
             {
-                for peer in self
-                    .peer_pool
-                    .peers()
-                    .into_iter()
-                    .filter_map(|peer| peer.upgrade())
-                {
+                for peer in self.peer_pool.peers() {
                     peer_count += 1;
                     for (piece_index, _) in peer
                         .remote_piece_bitfield()
@@ -2661,8 +2656,8 @@ impl TorrentContext {
             TorrentCommand::DecreasePeerPriority { addrs } => {
                 self.decrease_peer_addr_priority(addrs)
             }
-            TorrentCommand::PeerClosed { peer, reason } => {
-                self.on_peer_closed(peer, reason).await;
+            TorrentCommand::PeerClosed { addr, reason } => {
+                self.on_peer_closed(addr, reason).await;
             }
             TorrentCommand::Metadata { response } => {
                 response.send(self.metadata.clone());
@@ -3330,9 +3325,9 @@ impl TorrentContext {
 
     /// Notify the peers about the pieces that have become available.
     fn notify_peers_have_pieces(&self, pieces: Vec<PieceIndex>) {
-        for peer in self.peer_pool.peers.values() {
-            peer.notify_piece_availability(pieces.clone());
-        }
+        self.peer_pool
+            .peers()
+            .for_each(|peer| peer.notify_piece_availability(pieces.clone()))
     }
 
     /// Invoke the given torrent event for all registered callbacks.
