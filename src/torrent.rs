@@ -185,12 +185,20 @@ impl TorrentRequest {
     }
 
     /// Add the given peer dialer to the torrent.
+    ///
+    /// ## Remark
+    ///
+    /// The order in which the dialers are added are important for outgoing connections.
     pub fn peer_discovery(&mut self, dialer: Box<dyn PeerDiscovery>) -> &mut Self {
         self.peer_discoveries.get_or_insert(Vec::new()).push(dialer);
         self
     }
 
     /// Set the given peer dialers of the torrent.
+    ///
+    /// ## Remark
+    ///
+    /// The order of the dialers are important for outgoing connections.
     pub fn peer_discoveries(&mut self, dialers: Vec<Box<dyn PeerDiscovery>>) -> &mut Self {
         self.peer_discoveries = Some(dialers);
         self
@@ -2864,7 +2872,6 @@ impl TorrentContext {
             self,
             entry.socket_addr
         );
-        let extensions = self.extensions();
         let timeout = self.config.peer_connection_timeout;
 
         let handle = self.handle;
@@ -2885,7 +2892,6 @@ impl TorrentContext {
                 },
                 data_pool.clone(),
                 protocol_extensions,
-                extensions,
                 timeout,
             )
             .await

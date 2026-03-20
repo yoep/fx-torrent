@@ -1,4 +1,3 @@
-use crate::peer::extension::Extensions;
 use crate::peer::protocol::{UtpSocket, UtpStream};
 use crate::peer::{
     BitTorrentPeer, Error, Peer, PeerDiscovery, PeerEntry, PeerId, PeerStream,
@@ -97,7 +96,6 @@ impl PeerDiscovery for UtpPeerDiscovery {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
-        extensions: Extensions,
         connection_timeout: Duration,
     ) -> Result<Box<dyn Peer>> {
         let socket = self
@@ -117,7 +115,6 @@ impl PeerDiscovery for UtpPeerDiscovery {
                     torrent,
                     data_pool,
                     protocol_extensions,
-                    extensions,
                     connection_timeout,
                 )
                 .await?,
@@ -277,7 +274,6 @@ mod tests {
             vec![Box::new(listener.clone())]
         );
         let protocol_extensions = torrent.protocol_extensions().await.unwrap();
-        let extensions = torrent.inner.extensions().await.unwrap();
 
         let dialer = UtpPeerDiscovery::new()
             .await
@@ -289,7 +285,6 @@ mod tests {
                 torrent.inner.clone(),
                 torrent.inner.data_pool().await.unwrap(),
                 protocol_extensions,
-                extensions,
                 Duration::from_secs(2),
             )
             .await

@@ -92,7 +92,6 @@ pub mod tests {
             .expect("expected an incoming uTP stream");
 
         // create the incoming uTP peer handler thread
-        let incoming_extensions = incoming_context.extensions().await.unwrap();
         let incoming_addr = outgoing_socket.addr();
         tokio::spawn(async move {
             let peer = BitTorrentPeer::new_inbound(
@@ -102,7 +101,6 @@ pub mod tests {
                 incoming_context,
                 incoming_data_pool,
                 protocols,
-                incoming_extensions,
                 Duration::from_secs(50),
             )
             .await
@@ -110,7 +108,6 @@ pub mod tests {
             tx.send(peer).unwrap();
         });
 
-        let outgoing_extensions = outgoing_context.extensions().await.unwrap();
         let outgoing_peer = BitTorrentPeer::new_outbound(
             PeerId::new(),
             incoming_socket.addr(),
@@ -118,7 +115,6 @@ pub mod tests {
             outgoing_context,
             outgoing_data_pool,
             protocols,
-            outgoing_extensions,
             Duration::from_secs(50),
         )
         .await

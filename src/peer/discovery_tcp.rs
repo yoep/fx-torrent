@@ -1,5 +1,4 @@
 use crate::peer::discovery::PeerDiscovery;
-use crate::peer::extension::Extensions;
 use crate::peer::{
     BitTorrentPeer, Error, Peer, PeerEntry, PeerId, PeerStream, ProtocolExtensionFlags, Result,
 };
@@ -85,7 +84,6 @@ impl TcpPeerDiscovery {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
-        extensions: Extensions,
         connection_timeout: Duration,
     ) -> Result<Box<dyn Peer>> {
         Ok(Box::new(
@@ -96,7 +94,6 @@ impl TcpPeerDiscovery {
                 torrent,
                 data_pool,
                 protocol_extensions,
-                extensions,
                 connection_timeout,
             )
             .await?,
@@ -127,7 +124,6 @@ impl PeerDiscovery for TcpPeerDiscovery {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
-        extensions: Extensions,
         connection_timeout: Duration,
     ) -> Result<Box<dyn Peer>> {
         select! {
@@ -142,7 +138,6 @@ impl PeerDiscovery for TcpPeerDiscovery {
                     torrent,
                     data_pool,
                     protocol_extensions,
-                    extensions,
                     connection_timeout
                 ).await,
         }
@@ -275,7 +270,6 @@ mod tests {
             .await
             .expect("expected a torrent peer listener port");
         let protocol_extensions = torrent.protocol_extensions().await.unwrap();
-        let extensions = torrent.inner.extensions().await.unwrap();
         let dialer = new_tcp_peer_discovery()
             .await
             .expect("expected a new tcp peer dialer");
@@ -287,7 +281,6 @@ mod tests {
                 torrent.inner.clone(),
                 torrent.inner.data_pool().await.unwrap(),
                 protocol_extensions,
-                extensions,
                 Duration::from_secs(1),
             )
             .await

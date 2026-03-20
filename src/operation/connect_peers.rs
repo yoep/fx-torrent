@@ -5,8 +5,8 @@ use crate::peer::{CloseReason, PeerDiscovery};
 use crate::torrent::InnerTorrent;
 use crate::{Result, TorrentCommand, TorrentContext, TorrentError};
 use async_trait::async_trait;
-use futures::stream::FuturesUnordered;
-use futures::{FutureExt, StreamExt};
+use futures::FutureExt;
+use itertools::Itertools;
 use log::{debug, trace, warn};
 use std::collections::VecDeque;
 use std::fmt::Debug;
@@ -198,6 +198,14 @@ impl TorrentConnectPeersOperation {
         peer_addr: SocketAddr,
         dialers: &[Arc<dyn PeerDiscovery>],
     ) -> Result<()> {
+        // early exit when no dialers are available
+        if dialers.is_empty() {
+            return Err(TorrentError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                "no active peer dialers",
+            )));
+        }
+
         let handle_info = context.handle();
         let protocol_extensions = context.protocol_extensions();
         let peer_id = context.peer_id();
@@ -209,56 +217,40 @@ impl TorrentConnectPeersOperation {
             peer_addr,
             dialers.len()
         );
-        let mut futures = FuturesUnordered::from_iter(dialers.iter().cloned().map(|dialer| {
-            let torrent = InnerTorrent::new(
-                context.handle(),
-                context.command_sender().clone(),
-                context.callbacks().clone(),
-            );
-            let data_pool = context.data_pool().clone();
-            let extensions = context.extensions();
-
-            async move {
-                dialer
+        let torrent = InnerTorrent::new(
+            context.handle(),
+            context.command_sender().clone(),
+            context.callbacks().clone(),
+        );
+        let data_pool = context.data_pool().clone();
+        let dialers = dialers.iter().cloned().collect_vec();
+        let command_sender = context.command_sender().clone();
+        self.in_flight.spawn(async move {
+            let mut peer = None;
+            for dialer in dialers {
+                match dialer
                     .dial(
                         peer_id,
                         peer_addr.clone(),
-                        torrent,
-                        data_pool,
+                        torrent.clone(),
+                        data_pool.clone(),
                         protocol_extensions,
-                        extensions,
                         peer_connection_timeout,
                     )
                     .await
-            }
-        }));
-        if futures.is_empty() {
-            return Err(TorrentError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                "no active peer dialers",
-            )));
-        }
-
-        let command_sender = context.command_sender().clone();
-        self.in_flight.spawn(async move {
-            let peer = {
-                let mut result = None;
-                while let Some(peer) = futures.next().await {
-                    match peer {
-                        Err(e) => {
-                            debug!(
-                                "Torrent {} failed to create peer connection, {}",
-                                handle_info, e
-                            );
-                        }
-                        Ok(peer) => {
-                            result = Some(peer);
-                            break;
-                        }
+                {
+                    Ok(e) => {
+                        peer = Some(e);
+                        break;
+                    }
+                    Err(e) => {
+                        debug!(
+                            "Torrent {} failed to create peer connection, {}",
+                            handle_info, e
+                        );
                     }
                 }
-                result
-            };
+            }
 
             match peer {
                 None => {
@@ -463,7 +455,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let mut dialer = MockPeerDiscovery::new();
-        dialer.expect_dial().returning(|_, _, _, _, _, _, _| {
+        dialer.expect_dial().returning(|_, _, _, _, _, _| {
             Err(peer::Error::Io(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "timeout",
