@@ -146,11 +146,24 @@ impl TrackerClient {
         &self.metrics
     }
 
-    /// Returns the tracker corresponding to the given handle, if any.
+    /// Returns the tracker for the given handle if found, else [None].
     pub async fn get(&self, handle: &TrackerHandle) -> Option<Tracker> {
         self.sender
             .send(|tx| TrackerClientCommand::GetTracker {
                 handle: *handle,
+                response: tx,
+            })
+            .await
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Returns the tracker for the given url if found, else [None].
+    pub async fn get_by_url(&self, url: &Url) -> Option<Tracker> {
+        self.sender
+            .send(|tx| TrackerClientCommand::GetTrackerByUrl {
+                url: url.clone(),
                 response: tx,
             })
             .await
@@ -512,9 +525,14 @@ impl Callback<TrackerClientEvent> for TrackerClient {
 
 #[derive(Debug)]
 enum TrackerClientCommand {
-    /// Get a tracker from the client.
+    /// Get the tracker by handle from the client.
     GetTracker {
         handle: TrackerHandle,
+        response: Reply<Option<Tracker>>,
+    },
+    /// Get the tracker by url from the client.
+    GetTrackerByUrl {
+        url: Url,
         response: Reply<Option<Tracker>>,
     },
     /// Get all trackers from the client.
@@ -642,6 +660,12 @@ impl InnerClient {
             TrackerClientCommand::GetTracker { handle, response } => {
                 response.send(self.find_tracker(handle).cloned())
             }
+            TrackerClientCommand::GetTrackerByUrl { url, response } => response.send(
+                self.trackers
+                    .iter()
+                    .find(|tracker| tracker.url() == &url)
+                    .cloned(),
+            ),
             TrackerClientCommand::GetActiveTrackers { response } => {
                 response.send(self.active_trackers().await.cloned().collect_vec())
             }
@@ -1183,20 +1207,55 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_add_tracker() {
-        init_logger!();
-        let url = Url::parse("udp://tracker.opentrackr.org:1337").unwrap();
-        let entry = TrackerEntry { tier: 0, url };
-        let manager = TrackerClient::new(Duration::from_secs(1));
+    mod get {
+        use super::*;
 
-        let result = manager.add_tracker_entry(entry).await;
+        #[tokio::test]
+        async fn test_get_by_handle() {
+            init_logger!();
+            let server = TrackerServer::new().await.unwrap();
+            let client = TrackerClient::new(Duration::from_secs(1));
 
-        assert_eq!(
-            None,
-            result.err(),
-            "expected the tracker to have been created"
-        );
+            // add the tracker to the client
+            let handle = client
+                .add_tracker_entry(TrackerEntry {
+                    tier: 0,
+                    url: server.url().clone(),
+                })
+                .await
+                .expect("expected the tracker to have been added");
+
+            // retrieve the tracker
+            let result = client
+                .get(&handle)
+                .await
+                .expect("expected the tracker to have been found");
+            assert_eq!(handle, result.handle(), "expected the handle to match");
+        }
+
+        #[tokio::test]
+        async fn test_get_by_url() {
+            init_logger!();
+            let server = TrackerServer::new().await.unwrap();
+            let client = TrackerClient::new(Duration::from_secs(1));
+
+            // add the tracker to the client
+            let url = server.url();
+            let result = client
+                .add_tracker_entry(TrackerEntry {
+                    tier: 0,
+                    url: url.clone(),
+                })
+                .await;
+            assert!(result.is_ok(), "expected Ok(), but got {:?}", result);
+
+            // retrieve the tracker
+            let result = client
+                .get_by_url(&url)
+                .await
+                .expect("expected the tracker to have been found");
+            assert_eq!(url, result.url(), "expected the url to match");
+        }
     }
 
     #[tokio::test]
