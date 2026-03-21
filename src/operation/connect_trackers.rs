@@ -33,7 +33,7 @@ impl TorrentTrackersOperation {
                 "Torrent {} is unable to create tiered trackers, no tiered trackers found in metadata",
                 torrent
             );
-            torrent.update_state(TorrentState::Error);
+            torrent.update_state(TorrentState::Error).await;
             return false;
         }
 

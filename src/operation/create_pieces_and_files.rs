@@ -22,7 +22,7 @@ impl TorrentCreatePiecesAndFilesOperation {
     /// Create the pieces information for the torrent.
     /// This operation can only be done when the metadata of the torrent is known.
     async fn create_pieces(&self, torrent: &mut TorrentContext) -> bool {
-        torrent.update_state(TorrentState::Initializing);
+        torrent.update_state(TorrentState::Initializing).await;
         match self.try_create_pieces(torrent).await {
             Ok(pieces) => {
                 trace!(
@@ -179,7 +179,7 @@ impl TorrentCreatePiecesAndFilesOperation {
 
     async fn update_state(&self, context: &mut TorrentContext) {
         let state = context.determine_state().await;
-        context.update_state(state);
+        context.update_state(state).await;
     }
 }
 

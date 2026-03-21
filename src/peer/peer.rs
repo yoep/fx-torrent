@@ -3395,7 +3395,7 @@ mod tests {
             _: &[Arc<dyn PeerDiscovery>],
         ) -> TorrentOperationResult {
             if let Some(change) = self.receiver.try_recv() {
-                context.update_state(change.state);
+                context.update_state(change.state).await;
                 change.response.send(());
             }
 
