@@ -18,7 +18,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use derive_more::Display;
-use fx_callback::{Callback, MultiThreadedCallback, Subscriber, Subscription};
+use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use fx_handle::Handle;
 use log::{debug, trace};
 use std::collections::HashMap;
@@ -409,7 +409,7 @@ impl FxTorrentSession {
 
     async fn wait_for_metadata(torrent: &Torrent) {
         let mut receiver = torrent.subscribe();
-        while let Some(event) = receiver.recv().await {
+        while let Ok(event) = receiver.recv().await {
             if let TorrentEvent::MetadataChanged(_) = &*event {
                 break;
             }
@@ -593,10 +593,6 @@ impl Session for FxTorrentSession {
 impl Callback<SessionEvent> for FxTorrentSession {
     fn subscribe(&self) -> Subscription<SessionEvent> {
         self.inner.callbacks.subscribe()
-    }
-
-    fn subscribe_with(&self, subscriber: Subscriber<SessionEvent>) {
-        self.inner.callbacks.subscribe_with(subscriber)
     }
 }
 
@@ -899,7 +895,7 @@ impl InnerSession {
         let command_sender = self.command_sender.clone();
         let mut receiver = torrent.subscribe();
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
+            while let Ok(event) = receiver.recv().await {
                 if let TorrentEvent::MetadataChanged(metadata) = &*event {
                     let _ = command_sender.send(SessionCommand::StoreMetadata(metadata.clone()));
                 }
@@ -1021,7 +1017,6 @@ mod mock {
 
         impl Callback<SessionEvent> for Session {
             fn subscribe(&self) -> Subscription<SessionEvent>;
-            fn subscribe_with(&self, subscriber: Subscriber<SessionEvent>);
         }
     }
 }
@@ -1188,7 +1183,7 @@ pub mod tests {
 
         let mut receiver = session.subscribe();
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
+            while let Ok(event) = receiver.recv().await {
                 let _ = tx.send((*event).clone());
             }
         });
@@ -1220,7 +1215,7 @@ pub mod tests {
 
         let mut receiver = session.subscribe();
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
+            while let Ok(event) = receiver.recv().await {
                 let _ = tx.send((*event).clone());
             }
         });

@@ -126,8 +126,8 @@ impl PexExtension {
                         _ = pool.inner.cancellation_token.cancelled() => break,
                         event = receiver.recv() => {
                             match event {
-                                Some(event) => pool.handle_event(&*event).await,
-                                None => break,
+                                Ok(event) => pool.handle_event(&*event).await,
+                                Err(_) => break,
                             }
                         }
                         _ = interval.tick() => {

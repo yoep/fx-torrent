@@ -8,7 +8,7 @@ use crate::{FileAttributeFlags, Piece, PieceIndex, TorrentFileInfo, TorrentMetad
 use async_trait::async_trait;
 use bit_vec::BitVec;
 use derive_more::Display;
-use fx_callback::{Callback, MultiThreadedCallback, Subscriber, Subscription};
+use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use fx_handle::Handle;
 use log::{debug, warn};
 use percent_encoding::{percent_encode, AsciiSet, NON_ALPHANUMERIC};
@@ -131,10 +131,6 @@ impl Peer for HttpPeer {
 impl Callback<PeerEvent> for HttpPeer {
     fn subscribe(&self) -> Subscription<PeerEvent> {
         self.inner.callbacks.subscribe()
-    }
-
-    fn subscribe_with(&self, subscriber: Subscriber<PeerEvent>) {
-        self.inner.callbacks.subscribe_with(subscriber)
     }
 }
 

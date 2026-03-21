@@ -165,7 +165,7 @@ mod tests {
         // subscribe to the torrent context events
         let mut receiver = context.subscribe();
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
+            while let Ok(event) = receiver.recv().await {
                 if let TorrentEvent::Stats(metrics) = &*event {
                     let _ = tx.send(metrics.clone());
                     break;

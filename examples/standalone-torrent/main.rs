@@ -56,7 +56,7 @@ async fn wait_for_torrent_initialization(torrent: &Torrent) {
         return;
     }
 
-    while let Some(event) = receiver.recv().await {
+    while let Ok(event) = receiver.recv().await {
         if let TorrentEvent::StateChanged(new_state) = &*event {
             println!("Torrent state changed to {}", new_state);
             if new_state != &TorrentState::Initializing {

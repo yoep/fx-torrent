@@ -20,7 +20,7 @@ use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use derive_more::Display;
 use futures::future;
-use fx_callback::{Callback, MultiThreadedCallback, Subscriber, Subscription};
+use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use fx_handle::Handle;
 use log::{debug, error, trace, warn};
 use std::cmp::Ordering;
@@ -968,10 +968,6 @@ impl Callback<PeerEvent> for BitTorrentPeer {
     fn subscribe(&self) -> Subscription<PeerEvent> {
         self.inner.subscribe()
     }
-
-    fn subscribe_with(&self, subscriber: Subscriber<PeerEvent>) {
-        self.inner.subscribe_with(subscriber)
-    }
 }
 
 impl Display for BitTorrentPeer {
@@ -1126,7 +1122,7 @@ impl PeerContext {
                 _ = time::sleep(Duration::from_secs(KEEP_ALIVE_SECONDS)) => self.send_keep_alive().await,
                 Some(event) = self.connection.recv() => self.handle_reader_event(event).await,
                 Some(event) = event_receiver.recv() => self.handle_command_event(event).await,
-                Some(event) = torrent_receiver.recv() => self.handle_torrent_event(&*event).await,
+                Ok(event) = torrent_receiver.recv() => self.handle_torrent_event(&*event).await,
                 _ = interval.tick() => {
                     self.update_stats();
                     self.check_for_wanted_pieces().await;
@@ -2787,10 +2783,6 @@ impl Callback<PeerEvent> for PeerContext {
     fn subscribe(&self) -> Subscription<PeerEvent> {
         self.callbacks.subscribe()
     }
-
-    fn subscribe_with(&self, subscriber: Subscriber<PeerEvent>) {
-        self.callbacks.subscribe_with(subscriber)
-    }
 }
 
 impl Drop for PeerContext {
@@ -3039,7 +3031,7 @@ mod tests {
         let (tx, mut rx) = channel(1);
         let mut receiver = target_torrent.subscribe();
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
+            while let Ok(event) = receiver.recv().await {
                 if let TorrentEvent::MetadataChanged(_) = *event {
                     tx.send(()).await.unwrap();
                 }

@@ -13,7 +13,7 @@ use crate::tracker::{
 use crate::{InfoHash, Metrics};
 use derive_more::Display;
 use futures::future;
-use fx_callback::{Callback, MultiThreadedCallback, Subscriber, Subscription};
+use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use log::{debug, info, trace, warn};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
@@ -417,10 +417,6 @@ impl TrackerClient {
 impl Callback<TrackerClientEvent> for TrackerClient {
     fn subscribe(&self) -> Subscription<TrackerClientEvent> {
         self.inner.callbacks.subscribe()
-    }
-
-    fn subscribe_with(&self, subscriber: Subscriber<TrackerClientEvent>) {
-        self.inner.callbacks.subscribe_with(subscriber)
     }
 }
 
@@ -1104,7 +1100,7 @@ mod tests {
 
         let mut receiver = manager.subscribe();
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
+            while let Ok(event) = receiver.recv().await {
                 if let TrackerClientEvent::TrackerAdded(_) = &*event {
                     tx.send((*event).clone()).unwrap();
                     break;
