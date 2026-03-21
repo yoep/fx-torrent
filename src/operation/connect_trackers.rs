@@ -240,7 +240,7 @@ mod tests {
         // subscribe to the tracker events
         let mut receiver = context.tracker_manager().subscribe();
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
+            while let Ok(event) = receiver.recv().await {
                 if let TrackerClientEvent::TrackerAdded(_) = *event {
                     tx.send(()).unwrap();
                     break;

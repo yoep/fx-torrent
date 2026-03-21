@@ -658,7 +658,7 @@ pub mod tests {
             select! {
                 _ = time::sleep(Duration::from_secs(2)) => assert!(false, "expected the pieces of {} to have been created", torrent),
                 _ = async {
-                    while let Some(event) = receiver.recv().await {
+                    while let Ok(event) = receiver.recv().await {
                         match &*event {
                             TorrentEvent::PiecesChanged(_) => break,
                             _ => {}
@@ -682,7 +682,7 @@ pub mod tests {
             select! {
                 _ = time::sleep(timeout) => assert!(false, "expected state {}, but got {:?}", expected_state, state),
                 _ = async {
-                    while let Some(event) = receiver.recv().await {
+                    while let Ok(event) = receiver.recv().await {
                         match &*event {
                             TorrentEvent::StateChanged(new_state) => {
                                 state = *new_state;

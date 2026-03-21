@@ -6,12 +6,12 @@ use crate::PieceIndex;
 use async_trait::async_trait;
 use bit_vec::BitVec;
 use crc::{Crc, CRC_32_ISCSI};
-use fx_callback::{Callback, Subscriber, Subscription};
+use fx_callback::{Callback, Subscription};
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Weak};
-use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::broadcast::channel;
 
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
@@ -128,14 +128,8 @@ impl Callback<PeerEvent> for TorrentPeer {
             return inner.subscribe();
         }
 
-        let (_, rx) = unbounded_channel();
+        let (_, rx) = channel(1);
         rx
-    }
-
-    fn subscribe_with(&self, subscriber: Subscriber<PeerEvent>) {
-        if let Some(inner) = self.instance() {
-            inner.subscribe_with(subscriber)
-        }
     }
 }
 

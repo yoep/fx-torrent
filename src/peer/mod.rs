@@ -30,7 +30,7 @@ pub mod tests {
     use crate::{PieceIndex, Torrent};
     use async_trait::async_trait;
     use bit_vec::BitVec;
-    use fx_callback::{Callback, Subscriber, Subscription};
+    use fx_callback::{Callback, Subscription};
     use mockall::mock;
     use std::fmt::{Display, Formatter};
     use std::net::SocketAddr;
@@ -58,7 +58,6 @@ pub mod tests {
 
         impl Callback<PeerEvent> for Peer {
             fn subscribe(&self) -> Subscription<PeerEvent>;
-            fn subscribe_with(&self, subscriber: Subscriber<PeerEvent>);
         }
     }
 

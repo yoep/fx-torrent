@@ -158,7 +158,7 @@ impl App {
                 _ = time::sleep(RENDER_INTERVAL) => {},
                 event = reader.next().fuse() => self.handle_event(event).await,
                 Some(command) = self.app_command_receiver.recv() => self.handle_command(command).await,
-                Some(event) = self.session_event_receiver.recv() => self.handle_session_event(&*event).await,
+                Ok(event) = self.session_event_receiver.recv() => self.handle_session_event(&*event).await,
             }
 
             // tick all widgets, which allows them to process events

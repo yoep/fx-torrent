@@ -215,7 +215,7 @@ mod tests {
         // subscribe to the source node events
         let mut subscription = source.callbacks.subscribe();
         tokio::spawn(async move {
-            while let Some(event) = subscription.recv().await {
+            while let Ok(event) = subscription.recv().await {
                 if let DhtEvent::NodeAdded(node) = &*event {
                     tx.send(node.clone()).unwrap();
                     break;

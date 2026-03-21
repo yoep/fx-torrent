@@ -25,7 +25,7 @@ use derive_more::Display;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
-use fx_callback::{Callback, MultiThreadedCallback, Subscriber, Subscription};
+use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use fx_handle::Handle;
 use log::{debug, error, info, trace, warn};
 use sha1::Sha1;
@@ -961,7 +961,7 @@ impl Torrent {
             loop {
                 select! {
                     _ = inner_cancel.cancelled() => break,
-                    Some(event) = receiver.recv() => {
+                    Ok(event) = receiver.recv() => {
                         if let TorrentEvent::TrackersChanged = *event {
                             inner_notifier.notify_one();
                         }
@@ -984,10 +984,6 @@ impl Torrent {
 impl Callback<TorrentEvent> for Torrent {
     fn subscribe(&self) -> Subscription<TorrentEvent> {
         self.inner.subscribe()
-    }
-
-    fn subscribe_with(&self, subscriber: Subscriber<TorrentEvent>) {
-        self.inner.subscribe_with(subscriber);
     }
 }
 
@@ -1407,10 +1403,6 @@ impl Callback<TorrentEvent> for InnerTorrent {
     fn subscribe(&self) -> Subscription<TorrentEvent> {
         self.callbacks.subscribe()
     }
-
-    fn subscribe_with(&self, subscriber: Subscriber<TorrentEvent>) {
-        self.callbacks.subscribe_with(subscriber);
-    }
 }
 
 /// The reason why a pending request was rejected
@@ -1774,7 +1766,7 @@ impl TorrentContext {
                     Some(command) => self.on_command(command).await,
                     None => break,
                 },
-                Some(event) = tracker_event_receiver.recv() => self.on_tracker_event((*event).clone()).await,
+                Ok(event) = tracker_event_receiver.recv() => self.on_tracker_event((*event).clone()).await,
                 Some((idx, entry)) = peer_connections.next() => {
                     if let Some(entry) = entry {
                         self.handle_incoming_peer_connection(entry).await;
@@ -3392,10 +3384,6 @@ impl Callback<TorrentEvent> for TorrentContext {
     fn subscribe(&self) -> Subscription<TorrentEvent> {
         self.callbacks.subscribe()
     }
-
-    fn subscribe_with(&self, subscriber: Subscriber<TorrentEvent>) {
-        self.callbacks.subscribe_with(subscriber)
-    }
 }
 
 impl Display for TorrentContext {
@@ -3453,7 +3441,7 @@ mod tests {
 
             let mut receiver = torrent.subscribe();
             tokio::spawn(async move {
-                while let Some(event) = receiver.recv().await {
+                while let Ok(event) = receiver.recv().await {
                     if let TorrentEvent::StateChanged(state) = &*event {
                         if state == &TorrentState::Stopped {
                             let _ = tx.send(());
@@ -3632,7 +3620,7 @@ mod tests {
             let torrent_handle = torrent.handle();
             let mut receiver = torrent.subscribe();
             tokio::spawn(async move {
-                while let Some(event) = receiver.recv().await {
+                while let Ok(event) = receiver.recv().await {
                     match &*event {
                         TorrentEvent::MetadataChanged(_) => {
                             let _ = tx.send(());
@@ -3709,13 +3697,9 @@ mod tests {
 
             let mut receiver = torrent.subscribe();
             tokio::spawn(async move {
-                loop {
-                    if let Some(event) = receiver.recv().await {
-                        if let TorrentEvent::PiecesChanged(_) = *event {
-                            tx.send(()).unwrap();
-                        }
-                    } else {
-                        break;
+                while let Ok(event) = receiver.recv().await {
+                    if let TorrentEvent::PiecesChanged(_) = *event {
+                        tx.send(()).unwrap();
                     }
                 }
             });
@@ -3847,7 +3831,7 @@ mod tests {
             // wait for the pieces changed event
             let mut receiver = torrent.subscribe();
             tokio::spawn(async move {
-                while let Some(event) = receiver.recv().await {
+                while let Ok(event) = receiver.recv().await {
                     if let TorrentEvent::FilesChanged = *event {
                         tx.send(()).unwrap();
                     }
@@ -3957,7 +3941,7 @@ mod tests {
         let target_handle = target_torrent.handle();
         let mut receiver = target_torrent.subscribe();
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
+            while let Ok(event) = receiver.recv().await {
                 match &*event {
                     TorrentEvent::StateChanged(state) => {
                         if state == &TorrentState::Finished {
@@ -4055,7 +4039,7 @@ mod tests {
 
         let mut receiver = torrent.subscribe();
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
+            while let Ok(event) = receiver.recv().await {
                 if let TorrentEvent::StateChanged(state) = &*event {
                     if state != &TorrentState::Initializing && state != &TorrentState::CheckingFiles
                     {
@@ -4415,13 +4399,9 @@ mod tests {
         // subscribe to the events of the torrent
         let mut receiver = context.subscribe();
         tokio::spawn(async move {
-            loop {
-                if let Some(event) = receiver.recv().await {
-                    if let TorrentEvent::StateChanged(state) = &*event {
-                        tx.send(state.clone()).unwrap();
-                        break;
-                    }
-                } else {
+            while let Ok(event) = receiver.recv().await {
+                if let TorrentEvent::StateChanged(state) = &*event {
+                    tx.send(state.clone()).unwrap();
                     break;
                 }
             }

@@ -22,7 +22,7 @@ use crate::{InfoHash, Sha1Hash};
 use derive_more::Display;
 use ed25519::SignatureBytes;
 use futures::StreamExt;
-use fx_callback::{Callback, MultiThreadedCallback, Subscriber, Subscription};
+use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use itertools::{Either, Itertools};
 use log::{debug, error, trace, warn};
 use serde::de::DeserializeOwned;
@@ -1023,10 +1023,6 @@ impl DhtTracker {
 impl Callback<DhtEvent> for DhtTracker {
     fn subscribe(&self) -> Subscription<DhtEvent> {
         self.callbacks.subscribe()
-    }
-
-    fn subscribe_with(&self, subscriber: Subscriber<DhtEvent>) {
-        self.callbacks.subscribe_with(subscriber)
     }
 }
 
@@ -3635,7 +3631,7 @@ mod tests {
             let mut events_receiver = source.callbacks.subscribe();
             let (tx, rx) = oneshot::channel();
             tokio::spawn(async move {
-                while let Some(event) = events_receiver.recv().await {
+                while let Ok(event) = events_receiver.recv().await {
                     if let DhtEvent::InfoHashAdded(_) = &*event {
                         let _ = tx.send(event.clone());
                         break;
