@@ -28,6 +28,12 @@ impl TorrentStatsOperation {
         }
     }
 
+    /// Returns `true` if the event invocation is allowed, else `false`.
+    fn is_invocation_allowed(&self, context: &TorrentContext) -> bool {
+        self.initialized && !context.is_paused()
+    }
+
+    /// Returns the current tick interval.
     fn interval(&self) -> Duration {
         self.last_tick.elapsed().max(Duration::from_millis(1))
     }
@@ -75,6 +81,24 @@ impl TorrentStatsOperation {
 
         self.peer_receivers.retain(|e| !e.is_closed());
     }
+
+    fn tick(&mut self, context: &TorrentContext) {
+        let interval = self.interval();
+        context.metrics().tick(interval);
+        self.last_tick = Instant::now();
+
+        self.invoke_event(context);
+    }
+
+    /// Invokes the [TorrentEvent::Stats] event if allowed.
+    fn invoke_event(&self, context: &TorrentContext) {
+        if !self.is_invocation_allowed(context) {
+            return;
+        }
+
+        let stats = context.metrics().snapshot();
+        context.invoke_event(TorrentEvent::Stats(stats));
+    }
 }
 
 #[async_trait]
@@ -90,18 +114,12 @@ impl TorrentOperation for TorrentStatsOperation {
         _: &[Arc<dyn PeerDiscovery>],
     ) -> TorrentOperationResult {
         self.initialize(context);
-        self.process_torrent_events(context);
 
-        // collect the peer metrics
+        // process all pending events
+        self.process_torrent_events(context);
         self.process_peer_events(context);
 
-        // invoke the stats event for the torrent
-        let stats = context.metrics().snapshot();
-        let interval = self.interval();
-        context.metrics().tick(interval);
-        context.invoke_event(TorrentEvent::Stats(stats));
-        self.last_tick = Instant::now();
-
+        self.tick(context);
         TorrentOperationResult::Continue
     }
 }
@@ -110,12 +128,42 @@ impl TorrentOperation for TorrentStatsOperation {
 mod tests {
     use super::*;
     use crate::peer::Peer;
-    use crate::{create_peer_pair, create_torrent, create_torrent_context, TorrentEvent};
+    use crate::{
+        create_peer_pair, create_torrent, create_torrent_context, TorrentEvent, TorrentFlags,
+    };
     use fx_callback::Callback;
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::sync::oneshot;
     use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn test_is_invocation_allowed() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let (mut context, _) = create_torrent_context!(
+            "debian-udp.torrent",
+            temp_path,
+            TorrentFlags::Paused,
+            TorrentConfig::builder().build(),
+            vec![],
+            DhtOption::none()
+        );
+        let mut operation = TorrentStatsOperation::new();
+
+        // initialize the operation
+        operation.initialize(&context);
+
+        // should return false when the torrent is paused
+        let result = operation.is_invocation_allowed(&context);
+        assert_eq!(false, result);
+
+        // should return true when the torrent is not paused
+        context.remove_options(TorrentFlags::Paused);
+        let result = operation.is_invocation_allowed(&context);
+        assert_eq!(true, result);
+    }
 
     #[tokio::test]
     async fn test_execute() {
@@ -135,7 +183,8 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
-            vec![]
+            vec![],
+            DhtOption::none()
         );
         let (source, _target) = create_peer_pair!(&torrent);
         let mut operation = TorrentStatsOperation::new();
