@@ -473,7 +473,6 @@ impl BitTorrentPeer {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
-        extensions: Extensions,
         timeout: Duration,
     ) -> Result<Self> {
         trace!(
@@ -507,7 +506,6 @@ impl BitTorrentPeer {
             torrent,
             data_pool,
             protocol_extensions,
-            extensions,
             metrics,
             timeout,
         )
@@ -522,7 +520,6 @@ impl BitTorrentPeer {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
-        extensions: Extensions,
         timeout: Duration,
     ) -> Result<Self> {
         let metrics = Metrics::new();
@@ -560,7 +557,6 @@ impl BitTorrentPeer {
                 torrent,
                 data_pool,
                 protocol_extensions,
-                extensions,
                 metrics,
                 timeout,
             ) => result
@@ -791,11 +787,22 @@ impl BitTorrentPeer {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
-        extensions: Extensions,
         metrics: Metrics,
         timeout: Duration,
     ) -> Result<Self> {
         let (event_sender, event_receiver) = unbounded_channel();
+        let extensions = match torrent.extensions().await {
+            Ok(extensions) => extensions,
+            Err(e) => {
+                // if we receive an error while retrieving the extensions,
+                // the torrent is probably canceled
+                debug!(
+                    "Torrent {} failed to retrieve peer extensions, {}",
+                    torrent, e
+                );
+                return Err(Error::Closed);
+            }
+        };
         let extension_registry = Self::create_extension_registry(&extensions);
         let peer_handle = PeerHandle::new();
         let total_pieces = data_pool.num_of_pieces().await;
@@ -2756,9 +2763,7 @@ impl PeerContext {
 
         // notify the torrent that this peer is being closed
         if self.torrent.is_valid() {
-            self.torrent
-                .peer_closed(self.client.handle.into(), reason)
-                .await;
+            self.torrent.peer_closed(self.client.addr, reason).await;
         }
     }
 
@@ -2800,7 +2805,6 @@ mod tests {
     use crate::operation::{
         TorrentCreatePiecesAndFilesOperation, TorrentOperation, TorrentOperationResult,
     };
-    use crate::peer::extension::metadata::MetadataExtension;
     use crate::peer::protocol::tests::UtpPacketCaptureExtension;
     use crate::peer::tests::create_utp_peer_pair;
     use crate::peer::{PeerDiscovery, TcpPeerDiscovery};
@@ -2927,7 +2931,6 @@ mod tests {
                     inner,
                     data_pool,
                     ProtocolExtensionFlags::none(),
-                    vec![Box::new(MetadataExtension::new())],
                     Duration::from_secs(5),
                 )
                 .await
@@ -3052,7 +3055,6 @@ mod tests {
             target_torrent.inner.clone(),
             data_pool,
             protocol_extensions,
-            vec![Box::new(MetadataExtension::new())],
             Duration::from_secs(5),
         )
         .await
@@ -3385,7 +3387,7 @@ mod tests {
             _: &[Arc<dyn PeerDiscovery>],
         ) -> TorrentOperationResult {
             if let Some(change) = self.receiver.try_recv() {
-                context.update_state(change.state);
+                context.update_state(change.state).await;
                 change.response.send(());
             }
 

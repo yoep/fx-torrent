@@ -532,7 +532,6 @@ pub mod tests {
 
         let incoming_context = incoming_torrent.inner.clone();
         let incoming_data_pool = incoming_context.data_pool().await.unwrap();
-        let extensions = incoming_context.extensions().await.unwrap();
         let listener = new_tcp_peer_discovery().await.unwrap();
         let listener_port = listener.port();
         tokio::spawn(async move {
@@ -546,7 +545,6 @@ pub mod tests {
                             incoming_context,
                             incoming_data_pool,
                             protocols.clone(),
-                            extensions,
                             Duration::from_secs(5),
                         )
                         .await,
@@ -557,7 +555,6 @@ pub mod tests {
         });
 
         let outgoing_context = outgoing_context.clone();
-        let outgoing_extensions = outgoing_context.extensions().await.unwrap();
         let outgoing_data_pool = outgoing_context.data_pool().await.unwrap();
         let addr = SocketAddr::new([127, 0, 0, 1].into(), listener_port);
         let stream = TcpStream::connect(addr).await.unwrap();
@@ -568,7 +565,6 @@ pub mod tests {
             outgoing_context,
             outgoing_data_pool,
             protocols,
-            outgoing_extensions,
             Duration::from_secs(5),
         )
         .await

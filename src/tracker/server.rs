@@ -17,6 +17,7 @@ use std::time::Duration;
 use tokio::select;
 use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 /// A request received by a tracker server connection.
 ///
@@ -48,6 +49,9 @@ pub trait TrackerListener: Send {
 
     /// Returns the local address on which this listener is listening.
     fn addr(&self) -> &SocketAddr;
+
+    /// Returns the url of the tracker server.
+    fn url(&self) -> &Url;
 
     /// Returns metrics for this listener.
     fn metrics(&self) -> &ConnectionMetrics;
@@ -85,14 +89,14 @@ impl TrackerServer {
     ///
     /// Returns [`TrackerError::Unavailable`] if `listeners` is empty.
     pub async fn with_listeners(listeners: Vec<Box<dyn TrackerListener>>) -> Result<Self> {
-        let addr = if let Some(conn) = listeners.get(0) {
-            conn.addr().clone()
-        } else {
-            return Err(TrackerError::Unavailable);
+        let (addr, url) = match listeners.get(0) {
+            Some(conn) => (conn.addr().clone(), conn.url().clone()),
+            None => return Err(TrackerError::Unavailable),
         };
         let inner = Arc::new(InnerServer {
             handle: Default::default(),
             addr,
+            url,
             announce_interval: Duration::from_secs(5 * 60),
             torrents: Default::default(),
             cancellation: Default::default(),
@@ -109,6 +113,11 @@ impl TrackerServer {
     /// Returns the socket address this server is listening on.
     pub fn addr(&self) -> &SocketAddr {
         &self.inner.addr
+    }
+
+    /// Returns the url of the tracker server.
+    pub fn url(&self) -> &Url {
+        &self.inner.url
     }
 
     /// Adds or updates a peer in the tracker state for the given torrent.
@@ -148,6 +157,7 @@ impl TrackerServer {
 struct InnerServer {
     handle: TrackerHandle,
     addr: SocketAddr,
+    url: Url,
     announce_interval: Duration,
     torrents: Mutex<HashMap<InfoHash, HashMap<PeerEntry, TorrentPeer>>>,
     cancellation: CancellationToken,
@@ -160,7 +170,7 @@ impl InnerServer {
                 FuturesUnordered::from_iter(listeners.iter().map(|e| e.accept())).fuse();
             select! {
                 _ = self.cancellation.cancelled() => break,
-                Some(Some(request)) = futures.next() => self.handle_request(request).await,
+                Some(Some(request)) = futures.next() => self.on_request(request).await,
             }
         }
 
@@ -168,7 +178,7 @@ impl InnerServer {
         debug!("Tracker server {} main loop ended", self);
     }
 
-    async fn handle_request(&self, request: ServerRequest) {
+    async fn on_request(&self, request: ServerRequest) {
         match request {
             ServerRequest::Announcement {
                 addr,

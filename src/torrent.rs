@@ -8,7 +8,7 @@ use crate::peer::{
     BitTorrentPeer, CloseReason, Peer, PeerClientInfo, PeerDiscovery, PeerEntry, PeerHandle,
     PeerId, ProtocolExtensionFlags,
 };
-use crate::peer_pool::{PeerIdentifier, PeerPool};
+use crate::peer_pool::PeerPool;
 use crate::storage::{Storage, StorageParams};
 use crate::torrent_data::DataPool;
 use crate::tracker::{
@@ -185,12 +185,20 @@ impl TorrentRequest {
     }
 
     /// Add the given peer dialer to the torrent.
+    ///
+    /// ## Remark
+    ///
+    /// The order in which the dialers are added are important for outgoing connections.
     pub fn peer_discovery(&mut self, dialer: Box<dyn PeerDiscovery>) -> &mut Self {
         self.peer_discoveries.get_or_insert(Vec::new()).push(dialer);
         self
     }
 
     /// Set the given peer dialers of the torrent.
+    ///
+    /// ## Remark
+    ///
+    /// The order of the dialers are important for outgoing connections.
     pub fn peer_discoveries(&mut self, dialers: Vec<Box<dyn PeerDiscovery>>) -> &mut Self {
         self.peer_discoveries = Some(dialers);
         self
@@ -1374,9 +1382,9 @@ impl InnerTorrent {
     }
 
     /// Notify the torrent that a peer's connection is closed.
-    pub(crate) async fn peer_closed(&self, peer: PeerIdentifier, reason: CloseReason) {
+    pub(crate) async fn peer_closed(&self, addr: SocketAddr, reason: CloseReason) {
         self.sender
-            .fire_and_forget(TorrentCommand::PeerClosed { peer, reason })
+            .fire_and_forget(TorrentCommand::PeerClosed { addr, reason })
             .await;
     }
 
@@ -1430,7 +1438,7 @@ pub enum TorrentCommand {
         addrs: Vec<SocketAddr>,
     },
     PeerClosed {
-        peer: PeerIdentifier,
+        addr: SocketAddr,
         reason: CloseReason,
     },
     State {
@@ -1758,7 +1766,7 @@ impl TorrentContext {
                     Some(command) => self.on_command(command).await,
                     None => break,
                 },
-                Ok(event) = tracker_event_receiver.recv() => self.handle_tracker_event((*event).clone()).await,
+                Ok(event) = tracker_event_receiver.recv() => self.on_tracker_event((*event).clone()).await,
                 Some((idx, entry)) = peer_connections.next() => {
                     if let Some(entry) = entry {
                         self.handle_incoming_peer_connection(entry).await;
@@ -1785,10 +1793,11 @@ impl TorrentContext {
             .announce_all(&self.metadata.info_hash, AnnounceEvent::Stopped)
             .await;
         self.tracker_manager
-            .remove_torrent(&self.metadata.info_hash);
+            .remove_torrent(&self.metadata.info_hash)
+            .await;
         self.data_pool.close().await;
         self.cancellation_token.cancel();
-        self.update_state(TorrentState::Stopped);
+        self.update_state(TorrentState::Stopped).await;
         trace!("Torrent {} main loop ended", self);
     }
 
@@ -2004,7 +2013,7 @@ impl TorrentContext {
         let is_not_init_state = !self.state.is_initializing_phase();
         if is_not_init_state {
             let new_state = self.determine_state().await;
-            self.update_state(new_state);
+            self.update_state(new_state).await;
         }
     }
 
@@ -2245,14 +2254,14 @@ impl TorrentContext {
     }
 
     /// Handle a closed torrent peer connection.
-    async fn on_peer_closed(&mut self, id: PeerIdentifier, reason: CloseReason) {
+    async fn on_peer_closed(&mut self, addr: SocketAddr, reason: CloseReason) {
         trace!(
             "Torrent {} peer connection closed {:?}, reason: {:?}",
             self,
-            id,
+            addr,
             reason
         );
-        let peer = match self.peer_pool.peer_closed(&id, reason).await {
+        let peer = match self.peer_pool.peer_closed(&addr, reason).await {
             None => return,
             Some(peer) => peer,
         };
@@ -2314,6 +2323,7 @@ impl TorrentContext {
     pub async fn make_announce_all(&self) {
         self.tracker_manager
             .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Started)
+            .await
     }
 
     /// Get the scrape metrics result from scraping all trackers for this torrent.
@@ -2371,7 +2381,7 @@ impl TorrentContext {
     /// Update the state of this torrent.
     /// If the torrent is already in the given state, this will be a no-op.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    pub fn update_state(&mut self, state: TorrentState) {
+    pub async fn update_state(&mut self, state: TorrentState) {
         // check if we're already in the expected state
         // if so, ignore this update
         if self.state == state {
@@ -2382,15 +2392,21 @@ impl TorrentContext {
 
         // inform the trackers about the new state
         match &state {
-            TorrentState::Downloading => self
-                .tracker_manager
-                .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Started),
-            TorrentState::Seeding | TorrentState::Finished => self
-                .tracker_manager
-                .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Completed),
-            TorrentState::Paused => self
-                .tracker_manager
-                .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Paused),
+            TorrentState::Downloading => {
+                self.tracker_manager
+                    .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Started)
+                    .await
+            }
+            TorrentState::Seeding | TorrentState::Finished => {
+                self.tracker_manager
+                    .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Completed)
+                    .await
+            }
+            TorrentState::Paused => {
+                self.tracker_manager
+                    .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Paused)
+                    .await
+            }
             _ => {}
         }
 
@@ -2435,12 +2451,7 @@ impl TorrentContext {
             let mut peer_count = 0u32;
 
             {
-                for peer in self
-                    .peer_pool
-                    .peers()
-                    .into_iter()
-                    .filter_map(|peer| peer.upgrade())
-                {
+                for peer in self.peer_pool.peers() {
                     peer_count += 1;
                     for (piece_index, _) in peer
                         .remote_piece_bitfield()
@@ -2545,7 +2556,7 @@ impl TorrentContext {
         let is_completed = self.is_completed().await;
         if is_completed {
             // offload the state change to the main loop
-            self.update_state(TorrentState::Finished);
+            self.update_state(TorrentState::Finished).await;
         }
 
         // notify the connected peers about the completed pieces
@@ -2598,7 +2609,8 @@ impl TorrentContext {
         // announce to the trackers if we don't know any peers
         if self.peer_pool.num_connect_candidates() == 0 {
             self.tracker_manager
-                .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Started);
+                .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Started)
+                .await;
         }
 
         let wanted_pieces = self.total_wanted_pieces().await;
@@ -2609,9 +2621,9 @@ impl TorrentContext {
     }
 
     /// Pause the torrent operations.
-    pub(crate) fn pause(&mut self) {
+    pub(crate) async fn pause(&mut self) {
         self.add_options(TorrentFlags::Paused);
-        self.update_state(TorrentState::Paused);
+        self.update_state(TorrentState::Paused).await;
     }
 
     /// Add the specified peer addresses to the peer pool of the torrent.
@@ -2645,8 +2657,8 @@ impl TorrentContext {
             TorrentCommand::DecreasePeerPriority { addrs } => {
                 self.decrease_peer_addr_priority(addrs)
             }
-            TorrentCommand::PeerClosed { peer, reason } => {
-                self.on_peer_closed(peer, reason).await;
+            TorrentCommand::PeerClosed { addr, reason } => {
+                self.on_peer_closed(addr, reason).await;
             }
             TorrentCommand::Metadata { response } => {
                 response.send(self.metadata.clone());
@@ -2762,7 +2774,7 @@ impl TorrentContext {
                 response.send(self.is_paused());
             }
             TorrentCommand::Pause { response } => {
-                response.send(self.pause());
+                response.send(self.pause().await);
             }
             TorrentCommand::Resume { response } => {
                 response.send(self.resume().await);
@@ -2822,7 +2834,7 @@ impl TorrentContext {
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    async fn handle_tracker_event(&mut self, event: TrackerClientEvent) {
+    async fn on_tracker_event(&mut self, event: TrackerClientEvent) {
         match event {
             TrackerClientEvent::PeersDiscovered(info_hash, peers) => {
                 if info_hash == self.metadata.info_hash {
@@ -2842,7 +2854,8 @@ impl TorrentContext {
                 }
 
                 self.tracker_manager
-                    .make_announcement(handle, &self.metadata.info_hash, event);
+                    .make_announcement(handle, &self.metadata.info_hash, event)
+                    .await;
                 self.invoke_event(TorrentEvent::TrackersChanged);
             }
             _ => {}
@@ -2856,7 +2869,6 @@ impl TorrentContext {
             self,
             entry.socket_addr
         );
-        let extensions = self.extensions();
         let timeout = self.config.peer_connection_timeout;
 
         let handle = self.handle;
@@ -2877,7 +2889,6 @@ impl TorrentContext {
                 },
                 data_pool.clone(),
                 protocol_extensions,
-                extensions,
                 timeout,
             )
             .await
@@ -2920,7 +2931,7 @@ impl TorrentContext {
                 "Torrent {} failed to register with tracker manager, {}",
                 self, e
             );
-            self.update_state(TorrentState::Error);
+            self.update_state(TorrentState::Error).await;
             return false;
         }
 
@@ -3050,7 +3061,7 @@ impl TorrentContext {
         let is_not_init_state = !self.state.is_initializing_phase();
         if is_not_init_state {
             let state = self.determine_state().await;
-            self.update_state(state);
+            self.update_state(state).await;
         }
     }
 
@@ -3316,9 +3327,9 @@ impl TorrentContext {
 
     /// Notify the peers about the pieces that have become available.
     fn notify_peers_have_pieces(&self, pieces: Vec<PieceIndex>) {
-        for peer in self.peer_pool.peers.values() {
-            peer.notify_piece_availability(pieces.clone());
-        }
+        self.peer_pool
+            .peers()
+            .for_each(|peer| peer.notify_piece_availability(pieces.clone()))
     }
 
     /// Invoke the given torrent event for all registered callbacks.
@@ -4077,7 +4088,7 @@ mod tests {
         let mut receiver = context.subscribe();
 
         // reset the state to Initializing
-        context.update_state(TorrentState::Initializing);
+        context.update_state(TorrentState::Initializing).await;
         let result = context.is_download_allowed();
         assert_eq!(false, result, "expected downloading to not be allowed");
 
@@ -4091,7 +4102,7 @@ mod tests {
         assert_eq!(false, result, "expected downloading to not be allowed");
 
         let result = async {
-            context.update_state(TorrentState::Finished);
+            context.update_state(TorrentState::Finished).await;
             context.is_download_allowed()
         }
         .await;
@@ -4239,7 +4250,7 @@ mod tests {
 
         context.remove_options(TorrentFlags::UploadMode);
         context.add_options(TorrentFlags::DownloadMode);
-        context.update_state(TorrentState::Paused);
+        context.update_state(TorrentState::Paused).await;
         let result = context.determine_state().await;
         assert_eq!(TorrentState::Downloading, result);
     }
@@ -4333,7 +4344,7 @@ mod tests {
         // acquire some locks
         let permits = async {
             // update the torrent state to a "download allowed" state
-            context.update_state(TorrentState::Downloading);
+            context.update_state(TorrentState::Downloading).await;
             // start requesting permits
             let mut permits = Vec::new();
             for piece in (0..10).into_iter().map(|e| e as PieceIndex) {
@@ -4396,7 +4407,7 @@ mod tests {
             }
         });
 
-        context.update_state(expected_state);
+        context.update_state(expected_state).await;
 
         let result = timeout!(
             rx.recv(),

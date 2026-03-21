@@ -1,4 +1,3 @@
-use crate::peer::extension::Extensions;
 use crate::peer::{Peer, PeerId, PeerStream, ProtocolExtensionFlags, Result};
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
@@ -45,7 +44,6 @@ pub trait PeerDiscovery: Debug + Send + Sync {
     /// * `torrent` - The torrent to use for the connection.
     /// * `data_pool` - The torrent data pool to use for the connection.
     /// * `protocol_extensions` - The peer protocol extensions that should be enabled for the connection. (BEP4)
-    /// * `extensions` - The peer extensions that should be activated for the connection. (BEP10)
     /// * `connection_timeout` - The timeout of a peer connection.
     ///
     /// # Returns
@@ -58,7 +56,6 @@ pub trait PeerDiscovery: Debug + Send + Sync {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
-        extensions: Extensions,
         connection_timeout: Duration,
     ) -> Result<Box<dyn Peer>>;
 
@@ -95,7 +92,6 @@ pub mod mock {
                 torrent: InnerTorrent,
                 data_pool: DataPool,
                 protocol_extensions: ProtocolExtensionFlags,
-                extensions: Extensions,
                 connection_timeout: Duration,
             ) -> Result<Box<dyn Peer>>;
             async fn recv(&self) -> Option<PeerEntry>;

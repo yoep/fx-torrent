@@ -43,11 +43,12 @@ impl TorrentFileValidationOperation {
             self.ready_signal = None;
 
             let new_state = context.determine_state().await;
-            context.update_state(new_state);
+            context.update_state(new_state).await;
             // start announcing the torrent again
             context
                 .tracker_manager()
-                .start_announcing(&context.metadata().info_hash);
+                .start_announcing(&context.metadata().info_hash)
+                .await;
         }
     }
 
@@ -70,7 +71,7 @@ impl TorrentFileValidationOperation {
         };
 
         // stop announcing the torrent
-        context.tracker_manager().stop_announcing(&info_hash);
+        context.tracker_manager().stop_announcing(&info_hash).await;
         self.state = ValidationState::Validating;
 
         let pieces = data_pool.pieces().await;
@@ -229,7 +230,7 @@ impl TorrentOperation for TorrentFileValidationOperation {
 
         let files = torrent.files().await;
         if files.len() > 0 {
-            torrent.update_state(TorrentState::CheckingFiles);
+            torrent.update_state(TorrentState::CheckingFiles).await;
             self.validate_files(torrent, files).await;
             return TorrentOperationResult::Stop;
         }
