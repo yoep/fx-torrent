@@ -148,7 +148,7 @@ impl TorrentOperation for TorrentMetadataOperation {
         }
 
         if self.should_retrieve_metadata(torrent) {
-            torrent.update_state(TorrentState::RetrievingMetadata);
+            torrent.update_state(TorrentState::RetrievingMetadata).await;
             self.retrieve_metadata(torrent).await;
         }
 
