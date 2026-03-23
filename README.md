@@ -83,6 +83,7 @@ It uses [Ratatui](https://ratatui.rs/) as the terminal UI library.
 - [x] [BEP10](https://www.bittorrent.org/beps/bep_0010.html) - Extension Protocol
 - [x] [BEP11](https://www.bittorrent.org/beps/bep_0011.html) - Peer Exchange (PEX)
 - [x] [BEP12](https://www.bittorrent.org/beps/bep_0012.html) - Multitracker Metadata Extension
+- [x] [BEP14](https://www.bittorrent.org/beps/bep_0014.html) - Local Service Discovery
 - [x] [BEP15](https://www.bittorrent.org/beps/bep_0015.html) - UDP Tracker Protocol for BitTorrent
 - [x] [BEP19](https://www.bittorrent.org/beps/bep_0019.html) - WebSeed - HTTP/FTP Seeding (GetRight style)
 - [x] [BEP20](https://www.bittorrent.org/beps/bep_0020.html) - Peer ID Conventions

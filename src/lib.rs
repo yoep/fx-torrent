@@ -146,6 +146,7 @@ mod dht_option;
 mod errors;
 mod file;
 mod info_hash;
+mod lsd;
 mod magnet;
 mod merkle;
 pub mod metrics;
