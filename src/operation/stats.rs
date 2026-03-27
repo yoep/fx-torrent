@@ -128,9 +128,7 @@ impl TorrentOperation for TorrentStatsOperation {
 mod tests {
     use super::*;
     use crate::peer::Peer;
-    use crate::{
-        create_peer_pair, create_torrent, create_torrent_context, TorrentEvent, TorrentFlags,
-    };
+    use crate::{create_peer_pair, create_torrent, TorrentEvent, TorrentFlags};
     use fx_callback::Callback;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -148,7 +146,7 @@ mod tests {
             TorrentFlags::Paused,
             TorrentConfig::builder().build(),
             vec![],
-            DhtOption::none()
+            None
         );
         let mut operation = TorrentStatsOperation::new();
 
@@ -184,7 +182,7 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
-            DhtOption::none()
+            None
         );
         let (source, _target) = create_peer_pair!(&torrent);
         let mut operation = TorrentStatsOperation::new();

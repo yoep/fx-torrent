@@ -16,6 +16,7 @@ pub(crate) struct AppSettings {
     pub tcp_peer_enabled: bool,
     pub utp_peer_enabled: bool,
     pub webseeds_enabled: bool,
+    pub lsd_enabled: bool,
     pub torrent_flags: TorrentFlags,
 }
 
@@ -31,6 +32,7 @@ impl Default for AppSettings {
             tcp_peer_enabled: true,
             utp_peer_enabled: true,
             webseeds_enabled: true,
+            lsd_enabled: true,
             torrent_flags: DEFAULT_TORRENT_FLAGS(),
         }
     }

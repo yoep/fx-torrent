@@ -45,10 +45,11 @@ impl TorrentFileValidationOperation {
             let new_state = context.determine_state().await;
             context.update_state(new_state).await;
             // start announcing the torrent again
-            context
-                .tracker_manager()
-                .start_announcing(&context.metadata().info_hash)
-                .await;
+            if let Some(tracker) = context.tracker() {
+                tracker
+                    .start_announcing(&context.metadata().info_hash)
+                    .await;
+            }
         }
     }
 
@@ -71,7 +72,9 @@ impl TorrentFileValidationOperation {
         };
 
         // stop announcing the torrent
-        context.tracker_manager().stop_announcing(&info_hash).await;
+        if let Some(tracker) = context.tracker() {
+            tracker.stop_announcing(&info_hash).await;
+        }
         self.state = ValidationState::Validating;
 
         let pieces = data_pool.pieces().await;
@@ -253,7 +256,7 @@ mod tests {
     use crate::operation::TorrentCreatePiecesAndFilesOperation;
     use crate::storage::DiskStorage;
     use crate::tests::copy_test_file;
-    use crate::{create_torrent_context, TorrentError};
+    use crate::TorrentError;
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::{select, time};
@@ -314,7 +317,7 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
-            DhtOption::none(),
+            None,
             |info_hash, data_pool| Arc::new(DiskStorage::new(info_hash, temp_path, data_pool))
         );
         let mut operation = TorrentFileValidationOperation::new();

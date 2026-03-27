@@ -465,13 +465,13 @@ impl DhtTracker {
     pub async fn announce_peer(
         &self,
         info_hash: &InfoHash,
-        peer_addr: &SocketAddr,
+        peer_port: u16,
         is_seed: bool,
     ) -> Result<()> {
         self.sender
             .send(|tx| TrackerCommand::AnnouncePeer {
                 info_hash: info_hash.clone(),
-                peer_addr: *peer_addr,
+                peer_port,
                 is_seed,
                 node: None,
                 response: tx,
@@ -487,14 +487,14 @@ impl DhtTracker {
     pub async fn announce_peer_to(
         &self,
         info_hash: &InfoHash,
-        peer_addr: &SocketAddr,
+        peer_port: u16,
         is_seed: bool,
         node: &NodeKey,
     ) -> Result<()> {
         self.sender
             .send(|tx| TrackerCommand::AnnouncePeer {
                 info_hash: info_hash.clone(),
-                peer_addr: *peer_addr,
+                peer_port,
                 is_seed,
                 node: Some(*node),
                 response: tx,
@@ -1246,7 +1246,7 @@ pub(crate) enum TrackerCommand {
     /// Announce the given peer to the DHT network.
     AnnouncePeer {
         info_hash: InfoHash,
-        peer_addr: SocketAddr,
+        peer_port: u16,
         is_seed: bool,
         node: Option<NodeKey>,
         response: Reply<Result<()>>,
@@ -2126,20 +2126,20 @@ impl TrackerContext {
             }
             TrackerCommand::AnnouncePeer {
                 info_hash,
-                peer_addr,
+                peer_port,
                 is_seed,
                 node,
                 response,
             } => match node {
                 None => {
-                    self.announce_peer_to_network(info_hash, &peer_addr, is_seed)
+                    self.announce_peer_to_network(info_hash, peer_port, is_seed)
                         .await;
                     response.send(Ok(()));
                 }
                 Some(node) => match self.routing_table.find_node_by_key(&node).cloned() {
                     None => response.send(Err(Error::InvalidNodeId)),
                     Some(node) => {
-                        self.announce_peer_to(info_hash, &peer_addr, &node, is_seed, response)
+                        self.announce_peer_to(info_hash, peer_port, &node, is_seed, response)
                             .await
                     }
                 },
@@ -2340,7 +2340,7 @@ impl TrackerContext {
     async fn announce_peer_to(
         &mut self,
         info_hash: InfoHash,
-        peer_addr: &SocketAddr,
+        port: u16,
         node: &Node,
         is_seed: bool,
         response: Reply<Result<()>>,
@@ -2358,7 +2358,7 @@ impl TrackerContext {
                     id: self.routing_table.id,
                     implied_port: false,
                     info_hash: info_hash.clone(),
-                    port: peer_addr.port(),
+                    port,
                     token,
                     name: None,
                     seed: is_seed,
@@ -2372,12 +2372,7 @@ impl TrackerContext {
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
-    async fn announce_peer_to_network(
-        &mut self,
-        info_hash: InfoHash,
-        peer_addr: &SocketAddr,
-        is_seed: bool,
-    ) {
+    async fn announce_peer_to_network(&mut self, info_hash: InfoHash, port: u16, is_seed: bool) {
         for node in self.routing_table.nodes().cloned().collect::<Vec<_>>() {
             if let Some(token) = node.announce_token().await {
                 self.send_query(
@@ -2386,7 +2381,7 @@ impl TrackerContext {
                             id: self.routing_table.id,
                             implied_port: false,
                             info_hash: info_hash.clone(),
-                            port: peer_addr.port(),
+                            port,
                             token,
                             name: None,
                             seed: is_seed,
@@ -3434,7 +3429,7 @@ mod tests {
             let (source, target) = create_node_server_pair!();
             let target_id = target.id().await.unwrap();
             let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
-            let peer_addr = (Ipv4Addr::LOCALHOST, 8080).into();
+            let peer_port = 8080;
 
             // request peers from the target node
             // this will set the initial announce token in the source tracker for the target node
@@ -3460,7 +3455,8 @@ mod tests {
             );
 
             // announce the torrent peer to the target node
-            let result = source.announce_peer(&info_hash, &peer_addr, false).await;
+            let peer_addr = (Ipv4Addr::LOCALHOST, peer_port).into();
+            let result = source.announce_peer(&info_hash, peer_port, false).await;
             verify_announce_peer(&info_hash, &target, &[peer_addr], result).await;
         }
 
@@ -3500,11 +3496,11 @@ mod tests {
             let peer1 = (Ipv4Addr::LOCALHOST, 8080).into();
             let peer2 = (Ipv4Addr::LOCALHOST, 17000).into();
             let _ = source
-                .announce_peer_to(&info_hash, &peer1, false, &target_key)
+                .announce_peer_to(&info_hash, 8080, false, &target_key)
                 .await
                 .unwrap();
             let result = source
-                .announce_peer_to(&info_hash, &peer2, true, &target_key)
+                .announce_peer_to(&info_hash, 17000, true, &target_key)
                 .await;
             verify_announce_peer(&info_hash, &target, &[peer1, peer2], result).await;
         }
@@ -3573,8 +3569,7 @@ mod tests {
             let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
 
             // announce the peer addr to the target node through the announcer
-            let peer_addr = (Ipv4Addr::LOCALHOST, 6881).into();
-            announce_peer(&announcer, &target_addr, &info_hash, peer_addr, false).await;
+            announce_peer(&announcer, &target_addr, &info_hash, 6881, false).await;
 
             // add the target to the source node
             let _ = source.ping(target_addr).await.unwrap();
@@ -3588,8 +3583,7 @@ mod tests {
             assert_eq!(0, result.seeders, "expected no seeders");
 
             // announce another peer as seed
-            let peer_addr = (Ipv4Addr::LOCALHOST, 6882).into();
-            announce_peer(&announcer, &target_addr, &info_hash, peer_addr, true).await;
+            announce_peer(&announcer, &target_addr, &info_hash, 6882, true).await;
 
             // scrape the target
             let result = source
@@ -3617,10 +3611,9 @@ mod tests {
             let (announcer, target) = create_node_server_pair!();
             let target_id = target.id().await.unwrap();
             let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
-            let peer_addr = (Ipv4Addr::LOCALHOST, 8080).into();
 
             // announce the peer addr to the target node through the announcer
-            announce_peer(&announcer, &target_addr, &info_hash, peer_addr, false).await;
+            announce_peer(&announcer, &target_addr, &info_hash, 8080, false).await;
 
             // add the target to the source node
             source
@@ -3705,8 +3698,7 @@ mod tests {
             let target_key = source.ping(target_addr).await.unwrap();
 
             // announce the peer addr to the target node through the announcer
-            let peer_addr = (Ipv4Addr::LOCALHOST, 7800).into();
-            announce_peer(&source, &target_addr, &info_hash, peer_addr, false).await;
+            announce_peer(&source, &target_addr, &info_hash, 7800, false).await;
 
             // scrape the info hashes from the target
             let result = source
@@ -4003,13 +3995,13 @@ mod tests {
             );
 
             // announce the info hashes to the target
-            let peer = (Ipv4Addr::LOCALHOST, 6800).into();
+            let peer = 6800;
             source
-                .announce_peer(&info_hash1, &peer, false)
+                .announce_peer(&info_hash1, peer, false)
                 .await
                 .expect("expected the announce to succeed");
             source
-                .announce_peer(&info_hash2, &peer, false)
+                .announce_peer(&info_hash2, peer, false)
                 .await
                 .expect("expected the announce to succeed");
 
@@ -4054,7 +4046,7 @@ mod tests {
         announcer: &DhtTracker,
         target_addr: &SocketAddr,
         info_hash: &InfoHash,
-        peer_addr: SocketAddr,
+        peer_port: u16,
         is_seed: bool,
     ) {
         let target_key = announcer
@@ -4066,7 +4058,7 @@ mod tests {
             .await
             .expect("expected to have retrieved a token for the target");
         let _ = announcer
-            .announce_peer_to(info_hash, &peer_addr, is_seed, &target_key)
+            .announce_peer_to(info_hash, peer_port, is_seed, &target_key)
             .await
             .expect("expected the peer to have been announced");
     }

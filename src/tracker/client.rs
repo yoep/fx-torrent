@@ -12,7 +12,7 @@ use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use itertools::Itertools;
 use log::{debug, info, trace, warn};
 use std::collections::{HashMap, HashSet};
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::{select, time};
@@ -23,7 +23,7 @@ const DEFAULT_ANNOUNCEMENT_INTERVAL: Duration = Duration::from_secs(60);
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Aggregated announcement result returned by one or more trackers.
-#[derive(Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct AnnouncementResult {
     /// The total number of leechers reported by the trackers.
     pub total_leechers: u64,
@@ -42,13 +42,15 @@ impl AnnouncementResult {
     }
 }
 
-impl Debug for AnnouncementResult {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Announcement")
-            .field("total_leechers", &self.total_leechers)
-            .field("total_seeders", &self.total_seeders)
-            .field("peers", &self.total_peers())
-            .finish()
+impl FromIterator<AnnouncementResult> for AnnouncementResult {
+    fn from_iter<T: IntoIterator<Item = AnnouncementResult>>(iter: T) -> Self {
+        let mut result = Self::default();
+        for item in iter {
+            result.total_leechers += item.total_leechers;
+            result.total_seeders += item.total_seeders;
+            result.peers.extend(item.peers);
+        }
+        result
     }
 }
 

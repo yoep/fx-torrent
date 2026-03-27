@@ -52,6 +52,107 @@ macro_rules! metadata {
     }};
 }
 
+/// Create a [TorrentContext] instance for the given uri and options.
+#[macro_export]
+macro_rules! create_torrent_context {
+    ($uri:expr, $temp_dir:expr, $options:expr) => {{
+        create_torrent_context!(
+            $uri,
+            $temp_dir,
+            $options,
+            crate::TorrentConfig::builder().path($temp_dir).build()
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr) => {{
+        use crate::peer::{PeerDiscovery, TcpPeerDiscovery, UtpPeerDiscovery};
+
+        let tcp_discovery = TcpPeerDiscovery::new()
+            .await
+            .expect("expected a new tcp peer discovery");
+        let utp_discovery = UtpPeerDiscovery::new()
+            .await
+            .expect("expected a new utp peer discovery");
+        let discoveries: Vec<Box<dyn PeerDiscovery>> =
+            vec![Box::new(tcp_discovery), Box::new(utp_discovery)];
+
+        create_torrent_context!($uri, $temp_dir, $options, $config, discoveries)
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr) => {{
+        create_torrent_context!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $discoveries,
+            Some(crate::dht::DhtTracker::builder().build().await.unwrap())
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr) => {{
+        use crate::storage::MemoryStorage;
+        use std::sync::Arc;
+
+        create_torrent_context!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $discoveries,
+            $dht,
+            |_, _| Arc::new(MemoryStorage::new())
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr, $storage:expr) => {{
+        use crate::dht::DhtTracker;
+        use crate::peer::PeerDiscovery;
+        use crate::torrent_data::DataPool;
+        use crate::tracker::TrackerClient;
+        use crate::{
+            TorrentConfig, TorrentContext, TorrentFlags, TorrentMetadata,
+            DEFAULT_TORRENT_EXTENSIONS, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
+        };
+        use std::time::Duration;
+
+        let uri: &str = $uri;
+        let options: TorrentFlags = $options;
+        let config: TorrentConfig = $config;
+        let discoveries: Vec<Box<dyn PeerDiscovery>> = $discoveries;
+        let dht: Option<DhtTracker> = $dht;
+        let metadata: TorrentMetadata = metadata!(uri);
+        let info_hash = metadata.info_hash.clone();
+        let config = TorrentConfig::builder()
+            .path($temp_dir)
+            .peer_connection_timeout(config.peer_connection_timeout)
+            .max_in_flight_pieces(config.max_in_flight_pieces)
+            .peers_upper_limit(config.peers_upper_limit)
+            .peers_lower_limit(config.peers_lower_limit)
+            .peers_in_flight(config.peers_in_flight)
+            .build();
+        let data_pool = DataPool::new();
+        let (command_sender, receiver) = channel!(512);
+        let mut trackers = vec![TrackerClient::new(Duration::from_secs(2)).into()];
+
+        if let Some(dht) = dht {
+            trackers.push(dht.into());
+        }
+
+        (
+            TorrentContext::new(
+                metadata,
+                config,
+                discoveries.first().map(|e| e.port()),
+                DEFAULT_TORRENT_PROTOCOL_EXTENSIONS(),
+                DEFAULT_TORRENT_EXTENSIONS(),
+                options,
+                data_pool.clone(),
+                trackers,
+                ($storage)(info_hash, data_pool),
+                command_sender,
+            ),
+            receiver,
+        )
+    }};
+}
+
 /// Asserts that a condition is true within a specified timeout.
 macro_rules! assert_timeout {
     ($timeout:expr, $condition:expr) => {{

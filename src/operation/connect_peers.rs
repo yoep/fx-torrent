@@ -364,8 +364,8 @@ impl Drop for TorrentConnectPeersOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer;
     use crate::peer::MockPeerDiscovery;
-    use crate::{create_torrent_context, peer};
     use std::net::Ipv4Addr;
     use tempfile::tempdir;
     use tokio::time;

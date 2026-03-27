@@ -67,7 +67,7 @@ impl TorrentMetadataOperation {
         // if not, we want to retrieve the peers from trackers
         if torrent.discovered_peers().await.len() == 0 {
             trace!("No peers discovered yet, requesting from trackers");
-            torrent.make_announce_all().await;
+            torrent.announce_all().await;
         }
 
         // once at least 1 connection is established,
@@ -81,7 +81,7 @@ impl TorrentMetadataOperation {
 
     #[cfg(feature = "dht")]
     async fn retrieve_dht_metadata(&mut self, torrent: &TorrentContext) {
-        let dht = match torrent.dht().inner.as_ref() {
+        let dht = match torrent.dht() {
             None => return,
             Some(dht) => dht.clone(),
         };
@@ -169,7 +169,6 @@ impl Drop for TorrentMetadataOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent_context;
     use crate::dht::DhtTracker;
     use tempfile::tempdir;
     use tokio::time;
@@ -191,7 +190,7 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
-            DhtOption::none()
+            None
         );
         let mut operation = TorrentMetadataOperation::new(None);
 
@@ -212,7 +211,7 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
-            DhtOption::none()
+            None
         );
         let mut operation = TorrentMetadataOperation::new(None);
 
@@ -240,7 +239,7 @@ mod tests {
             TorrentFlags::Metadata,
             TorrentConfig::builder().build(),
             vec![],
-            DhtOption::new(dht)
+            Some(dht)
         );
         let mut operation = TorrentMetadataOperation::new(Some(Duration::from_millis(100)));
 

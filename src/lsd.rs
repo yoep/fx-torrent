@@ -23,6 +23,8 @@ const LSD_PORT: u16 = 6771;
 pub enum LocalServiceDiscoveryEvent {
     /// Invoked when a peer is discovered for the given info hash.
     PeerDiscovered(InfoHash, SocketAddr),
+    /// Invoked when the local service discovery is closed.
+    Closed,
 }
 
 /// The local service discovery (BEP14) used for finding peers.
@@ -53,6 +55,11 @@ impl LocalServiceDiscovery {
     /// Announce a torrent to the local network.
     pub async fn announce(&self, info_hash: &InfoHash, port: u16) {
         self.inner.announce(info_hash, port).await;
+    }
+
+    /// Close the local service discovery.
+    pub fn close(&self) {
+        self.inner.cancellation_token.cancel();
     }
 
     /// Try to bind a new socket for the local service discovery.
@@ -131,6 +138,7 @@ impl InnerLocalServiceDiscovery {
             }
         }
 
+        self.callbacks.invoke(LocalServiceDiscoveryEvent::Closed);
         debug!("Local service discovery ({}) main loop ended", self);
     }
 
@@ -335,6 +343,33 @@ mod tests {
             let result = service.inner.socket.broadcast().unwrap();
 
             assert_eq!(true, result, "expected the socket to be broadcasting");
+        }
+    }
+
+    mod close {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_invoke_close_event() {
+            init_logger!();
+            let service = LocalServiceDiscovery::new(Ipv4Addr::LOCALHOST.into())
+                .await
+                .unwrap();
+
+            let mut receiver = service.subscribe();
+
+            service.close();
+
+            let result = timeout!(receiver.recv(), Duration::from_millis(250))
+                .expect("expected to receive an event");
+            match &*result {
+                LocalServiceDiscoveryEvent::Closed => (),
+                _ => assert!(
+                    false,
+                    "expected LocalServiceDiscoveryEvent::Closed, but got {:?}",
+                    result
+                ),
+            }
         }
     }
 

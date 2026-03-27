@@ -61,6 +61,11 @@ impl PeerPool {
         self.peers.values().filter_map(|e| e.connection.as_ref())
     }
 
+    /// Returns an iterator over the peer addresses in the pool.
+    pub fn peer_addrs(&self) -> impl Iterator<Item = &SocketAddr> {
+        self.peers.keys()
+    }
+
     /// Add the given [TcpPeer] to this peer pool.
     /// The pool will check if the peer is unique before adding it to the pool, if it's a duplicate,
     /// the peer won't be added to the pool and the function will return [None].

@@ -220,7 +220,6 @@ mod tests {
 
     mod create_pieces {
         use super::*;
-        use crate::create_torrent_context;
 
         #[tokio::test]
         async fn test_execute_create_pieces() {
@@ -298,7 +297,6 @@ mod tests {
 
     mod create_files {
         use super::*;
-        use crate::create_torrent_context;
 
         #[tokio::test]
         async fn test_execute() {

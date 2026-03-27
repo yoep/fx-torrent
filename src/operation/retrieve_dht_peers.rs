@@ -25,12 +25,19 @@ pub struct TorrentDhtPeersOperation {
 impl TorrentDhtPeersOperation {
     /// Create a new operation for retrieving peers from the DHT network.
     ///
-    /// Each queried node will be limited to `query_timeout` if set (defaults to 8 seconds).
-    pub fn new(query_timeout: Option<Duration>) -> Self {
+    /// Each queried node will be limited to 8 seconds.
+    pub fn new() -> Self {
+        Self::new_with_timeout(QUERY_TIMEOUT)
+    }
+
+    /// Create a new operation for retrieving peers from the DHT network.
+    ///
+    /// Each queried node will be limited to `query_timeout`.
+    pub fn new_with_timeout(query_timeout: Duration) -> Self {
         Self {
             last_executed: Default::default(),
             active_tasks: Default::default(),
-            retrieve_timeout: query_timeout.unwrap_or(QUERY_TIMEOUT),
+            retrieve_timeout: query_timeout,
         }
     }
 
@@ -59,7 +66,7 @@ impl TorrentDhtPeersOperation {
 
     /// Retrieve peers from the DHT network for the torrent context.
     fn retrieve_peers(&mut self, context: &mut TorrentContext) {
-        let dht = match context.dht().inner.as_ref() {
+        let dht = match context.dht() {
             None => return,
             Some(dht) => dht.clone(),
         };
@@ -124,7 +131,6 @@ impl Drop for TorrentDhtPeersOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent_context;
     use crate::dht::DhtTracker;
     use tempfile::tempdir;
     use tokio::time;
@@ -148,7 +154,7 @@ mod tests {
             vec![],
             Some(dht)
         );
-        let mut operation = TorrentDhtPeersOperation::new(Some(Duration::from_millis(100)));
+        let mut operation = TorrentDhtPeersOperation::new_with_timeout(Duration::from_millis(100));
 
         // execute the operation
         let result = operation.execute(&mut context, vec![].as_slice()).await;
@@ -204,7 +210,7 @@ mod tests {
                 vec![],
                 None
             );
-            let operation = TorrentDhtPeersOperation::new(None);
+            let operation = TorrentDhtPeersOperation::new();
 
             let result = operation.should_retrieve_peers(&context).await;
             assert_eq!(
@@ -232,7 +238,7 @@ mod tests {
                 vec![],
                 Some(dht)
             );
-            let mut operation = TorrentDhtPeersOperation::new(None);
+            let mut operation = TorrentDhtPeersOperation::new();
 
             // when the operation has not been executed yet, it should return true
             operation.last_executed = None;

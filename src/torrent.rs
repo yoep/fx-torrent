@@ -1,5 +1,6 @@
 use crate::channel::{ChannelReceiver, ChannelSender, Reply};
 use crate::config::TorrentConfig;
+use crate::dht::DhtTracker;
 use crate::errors::Result;
 use crate::file::File;
 use crate::operation::{TorrentOperation, TorrentOperationResult, DEFAULT_OPERATIONS};
@@ -11,15 +12,14 @@ use crate::peer::{
 use crate::peer_pool::PeerPool;
 use crate::storage::{Storage, StorageParams};
 use crate::torrent_data::DataPool;
-use crate::tracker::{
-    AnnounceEvent, AnnouncementResult, TrackerClient, TrackerClientEvent, TrackerEntry,
-};
+use crate::tracker::{AnnounceEvent, AnnouncementResult, TrackerClient};
 use crate::{
-    DhtOption, FileAttributeFlags, FileIndex, InfoHash, Metrics, Piece, PieceChunkPool, PieceIndex,
-    PiecePart, PiecePriority, Sha1Hash, Sha256Hash, TorrentError, TorrentFlags, TorrentMetadata,
+    FileAttributeFlags, FileIndex, InfoHash, Metrics, Piece, PieceChunkPool, PieceIndex, PiecePart,
+    PiecePriority, Sha1Hash, Sha256Hash, TorrentError, TorrentFlags, TorrentMetadata,
     TorrentMetadataInfo, TorrentPeer, DEFAULT_TORRENT_EXTENSIONS,
     DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
 };
+use crate::{LocalServiceDiscovery, TorrentTracker};
 use bit_vec::BitVec;
 use derive_more::Display;
 use futures::future::BoxFuture;
@@ -27,6 +27,7 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use fx_handle::Handle;
+use itertools::Itertools;
 use log::{debug, error, info, trace, warn};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
@@ -117,18 +118,22 @@ impl Default for TorrentState {
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// use fx_torrent::torrent::{Torrent, TorrentFlags, TorrentMetadata, TorrentRequest, MagnetResult, ExtensionFactories, CompactResult};
-/// use fx_torrent::torrent::storage::{DiskStorage};
-/// use fx_torrent::torrent::peer::extension::Extensions;
-/// use fx_torrent::torrent::peer::{PeerDiscovery, TcpPeerDiscovery};
+/// ```rust
+/// # use std::time::Duration;
+/// # use fx_torrent::{Torrent, TorrentFlags, TorrentMetadata, TorrentRequest, MagnetResult, ExtensionFactories, CompactResult};
+/// # use fx_torrent::storage::{DiskStorage};
+/// # use fx_torrent::peer::extension::Extensions;
+/// # use fx_torrent::peer::{PeerDiscovery, TcpPeerDiscovery};
+/// # use fx_torrent::tracker::TrackerClient;
 ///
-/// fn create_new_torrent(
-///     metadata: TorrentMetadata,
-///     extensions: ExtensionFactories,
-/// ) -> CompactResult<Torrent> {
+/// # fn create_new_torrent(
+/// #     metadata: TorrentMetadata,
+/// #     extensions: ExtensionFactories,
+/// # ) -> CompactResult<Torrent> {
 ///     // create a tcp peer discovery for dialing and accepting tpc connections
 ///     let peer_discovery = TcpPeerDiscovery::new();
+///     // create a new tracker client for discovering peer addresses
+///     let tracker = TrackerClient::new(Duration::from_secs(6));
 ///
 ///     Torrent::request()
 ///         .metadata(metadata)
@@ -138,8 +143,9 @@ impl Default for TorrentState {
 ///             Box::new(DiskStorage::new(params.info_hash, params.path, params.files))
 ///         })
 ///         .peer_discovery(Box::new(peer_discovery))
+///         .tracker(tracker.into())
 ///         .build()
-/// }
+/// # }
 /// ```
 #[derive(Default)]
 pub struct TorrentRequest {
@@ -159,10 +165,8 @@ pub struct TorrentRequest {
     storage: Option<Box<StorageFactory>>,
     /// The operations used by the torrent for processing data
     operations: Option<Vec<Box<dyn TorrentOperation>>>,
-    /// The DHT node server to use for discovering peers
-    dht: Option<DhtOption>,
-    /// The peer tracker manager for the torrent
-    tracker_manager: Option<TrackerClient>,
+    /// The trackers of the torrent to use.
+    trackers: Vec<TorrentTracker>,
 }
 
 impl TorrentRequest {
@@ -243,15 +247,16 @@ impl TorrentRequest {
         self
     }
 
-    /// Set the DHT node server to use for discovering peers.
-    pub fn dht(&mut self, dht: DhtOption) -> &mut Self {
-        self.dht = Some(dht);
+    /// Add the given tracker to the torrent.
+    pub fn tracker(&mut self, tracker: TorrentTracker) -> &mut Self {
+        self.trackers.push(tracker);
         self
     }
 
-    /// Set the tracker manager for discovering peers.
-    pub fn tracker_manager(&mut self, tracker_manager: TrackerClient) -> &mut Self {
-        self.tracker_manager.get_or_insert(tracker_manager);
+    /// Set the trackers of the torrent to use.
+    /// This will override any existing configured trackers.
+    pub fn trackers(&mut self, trackers: Vec<TorrentTracker>) -> &mut Self {
+        self.trackers = trackers;
         self
     }
 
@@ -276,8 +281,7 @@ impl Debug for TorrentRequest {
             .field("peer_discoveries", &self.peer_discoveries)
             .field("protocol_extensions", &self.protocol_extensions)
             .field("operations", &self.operations)
-            .field("dht", &self.dht)
-            .field("tracker_manager", &self.tracker_manager)
+            .field("trackers", &self.trackers)
             .finish()
     }
 }
@@ -318,14 +322,12 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
             .operations
             .take()
             .unwrap_or_else(TorrentRequest::default_operations);
-        let dht = request.dht.take().unwrap_or_else(|| DhtOption::default());
-        let tracker_manager =
-            request
-                .tracker_manager
-                .take()
-                .ok_or(TorrentError::InvalidRequest(
-                    "tracker_manager is missing".to_string(),
-                ))?;
+        let trackers = request.trackers.drain(..).collect_vec();
+        if trackers.is_empty() {
+            return Err(TorrentError::InvalidRequest(
+                "at least 1 tracker is required".to_string(),
+            ));
+        }
 
         Ok(Self::new(
             metadata,
@@ -337,14 +339,13 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
             data_pool,
             Arc::from(storage(storage_params)),
             operations,
-            dht,
-            tracker_manager,
+            trackers,
         ))
     }
 }
 
 /// The result metrics from a tracker scrape.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct ScrapeMetrics {
     /// The number of active peers that have completed downloading.
     pub complete: u32,
@@ -352,6 +353,18 @@ pub struct ScrapeMetrics {
     pub incomplete: u32,
     /// The number of peers that have ever completed downloading.
     pub downloaded: u32,
+}
+
+impl FromIterator<ScrapeMetrics> for ScrapeMetrics {
+    fn from_iter<T: IntoIterator<Item = ScrapeMetrics>>(iter: T) -> Self {
+        let mut result = Self::default();
+        for metrics in iter {
+            result.complete += metrics.complete;
+            result.incomplete += metrics.incomplete;
+            result.downloaded += metrics.downloaded;
+        }
+        result
+    }
 }
 
 #[derive(Debug, Display, Clone, PartialEq)]
@@ -423,8 +436,7 @@ impl Torrent {
         data_pool: DataPool,
         storage: Arc<dyn Storage>,
         operations: Vec<Box<dyn TorrentOperation>>,
-        dht: DhtOption,
-        tracker_manager: TrackerClient,
+        trackers: Vec<TorrentTracker>,
     ) -> Self {
         let info_hash = metadata.info_hash.clone();
         let (command_sender, command_receiver) = channel!(1024);
@@ -437,8 +449,7 @@ impl Torrent {
             extensions,
             options,
             data_pool,
-            dht,
-            tracker_manager,
+            trackers,
             storage,
             command_sender,
         );
@@ -1645,10 +1656,8 @@ pub struct TorrentContext {
     /// The torrent metadata information of the torrent
     /// This might still be incomplete if the torrent was created from a magnet link
     metadata: TorrentMetadata,
-    /// The manager of the trackers for the torrent
-    tracker_manager: TrackerClient,
-    /// The dht server of the torrent
-    dht: DhtOption,
+    /// The trackers of the torrent
+    trackers: Vec<TorrentTracker>,
 
     /// The pool of peer connections
     peer_pool: PeerPool,
@@ -1699,8 +1708,7 @@ impl TorrentContext {
         extensions: ExtensionFactories,
         options: TorrentFlags,
         data_pool: DataPool,
-        dht: DhtOption,
-        tracker_manager: TrackerClient,
+        trackers: Vec<TorrentTracker>,
         storage: Arc<dyn Storage>,
         command_sender: ChannelSender<TorrentCommand>,
     ) -> Self {
@@ -1711,8 +1719,7 @@ impl TorrentContext {
             metadata,
             peer_id: PeerId::new(),
             peer_port,
-            tracker_manager,
-            dht,
+            trackers,
             peer_pool: PeerPool::new(handle, config.peers_upper_limit),
             data_pool,
             piece_chunk_pool: PieceChunkPool::new(),
@@ -1741,14 +1748,8 @@ impl TorrentContext {
         peer_discoveries: Vec<Arc<dyn PeerDiscovery>>,
         mut command_receiver: ChannelReceiver<TorrentCommand>,
     ) {
-        let mut tracker_event_receiver = self.tracker_manager.subscribe();
         let mut operations_tick = time::interval(OPERATIONS_INTERVAL);
         let mut cleanup_interval = time::interval(Duration::from_secs(30));
-
-        // register the torrent within the tracker
-        if !self.add_torrent_to_tracker().await {
-            return;
-        }
 
         let mut peer_connections: FuturesUnordered<BoxFuture<'_, (usize, Option<PeerEntry>)>> =
             FuturesUnordered::new();
@@ -1766,7 +1767,6 @@ impl TorrentContext {
                     Some(command) => self.on_command(command).await,
                     None => break,
                 },
-                Ok(event) = tracker_event_receiver.recv() => self.on_tracker_event((*event).clone()).await,
                 Some((idx, entry)) = peer_connections.next() => {
                     if let Some(entry) = entry {
                         self.handle_incoming_peer_connection(entry).await;
@@ -1788,13 +1788,16 @@ impl TorrentContext {
 
         // shutdown the peer pool
         self.peer_pool.shutdown().await;
-        // inform the tracker the torrent is being stopped
-        self.tracker_manager
-            .announce_all(&self.metadata.info_hash, AnnounceEvent::Stopped)
-            .await;
-        self.tracker_manager
-            .remove_torrent(&self.metadata.info_hash)
-            .await;
+        // inform the trackers that the torrent has been stopped
+        for tracker in self.trackers.iter() {
+            tracker
+                .announce(
+                    &self.metadata.info_hash,
+                    self.peer_port().cloned().unwrap_or(6881),
+                    AnnounceEvent::Stopped,
+                )
+                .await;
+        }
         self.data_pool.close().await;
         self.cancellation_token.cancel();
         self.update_state(TorrentState::Stopped).await;
@@ -1864,9 +1867,61 @@ impl TorrentContext {
         self.extensions.iter().map(|e| e()).collect()
     }
 
-    /// Get the tracker manager for the torrent.
-    pub fn tracker_manager(&self) -> &TrackerClient {
-        &self.tracker_manager
+    /// Returns the configured trackers for the torrent.
+    pub fn trackers(&self) -> &[TorrentTracker] {
+        self.trackers.as_slice()
+    }
+
+    /// Returns the DHT tracker for the torrent, if one is configured.
+    #[cfg(feature = "dht")]
+    pub fn dht(&self) -> Option<&DhtTracker> {
+        self.trackers.iter().find_map(|tracker| {
+            if let TorrentTracker::Dht(dht) = tracker {
+                Some(dht)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Returns the local service discovery for the torrent, if one is configured.
+    #[cfg(feature = "lsd")]
+    pub fn lsd(&self) -> Option<&LocalServiceDiscovery> {
+        self.trackers.iter().find_map(|tracker| {
+            if let TorrentTracker::Lsd(lsd) = tracker {
+                Some(lsd)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Returns the tracker client for the torrent, if one is configured.
+    pub fn tracker(&self) -> Option<&TrackerClient> {
+        self.trackers.iter().find_map(|tracker| {
+            if let TorrentTracker::TrackerClient(client) = tracker {
+                Some(client)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Returns the currently active trackers of the torrent.
+    pub async fn active_trackers(&self) -> Vec<Url> {
+        match self.tracker() {
+            Some(client) => client.tracker_urls().await,
+            None => vec![],
+        }
+    }
+
+    /// Returns the total amount of active tracker connections.
+    /// This only counts trackers which have at least made one successful announcement.
+    pub async fn active_tracker_connections(&self) -> usize {
+        match self.tracker() {
+            Some(client) => client.trackers_len().await,
+            None => 0,
+        }
     }
 
     /// Returns the absolute path to the torrent location, if the metadata is known.
@@ -1903,11 +1958,6 @@ impl TorrentContext {
         &self.config
     }
 
-    /// Get the currently active trackers of the torrent.
-    pub async fn active_trackers(&self) -> Vec<Url> {
-        self.tracker_manager.tracker_urls().await
-    }
-
     /// Get an owned instance of the metadata from the torrent.
     /// It returns an owned instance of the metadata.
     pub fn metadata(&self) -> &TorrentMetadata {
@@ -1924,17 +1974,6 @@ impl TorrentContext {
     /// This only counts peers that have not been closed yet, so it can be smaller than the peer pool.
     pub async fn active_peer_connections(&self) -> usize {
         self.peer_pool.active_peer_connections().await
-    }
-
-    /// Get the total amount of active tracker connections.
-    /// This only counts trackers which have at least made one successful announcement.
-    pub async fn active_tracker_connections(&self) -> usize {
-        self.tracker_manager.trackers_len().await
-    }
-
-    /// Get the DHT tracker of the torrent.
-    pub fn dht(&self) -> &DhtOption {
-        &self.dht
     }
 
     /// Returns a reference to the data pool of the torrent.
@@ -2222,18 +2261,9 @@ impl TorrentContext {
         self.metadata.info.as_ref().map(|e| e.len())
     }
 
-    /// Get the list of currently discovered peers.
+    /// Returns a list of peer address within the peer pool of the torrent.
     pub async fn discovered_peers(&self) -> Vec<SocketAddr> {
-        self.tracker_manager
-            .discovered_peers(&self.metadata.info_hash)
-            .await
-            .unwrap_or_else(Vec::new)
-    }
-
-    /// Try to add the given tracker to the tracker manager of this torrent.
-    /// This creates the tracker in a background task.
-    pub async fn add_tracker_async(&self, entry: TrackerEntry) {
-        self.tracker_manager.add_tracker_async(entry).await;
+        self.peer_pool.peer_addrs().cloned().collect_vec()
     }
 
     /// Add the given peer to this torrent.
@@ -2311,41 +2341,69 @@ impl TorrentContext {
         self.invoke_event(TorrentEvent::MetadataChanged(self.metadata.clone()));
     }
 
-    /// Announce the torrent to all trackers.
-    /// It returns the announcement result collected from all active trackers.
-    pub async fn announce_all(&self) -> AnnouncementResult {
-        self.tracker_manager
-            .announce_all(&self.metadata.info_hash, AnnounceEvent::Started)
-            .await
+    /// Returns the announce event for the current torrent state.
+    pub fn announce_event(&self) -> AnnounceEvent {
+        match self.state {
+            TorrentState::Paused => AnnounceEvent::Paused,
+            TorrentState::Seeding | TorrentState::Finished => AnnounceEvent::Completed,
+            TorrentState::Stopped => AnnounceEvent::Stopped,
+            _ => AnnounceEvent::Started,
+        }
     }
 
-    /// Announce to all the trackers without waiting for the results.
-    pub async fn make_announce_all(&self) {
-        self.tracker_manager
-            .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Started)
+    /// Announce the torrent to all trackers.
+    /// It returns the announcement result collected from all active trackers.
+    ///
+    /// FIXME: This blocks the run loop
+    pub async fn announce_all(&self) -> AnnouncementResult {
+        let event = self.announce_event();
+        let peer_port = self.peer_port().cloned().unwrap_or(6881);
+        let futures = self
+            .trackers
+            .iter()
+            .map(|tracker| tracker.announce(&self.metadata.info_hash, peer_port, event))
+            .collect_vec();
+
+        futures::future::join_all(futures)
             .await
+            .into_iter()
+            .collect()
     }
 
     /// Get the scrape metrics result from scraping all trackers for this torrent.
+    ///
+    /// FIXME: This blocks the run loop
     pub async fn scrape(&self) -> Result<ScrapeMetrics> {
         trace!("Torrent {} is scraping trackers", self);
-        match self.tracker_manager.scrape(&self.metadata.info_hash).await {
-            Ok(result) => {
-                if let Some(metrics) = result.files.get(&self.metadata.info_hash) {
-                    Ok(ScrapeMetrics {
+        let futures = self
+            .trackers
+            .iter()
+            .map(|tracker| tracker.scrape(&self.metadata.info_hash))
+            .collect_vec();
+
+        Ok(futures::future::join_all(futures).await.into_iter()
+            .filter_map(|result| {
+                match result {
+                    Ok(scrape_metrics) => Some(scrape_metrics),
+                    Err(e) => {
+                        debug!("Torrent {} failed to scrape tracker, {}", self, e);
+                        None
+                    }
+                }
+            })
+            .filter_map(|mut result| {
+                match result.files.remove(&self.metadata.info_hash) {
+                    None => {
+                        debug!("Torrent {} failed to scrape tracker, info hash {} not found in scrape result", self, self.metadata.info_hash);
+                        None
+                    }
+                    Some(metrics) => Some(ScrapeMetrics {
                         complete: metrics.complete,
                         incomplete: metrics.incomplete,
                         downloaded: metrics.downloaded,
                     })
-                } else {
-                    Err(TorrentError::InvalidInfoHash(format!(
-                        "info hash {} not found in scrape result",
-                        self.metadata.info_hash
-                    )))
                 }
-            }
-            Err(e) => Err(TorrentError::Tracker(e)),
-        }
+            }).collect())
     }
 
     /// Add the given options to the torrent.
@@ -2389,26 +2447,8 @@ impl TorrentContext {
         }
 
         self.state = state;
-
         // inform the trackers about the new state
-        match &state {
-            TorrentState::Downloading => {
-                self.tracker_manager
-                    .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Started)
-                    .await
-            }
-            TorrentState::Seeding | TorrentState::Finished => {
-                self.tracker_manager
-                    .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Completed)
-                    .await
-            }
-            TorrentState::Paused => {
-                self.tracker_manager
-                    .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Paused)
-                    .await
-            }
-            _ => {}
-        }
+        self.announce_all().await;
 
         debug!("Torrent {} state updated to {:?}", self, state);
         self.invoke_event(TorrentEvent::StateChanged(state));
@@ -2608,9 +2648,7 @@ impl TorrentContext {
 
         // announce to the trackers if we don't know any peers
         if self.peer_pool.num_connect_candidates() == 0 {
-            self.tracker_manager
-                .make_announcement_to_all(&self.metadata.info_hash, AnnounceEvent::Started)
-                .await;
+            self.announce_all().await;
         }
 
         let wanted_pieces = self.total_wanted_pieces().await;
@@ -2623,7 +2661,6 @@ impl TorrentContext {
     /// Pause the torrent operations.
     pub(crate) async fn pause(&mut self) {
         self.add_options(TorrentFlags::Paused);
-        self.update_state(TorrentState::Paused).await;
     }
 
     /// Add the specified peer addresses to the peer pool of the torrent.
@@ -2834,35 +2871,6 @@ impl TorrentContext {
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    async fn on_tracker_event(&mut self, event: TrackerClientEvent) {
-        match event {
-            TrackerClientEvent::PeersDiscovered(info_hash, peers) => {
-                if info_hash == self.metadata.info_hash {
-                    self.add_peer_addresses(peers)
-                }
-            }
-            TrackerClientEvent::TrackerAdded(handle) => {
-                let is_paused = self.options.contains(TorrentFlags::Paused);
-                let is_pieces_known = self.data_pool.num_of_pieces().await > 0;
-                let is_completed = self.is_completed().await;
-                let mut event = AnnounceEvent::Started;
-
-                if is_paused {
-                    event = AnnounceEvent::Paused;
-                } else if is_pieces_known && is_completed {
-                    event = AnnounceEvent::Completed;
-                }
-
-                self.tracker_manager
-                    .make_announcement(handle, &self.metadata.info_hash, event)
-                    .await;
-                self.invoke_event(TorrentEvent::TrackersChanged);
-            }
-            _ => {}
-        }
-    }
-
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn handle_incoming_peer_connection(&mut self, entry: PeerEntry) {
         trace!(
             "Torrent {} is trying to accept incoming {} peer connection",
@@ -2916,26 +2924,6 @@ impl TorrentContext {
         for peer in peers {
             self.peer_pool.update_peer_rank(&peer, -1);
         }
-    }
-
-    async fn add_torrent_to_tracker(&mut self) -> bool {
-        let info_hash = self.metadata.info_hash.clone();
-        let peer_port = self.peer_port().cloned().unwrap_or(6881);
-
-        if let Err(e) = self
-            .tracker_manager
-            .add_torrent(self.peer_id, peer_port, info_hash, self.metrics.clone())
-            .await
-        {
-            error!(
-                "Torrent {} failed to register with tracker manager, {}",
-                self, e
-            );
-            self.update_state(TorrentState::Error).await;
-            return false;
-        }
-
-        true
     }
 
     async fn pending_request_rejected(
@@ -3402,7 +3390,6 @@ impl PartialEq for TorrentContext {
 mod tests {
     use super::*;
     use crate::create_torrent;
-    use crate::create_torrent_context;
     use crate::operation::{
         TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation,
         TorrentFileValidationOperation, TorrentStatsOperation,
@@ -3470,7 +3457,7 @@ mod tests {
 
     mod tracker {
         use super::*;
-        use crate::tracker::TrackerServer;
+        use crate::tracker::{TrackerEntry, TrackerServer};
 
         #[tokio::test]
         async fn test_announce() {

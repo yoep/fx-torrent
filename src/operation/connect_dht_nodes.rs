@@ -51,7 +51,7 @@ impl TorrentDhtNodesOperation {
     async fn connect_dht_nodes(&mut self, context: &TorrentContext) {
         let handle = context.handle();
         let metadata = context.metadata();
-        let dht = match context.dht().inner.as_ref() {
+        let dht = match context.dht() {
             None => return,
             Some(dht) => dht.clone(),
         };
@@ -133,7 +133,6 @@ impl Debug for TorrentDhtNodesOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent_context;
     use crate::dht::DhtTracker;
     use tempfile::tempdir;
 

@@ -106,6 +106,14 @@ impl MenuSettings {
                     app_sender.clone(),
                 ))),
                 SettingsMenuItem::Option(Box::new(ToggleSetting::new(
+                    "LSD",
+                    default_settings.lsd_enabled,
+                    |enabled, sender| {
+                        let _ = sender.send(AppCommand::LsdEnabled(enabled));
+                    },
+                    app_sender.clone(),
+                ))),
+                SettingsMenuItem::Option(Box::new(ToggleSetting::new(
                     "Tracker",
                     default_settings.trackers_enabled,
                     |enabled, sender| {
