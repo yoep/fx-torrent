@@ -12,8 +12,6 @@ use std::time::Instant;
 use tokio::select;
 use tokio::sync::oneshot;
 use tokio_util::sync::WaitForCancellationFutureOwned;
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 
 #[derive(Debug, PartialEq)]
 enum ValidationState {
@@ -61,7 +59,7 @@ impl TorrentFileValidationOperation {
         !is_paused && state != &TorrentState::Error
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn validate_files(&mut self, context: &TorrentContext, files: Vec<File>) {
         let handle = context.handle();
         let info_hash = context.metadata().info_hash.clone();
@@ -162,7 +160,7 @@ impl TorrentFileValidationOperation {
         }
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn run_validation(
         torrent: InnerTorrent,
         storage: Arc<dyn Storage>,
@@ -210,7 +208,7 @@ impl TorrentOperation for TorrentFileValidationOperation {
         "torrent file validation operation"
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute(
         &mut self,
         torrent: &mut TorrentContext,

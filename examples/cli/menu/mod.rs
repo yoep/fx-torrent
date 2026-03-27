@@ -145,6 +145,7 @@ impl FXWidget for MenuWidget {
         "Menu"
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn tick(&mut self) {
         while let Ok(command) = self.menu_receiver.try_recv() {
             self.handle_command(command);

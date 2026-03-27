@@ -43,9 +43,6 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(test)]
-pub use mock::*;
-
 const DEFAULT_TRACKER_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_CACHE_LIMIT: usize = 10;
 
@@ -82,14 +79,14 @@ pub trait Session: Debug + Callback<SessionEvent> + Send + Sync {
 
     /// Returns the DHT tracker instance of the session, if one is present.
     #[cfg(feature = "dht")]
-    fn dht(&self) -> Option<DhtTracker>;
+    fn dht(&self) -> Option<&DhtTracker>;
 
     /// Returns the local service discovery instance of the session, if one is present.
     #[cfg(feature = "lsd")]
-    fn local_service_discovery(&self) -> Option<LocalServiceDiscovery>;
+    fn local_service_discovery(&self) -> Option<&LocalServiceDiscovery>;
 
     /// Returns the tracker client of the session.
-    fn tracker(&self) -> Option<TrackerClient>;
+    fn tracker(&self) -> Option<&TrackerClient>;
 
     /// Get the location path to the storage of the torrents for this session.
     async fn base_path(&self) -> PathBuf;
@@ -428,10 +425,10 @@ impl Session for FxTorrentSession {
     }
 
     #[cfg(feature = "dht")]
-    fn dht(&self) -> Option<DhtTracker> {
+    fn dht(&self) -> Option<&DhtTracker> {
         self.inner.trackers.iter().find_map(|tracker| {
             if let TorrentTracker::Dht(dht) = tracker {
-                Some(dht.clone())
+                Some(dht)
             } else {
                 None
             }
@@ -439,20 +436,20 @@ impl Session for FxTorrentSession {
     }
 
     #[cfg(feature = "lsd")]
-    fn local_service_discovery(&self) -> Option<LocalServiceDiscovery> {
+    fn local_service_discovery(&self) -> Option<&LocalServiceDiscovery> {
         self.inner.trackers.iter().find_map(|tracker| {
             if let TorrentTracker::Lsd(lsd) = tracker {
-                Some(lsd.clone())
+                Some(lsd)
             } else {
                 None
             }
         })
     }
 
-    fn tracker(&self) -> Option<TrackerClient> {
+    fn tracker(&self) -> Option<&TrackerClient> {
         self.inner.trackers.iter().find_map(|tracker| {
             if let TorrentTracker::TrackerClient(tracker) = tracker {
-                Some(tracker.clone())
+                Some(tracker)
             } else {
                 None
             }
@@ -1047,43 +1044,6 @@ impl Debug for InnerSession {
 }
 
 #[cfg(test)]
-mod mock {
-    use super::*;
-    use mockall::mock;
-
-    mock! {
-        #[derive(Debug)]
-        pub Session {}
-
-        #[async_trait]
-        impl Session for Session {
-            fn handle(&self) -> SessionHandle;
-            #[cfg(feature = "dht")]
-            fn dht(&self) -> Option<DhtTracker>;
-            #[cfg(feature = "lsd")]
-            fn local_service_discovery(&self) -> Option<LocalServiceDiscovery>;
-            fn tracker(&self) -> Option<TrackerClient>;
-            async fn base_path(&self) -> PathBuf;
-            async fn set_base_path(&self, location: PathBuf);
-            async fn find_torrent_by_handle(&self, handle: &TorrentHandle) -> Option<Torrent>;
-            async fn find_torrent_by_info_hash(&self, info_hash: &InfoHash) -> Option<Torrent>;
-            async fn torrent_health_from_info(&self, torrent_info: &TorrentMetadata) -> Result<TorrentHealth>;
-            async fn torrent_health_from_uri(&self, uri: &str) -> Result<TorrentHealth>;
-            fn resolve(&self, uri: &str) -> Result<TorrentMetadata>;
-            async fn fetch_magnet(&self, magnet_uri: &str, timeout: Duration) -> Result<TorrentMetadata>;
-            async fn add_torrent_from_uri(&self, uri: &str, options: TorrentFlags) -> Result<Torrent>;
-            async fn add_torrent_from_info(&self, torrent_info: TorrentMetadata, options: TorrentFlags) -> Result<Torrent>;
-            async fn remove_torrent(&self, handle: &TorrentHandle);
-            async fn total_connections(&self) -> usize;
-        }
-
-        impl Callback<SessionEvent> for Session {
-            fn subscribe(&self) -> Subscription<SessionEvent>;
-        }
-    }
-}
-
-#[cfg(test)]
 pub mod tests {
     use super::*;
     use crate::create_torrent;
@@ -1304,6 +1264,112 @@ pub mod tests {
         )
         .unwrap();
         assert_eq!(event, SessionEvent::TorrentRemoved(handle));
+    }
+
+    mod dht {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_dht_tracker() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let dht = DhtTracker::builder().build().await.unwrap();
+            let session = FxTorrentSession::builder()
+                .config(
+                    SessionConfig::builder()
+                        .client_name("test")
+                        .path(temp_path)
+                        .build(),
+                )
+                .dht(dht)
+                .extensions(DEFAULT_TORRENT_EXTENSIONS())
+                .build()
+                .unwrap();
+
+            // retrieve the dht tracker from the session
+            let result = session.dht();
+            assert!(result.is_some(), "expected a dht tracker to be present");
+        }
+
+        #[tokio::test]
+        async fn test_dht_tracker_option() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let dht = DhtTracker::builder().build().await.unwrap();
+            let session = FxTorrentSession::builder()
+                .config(
+                    SessionConfig::builder()
+                        .client_name("test")
+                        .path(temp_path)
+                        .build(),
+                )
+                .dht_option(Some(dht))
+                .extensions(DEFAULT_TORRENT_EXTENSIONS())
+                .build()
+                .unwrap();
+
+            // retrieve the dht tracker from the session
+            let result = session.dht();
+            assert!(result.is_some(), "expected a dht tracker to be present");
+        }
+    }
+
+    mod lsd {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_lsd_tracker() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let dht = DhtTracker::builder().build().await.unwrap();
+            let session = FxTorrentSession::builder()
+                .config(
+                    SessionConfig::builder()
+                        .client_name("test")
+                        .path(temp_path)
+                        .build(),
+                )
+                .local_service_discovery(
+                    LocalServiceDiscovery::new(Ipv4Addr::LOCALHOST.into())
+                        .await
+                        .unwrap(),
+                )
+                .extensions(DEFAULT_TORRENT_EXTENSIONS())
+                .build()
+                .unwrap();
+
+            // retrieve the dht tracker from the session
+            let result = session.local_service_discovery();
+            assert!(result.is_some(), "expected a lsd tracker to be present");
+        }
+    }
+
+    mod tracker_client {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_tracker_client() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let session = FxTorrentSession::builder()
+                .config(
+                    SessionConfig::builder()
+                        .client_name("test")
+                        .path(temp_path)
+                        .build(),
+                )
+                .extensions(DEFAULT_TORRENT_EXTENSIONS())
+                .build()
+                .unwrap();
+
+            // retrieve the dht tracker from the session
+            let result = session.tracker();
+            assert!(result.is_some(), "expected a tracker client to be present");
+        }
     }
 
     async fn create_session(temp_path: &str) -> FxTorrentSession {

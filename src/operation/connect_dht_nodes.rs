@@ -8,8 +8,6 @@ use log::{debug, trace};
 use std::fmt::Debug;
 use std::sync::Arc;
 use tokio::net::lookup_host;
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 
 /// Connect to the DHT nodes defined within the torrent metadata.
 pub struct TorrentDhtNodesOperation {
@@ -106,7 +104,7 @@ impl TorrentOperation for TorrentDhtNodesOperation {
         "connect torrent DHT nodes operation"
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute(
         &mut self,
         context: &mut TorrentContext,

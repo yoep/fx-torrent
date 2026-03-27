@@ -227,6 +227,7 @@ impl FXWidget for DhtInfoWidget {
         DHT_INFO_WIDGET_NAME
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn tick(&mut self) {
         while let Ok(event) = self.event_receiver.try_recv() {
             self.handle_event(&*event).await;
@@ -349,6 +350,7 @@ impl DhtNodeInfoWidget {
         self.nodes.push(NodeData::new(node));
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn tick(&mut self) {
         let elapsed = self.last_updated.elapsed();
         if elapsed < Duration::from_secs(3) {

@@ -6,8 +6,6 @@ use async_trait::async_trait;
 use fx_callback::{Callback, Subscription};
 use log::{debug, trace, warn};
 use std::sync::Arc;
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 
 /// The torrent trackers operation is responsible for adding the known trackers to the torrent.
 /// This operation add the trackers in a "fire-and-forget" mode and only waits for one tracker connection to have been established.
@@ -172,7 +170,7 @@ impl TorrentOperation for TorrentTrackersOperation {
         "connect trackers operation"
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute(
         &mut self,
         context: &mut TorrentContext,

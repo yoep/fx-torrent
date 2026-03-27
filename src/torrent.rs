@@ -41,6 +41,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::oneshot::Sender;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::{select, time};
 use tokio_util::sync::{
@@ -875,11 +876,12 @@ impl Torrent {
             self.wait_for_trackers(2).await;
         }
 
-        self.inner
+        Ok(self
+            .inner
             .sender
             .send(|tx| TorrentCommand::ScrapeAll { response: tx })
             .await
-            .await
+            .await?)
     }
 
     /// Get a "weak" reference to a peer in this torrent identified by `handle`.
@@ -1579,7 +1581,7 @@ pub enum TorrentCommand {
         response: Reply<AnnouncementResult>,
     },
     ScrapeAll {
-        response: Reply<Result<ScrapeMetrics>>,
+        response: Reply<ScrapeMetrics>,
     },
     ReadPiece {
         piece: PieceIndex,
@@ -2355,58 +2357,72 @@ impl TorrentContext {
     }
 
     /// Announce the torrent to all trackers.
-    /// It returns the announcement result collected from all active trackers.
-    ///
-    /// FIXME: This blocks the run loop
-    pub async fn announce_all(&self) -> AnnouncementResult {
+    pub fn announce_all(&self, response: Option<Sender<AnnouncementResult>>) {
         let event = self.announce_event();
         let peer_port = self.peer_port().cloned().unwrap_or(6881);
-        let futures = self
-            .trackers
-            .iter()
-            .map(|tracker| tracker.announce(&self.metadata.info_hash, peer_port, event))
-            .collect_vec();
+        let info_hash = self.metadata.info_hash.clone();
+        let trackers = self.trackers.clone();
 
-        futures::future::join_all(futures)
-            .await
-            .into_iter()
-            .collect()
+        // move the operation to a separate task
+        trace!("Torrent {} is announcing {}", self, event);
+        tokio::spawn(async move {
+            let futures = trackers
+                .iter()
+                .map(|tracker| tracker.announce(&info_hash, peer_port, event))
+                .collect_vec();
+            let announcement_result = futures::future::join_all(futures)
+                .await
+                .into_iter()
+                .collect();
+
+            if let Some(response) = response {
+                let _ = response.send(announcement_result);
+            }
+        });
     }
 
     /// Get the scrape metrics result from scraping all trackers for this torrent.
-    ///
-    /// FIXME: This blocks the run loop
-    pub async fn scrape(&self) -> Result<ScrapeMetrics> {
-        trace!("Torrent {} is scraping trackers", self);
-        let futures = self
-            .trackers
-            .iter()
-            .map(|tracker| tracker.scrape(&self.metadata.info_hash))
-            .collect_vec();
+    pub fn scrape(&self, response: Option<Sender<ScrapeMetrics>>) {
+        let handle = self.handle;
+        let info_hash = self.metadata.info_hash.clone();
+        let trackers = self.trackers.clone();
 
-        Ok(futures::future::join_all(futures).await.into_iter()
-            .filter_map(|result| {
-                match result {
-                    Ok(scrape_metrics) => Some(scrape_metrics),
-                    Err(e) => {
-                        debug!("Torrent {} failed to scrape tracker, {}", self, e);
-                        None
+        // move the operation to a separate task
+        trace!("Torrent {} is scraping trackers", self);
+        tokio::spawn(async move {
+            let futures = trackers
+                .iter()
+                .map(|tracker| tracker.scrape(&info_hash))
+                .collect_vec();
+            let scrape_metrics = futures::future::join_all(futures).await.into_iter()
+                .filter_map(|result| {
+                    match result {
+                        Ok(scrape_metrics) => Some(scrape_metrics),
+                        Err(e) => {
+                            debug!("Torrent {} failed to scrape tracker, {}", handle, e);
+                            None
+                        }
                     }
-                }
-            })
-            .filter_map(|mut result| {
-                match result.files.remove(&self.metadata.info_hash) {
-                    None => {
-                        debug!("Torrent {} failed to scrape tracker, info hash {} not found in scrape result", self, self.metadata.info_hash);
-                        None
+                })
+                .filter_map(|mut result| {
+                    match result.files.remove(&info_hash) {
+                        None => {
+                            debug!("Torrent {} failed to scrape tracker, info hash {} not found in scrape result", handle, info_hash);
+                            None
+                        }
+                        Some(metrics) => Some(ScrapeMetrics {
+                            complete: metrics.complete,
+                            incomplete: metrics.incomplete,
+                            downloaded: metrics.downloaded,
+                        })
                     }
-                    Some(metrics) => Some(ScrapeMetrics {
-                        complete: metrics.complete,
-                        incomplete: metrics.incomplete,
-                        downloaded: metrics.downloaded,
-                    })
-                }
-            }).collect())
+                })
+                .collect();
+
+            if let Some(response) = response {
+                let _ = response.send(scrape_metrics);
+            }
+        });
     }
 
     /// Add the given options to the torrent.
@@ -2451,7 +2467,7 @@ impl TorrentContext {
 
         self.state = state;
         // inform the trackers about the new state
-        self.announce_all().await;
+        self.announce_all(None);
 
         debug!("Torrent {} state updated to {:?}", self, state);
         self.invoke_event(TorrentEvent::StateChanged(state));
@@ -2651,7 +2667,7 @@ impl TorrentContext {
 
         // announce to the trackers if we don't know any peers
         if self.peer_pool.num_connect_candidates() == 0 {
-            self.announce_all().await;
+            self.announce_all(None);
         }
 
         let wanted_pieces = self.total_wanted_pieces().await;
@@ -2820,10 +2836,10 @@ impl TorrentContext {
                 response.send(self.resume().await);
             }
             TorrentCommand::AnnounceAll { response } => {
-                response.send(self.announce_all().await);
+                self.announce_all(Some(response.take()));
             }
             TorrentCommand::ScrapeAll { response } => {
-                response.send(self.scrape().await);
+                self.scrape(Some(response.take()));
             }
             TorrentCommand::ReadPiece { piece, response } => {
                 response.send(self.read_piece(&piece).await);

@@ -93,6 +93,7 @@ impl PeersWidget {
         });
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn tick(&mut self) {
         self.handle_peer_events().await;
         self.handle_closed_peers();

@@ -4,8 +4,6 @@ use crate::{LocalServiceDiscoveryEvent, TorrentContext};
 use async_trait::async_trait;
 use fx_callback::{Callback, Subscription};
 use std::sync::Arc;
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 
 /// Retrieve torrent peers from the local service discovery.
 #[derive(Debug)]
@@ -61,7 +59,7 @@ impl TorrentOperation for TorrentLsdPeersOperation {
         "retrieve lsd peers operation"
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute(
         &mut self,
         context: &mut TorrentContext,

@@ -7,8 +7,6 @@ use log::debug;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 
 const RETRIEVE_INTERVAL: Duration = Duration::from_secs(90);
 const RETRIEVE_SHORT_INTERVAL: Duration = Duration::from_secs(30);
@@ -104,7 +102,7 @@ impl TorrentOperation for TorrentDhtPeersOperation {
         "retrieve DHT peers operation"
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute(
         &mut self,
         context: &mut TorrentContext,

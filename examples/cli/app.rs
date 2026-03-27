@@ -146,7 +146,7 @@ impl App {
         })
     }
 
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip(terminal), err))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err))]
     pub async fn run(&mut self, mut terminal: DefaultTerminal) -> io::Result<()> {
         let mut reader = EventStream::new();
         self.create_session_tabs().await;
@@ -157,9 +157,9 @@ impl App {
             select! {
                 _ = self.cancellation_token.cancelled() => return Ok(()),
                 _ = time::sleep(RENDER_INTERVAL) => {},
-                event = reader.next().fuse() => self.handle_event(event).await,
-                Some(command) = self.app_command_receiver.recv() => self.handle_command(command).await,
-                Ok(event) = self.session_event_receiver.recv() => self.handle_session_event(&*event).await,
+                event = reader.next().fuse() => self.on_event(event).await,
+                Some(command) = self.app_command_receiver.recv() => self.on_command(command).await,
+                Ok(event) = self.session_event_receiver.recv() => self.on_session_event(&*event).await,
             }
 
             // tick all widgets, which allows them to process events
@@ -173,14 +173,16 @@ impl App {
         }
     }
 
-    async fn handle_session_event(&mut self, event: &SessionEvent) {
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
+    async fn on_session_event(&mut self, event: &SessionEvent) {
         match event {
             SessionEvent::TorrentAdded(_) => {}
             SessionEvent::TorrentRemoved(_) => {}
         }
     }
 
-    async fn handle_command(&mut self, command: AppCommand) {
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    async fn on_command(&mut self, command: AppCommand) {
         match command {
             AppCommand::AddTorrentUri(uri) => self.add_torrent_uri(uri.as_str()).await,
             AppCommand::DhtEnabled(enabled) => self.update_dht(enabled).await,
@@ -258,7 +260,8 @@ impl App {
         }
     }
 
-    async fn handle_event(&mut self, event: Option<io::Result<Event>>) {
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    async fn on_event(&mut self, event: Option<io::Result<Event>>) {
         match event {
             Some(Ok(event)) => match event {
                 Event::Key(key) => {
@@ -416,7 +419,7 @@ impl App {
             tab_index += 1;
         }
 
-        if let Some(tracker) = self.session.tracker() {
+        if let Some(tracker) = self.session.tracker().cloned() {
             let trackers = tracker.trackers().await;
             let widget = TrackersInfoWidget::new(tracker, trackers);
             self.tabs

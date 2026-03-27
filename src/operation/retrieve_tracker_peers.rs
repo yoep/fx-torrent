@@ -7,8 +7,6 @@ use fx_callback::{Callback, Subscription};
 use log::{debug, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 
 const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -114,7 +112,7 @@ impl TorrentOperation for TorrentTrackerPeersOperation {
         "retrieve tracker peers operation"
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute(
         &mut self,
         context: &mut TorrentContext,

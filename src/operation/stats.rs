@@ -6,8 +6,6 @@ use async_trait::async_trait;
 use fx_callback::{Callback, Subscription};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 
 /// The torrent stats operation collects metrics from the torrent peers and publishes them via the [TorrentEvent::Stats] event.
 #[derive(Debug)]
@@ -107,7 +105,7 @@ impl TorrentOperation for TorrentStatsOperation {
         "torrent stats operation"
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute(
         &mut self,
         context: &mut TorrentContext,

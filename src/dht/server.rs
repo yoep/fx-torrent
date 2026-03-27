@@ -21,8 +21,6 @@ use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
-#[cfg(feature = "tracing")]
-use tracing::{instrument, Level};
 
 /// The interval at which outdated peers are removed from the storage.
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
@@ -193,6 +191,7 @@ impl ServerNode {
 
     /// Handle a periodic tick.
     /// This tick can be used for periodic cleanup or other maintenance tasks.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn tick(&mut self) {
         if self.last_cleanup.elapsed() < CLEANUP_INTERVAL {
             return;
@@ -203,7 +202,7 @@ impl ServerNode {
 
     /// Process a received ping query.
     /// This invokes a simple ping-pong between the server and the sender.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
     async fn on_ping_request(&self, routing_table: &RoutingTable) -> Result<QueryResult> {
         self.metrics.ping_requests.inc();
         Ok(ResponseMessage::Ping {
@@ -215,7 +214,7 @@ impl ServerNode {
     }
 
     /// Process an incoming find nodes query.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_find_node_request(
         &self,
         request: FindNodeRequest,
@@ -239,7 +238,7 @@ impl ServerNode {
 
     /// Process a received get_peers query.
     /// The query will be processed only when the node is already known within the routing table.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_get_peers_request(
         &self,
         request: GetPeersRequest,
@@ -312,7 +311,7 @@ impl ServerNode {
     }
 
     /// Process an incoming announce peer query.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_announce_peer_request(
         &mut self,
         addr: &SocketAddr,
@@ -359,7 +358,7 @@ impl ServerNode {
     }
 
     /// Process an incoming sample info hashes query.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_sample_info_hashes_request(
         &self,
         request: SampleInfoHashesRequest,
@@ -384,7 +383,7 @@ impl ServerNode {
     }
 
     /// Process a received put immutable item query.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_put_request(
         &mut self,
         request: PutRequest,
@@ -453,7 +452,7 @@ impl ServerNode {
     }
 
     /// Process a received get request.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
     async fn on_get_request(
         &self,
         request: GetRequest,
@@ -515,7 +514,7 @@ impl ServerNode {
 
     /// Try to find the node within the routing table for the request.
     /// If the node is not found, an error response is returned to the requester.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn find_node_in_routing_table<'a>(
         &self,
         node_id: &NodeId,
@@ -529,7 +528,7 @@ impl ServerNode {
     }
 
     /// Purge old peers within the storage.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub fn do_cleanup(&mut self) {
         let mut removed = 0;
         for entry in self.peers.values_mut() {

@@ -166,6 +166,7 @@ impl FXWidget for TorrentInfoWidget {
         &self.name
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn tick(&mut self) {
         while let Ok(event) = self.event_receiver.try_recv() {
             self.handle_event(&event).await;

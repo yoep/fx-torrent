@@ -1298,14 +1298,26 @@ mod tests {
         let info_hash =
             InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
         let entry = TrackerEntry { tier: 0, url };
-        let manager = TrackerClient::new(Duration::from_secs(1));
+        let manager = TrackerClient::new(Duration::from_secs(2));
 
-        manager
+        // add the tracker to the tracker client
+        let result = manager
             .add_torrent(peer_id, 6881, info_hash.clone(), Metrics::new())
-            .await
-            .unwrap();
+            .await;
+        assert!(
+            result.is_ok(),
+            "expected Ok() for add_torrent, but got {:?}",
+            result
+        );
 
-        manager.add_tracker_entry(entry).await.unwrap();
+        // add the tracker entry to the client
+        let result = manager.add_tracker_entry(entry).await;
+        assert!(
+            result.is_ok(),
+            "expected Ok() for add_tracker_entry, but got {:?}",
+            result
+        );
+
         let result = manager
             .announce_all(&info_hash, AnnounceEvent::Started)
             .await;

@@ -356,6 +356,7 @@ impl MenuSectionWidget for MenuSettings {
         }
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn tick(&mut self) {
         if let Ok(_) = self.close_receiver.try_recv() {
             self.is_subitem_active.store(false, Ordering::Relaxed);

@@ -8,8 +8,6 @@ use crate::{
 use async_trait::async_trait;
 use log::{debug, trace, warn};
 use std::sync::Arc;
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 
 #[derive(Debug)]
 pub struct TorrentCreatePiecesAndFilesOperation;
@@ -189,7 +187,7 @@ impl TorrentOperation for TorrentCreatePiecesAndFilesOperation {
         "create pieces operation"
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute(
         &mut self,
         torrent: &mut TorrentContext,
