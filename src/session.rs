@@ -4,10 +4,12 @@ use crate::dht::DhtTracker;
 use crate::errors::Result;
 #[cfg(feature = "lsd")]
 use crate::lsd::LocalServiceDiscovery;
+#[cfg(feature = "lsd")]
+use crate::operation::TorrentLsdPeersOperation;
 use crate::operation::{
     TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation,
-    TorrentFileValidationOperation, TorrentLsdPeersOperation, TorrentMetadataOperation,
-    TorrentOperation, TorrentOperationFactory, TorrentStatsOperation, TorrentTrackerPeersOperation,
+    TorrentFileValidationOperation, TorrentMetadataOperation, TorrentOperation,
+    TorrentOperationFactory, TorrentStatsOperation, TorrentTrackerPeersOperation,
     TorrentTrackersOperation,
 };
 #[cfg(feature = "dht")]

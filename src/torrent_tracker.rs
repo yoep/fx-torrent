@@ -23,7 +23,7 @@ pub enum TorrentTracker {
 
 impl TorrentTracker {
     /// Announce the given event for the info hash to the tracker.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     pub async fn announce(
         &self,
         info_hash: &InfoHash,
@@ -31,19 +31,15 @@ impl TorrentTracker {
         event: AnnounceEvent,
     ) -> AnnouncementResult {
         match self {
+            #[cfg(feature = "dht")]
             TorrentTracker::Dht(dht) => {
-                match event {
-                    AnnounceEvent::Started => {
-                        let _ = dht.announce_peer(info_hash, port, false).await;
-                    }
-                    AnnounceEvent::Completed => {
-                        let _ = dht.announce_peer(info_hash, port, true).await;
-                    }
-                    _ => {}
+                let is_seeding = event == AnnounceEvent::Completed;
+                if matches!(event, AnnounceEvent::Started | AnnounceEvent::Completed) {
+                    let _ = dht.announce_peer(info_hash, port, is_seeding).await;
                 }
-
                 AnnouncementResult::default()
             }
+            #[cfg(feature = "lsd")]
             TorrentTracker::Lsd(lsd) => {
                 if event == AnnounceEvent::Started {
                     lsd.announce(info_hash, port).await;
@@ -59,6 +55,7 @@ impl TorrentTracker {
     #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
     pub async fn scrape(&self, info_hash: &InfoHash) -> Result<ScrapeResult> {
         match self {
+            #[cfg(feature = "dht")]
             TorrentTracker::Dht(dht) => {
                 let scrape = dht.scrape_peers(info_hash, Duration::from_secs(6)).await?;
                 Ok(ScrapeResult {
@@ -74,10 +71,8 @@ impl TorrentTracker {
                     .collect(),
                 })
             }
-            TorrentTracker::Lsd(_) => {
-                // no-op
-                Ok(ScrapeResult::default())
-            }
+            #[cfg(feature = "lsd")]
+            TorrentTracker::Lsd(_) => Ok(ScrapeResult::default()),
             TorrentTracker::TrackerClient(tracker) => {
                 tracker.scrape(info_hash).await.map_err(TorrentError::from)
             }
@@ -87,7 +82,9 @@ impl TorrentTracker {
     /// Closes the torrent tracker, resulting in termination of its operations.
     pub fn close(&self) {
         match self {
+            #[cfg(feature = "dht")]
             TorrentTracker::Dht(dht) => dht.close(),
+            #[cfg(feature = "lsd")]
             TorrentTracker::Lsd(lsd) => lsd.close(),
             TorrentTracker::TrackerClient(tracker) => tracker.close(),
         }
