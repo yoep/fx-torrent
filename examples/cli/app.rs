@@ -12,7 +12,7 @@ use fx_callback::{Callback, Subscription};
 use fx_torrent::dht::{DhtTracker, Mode};
 use fx_torrent::operation::{
     TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation, TorrentDhtNodesOperation,
-    TorrentDhtPeersOperation, TorrentFileValidationOperation, TorrentLSDPeersOperation,
+    TorrentDhtPeersOperation, TorrentFileValidationOperation, TorrentLsdPeersOperation,
     TorrentMetadataOperation, TorrentOperationFactory, TorrentStatsOperation,
     TorrentTrackerPeersOperation, TorrentTrackersOperation,
 };
@@ -528,7 +528,7 @@ impl App {
         if settings.lsd_enabled {
             operations.insert(
                 operation_index,
-                TorrentOperationFactory::new(|| Box::new(TorrentLSDPeersOperation::new())),
+                TorrentOperationFactory::new(|| Box::new(TorrentLsdPeersOperation::new())),
             );
         }
 

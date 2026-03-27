@@ -6,7 +6,7 @@ use crate::errors::Result;
 use crate::lsd::LocalServiceDiscovery;
 use crate::operation::{
     TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation,
-    TorrentFileValidationOperation, TorrentLSDPeersOperation, TorrentMetadataOperation,
+    TorrentFileValidationOperation, TorrentLsdPeersOperation, TorrentMetadataOperation,
     TorrentOperation, TorrentOperationFactory, TorrentStatsOperation, TorrentTrackerPeersOperation,
     TorrentTrackersOperation,
 };
@@ -791,7 +791,7 @@ impl FxTorrentSessionBuilder {
                 #[cfg(feature = "dht")]
                 TorrentOperationFactory::new(|| Box::new(TorrentDhtPeersOperation::new())),
                 #[cfg(feature = "lsd")]
-                TorrentOperationFactory::new(|| Box::new(TorrentLSDPeersOperation::new())),
+                TorrentOperationFactory::new(|| Box::new(TorrentLsdPeersOperation::new())),
                 TorrentOperationFactory::new(|| Box::new(TorrentTrackerPeersOperation::new())),
                 TorrentOperationFactory::new(|| Box::new(TorrentConnectPeersOperation::new(true))),
                 TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new(None))),

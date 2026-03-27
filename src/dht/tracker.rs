@@ -807,6 +807,11 @@ impl DhtTracker {
             })
     }
 
+    /// Returns `true` if the DHT tracker is closed and no longer accepts any operations.
+    pub fn is_closed(&self) -> bool {
+        self.cancellation_token.is_cancelled() || self.sender.is_closed()
+    }
+
     /// Close/stop the DHT node.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     pub fn close(&self) {

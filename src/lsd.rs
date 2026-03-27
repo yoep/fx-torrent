@@ -57,6 +57,11 @@ impl LocalServiceDiscovery {
         self.inner.announce(info_hash, port).await;
     }
 
+    /// Returns `true` if the local service discovery is closed and no longer accepts any messages.
+    pub fn is_closed(&self) -> bool {
+        self.inner.cancellation_token.is_cancelled()
+    }
+
     /// Close the local service discovery.
     pub fn close(&self) {
         self.inner.cancellation_token.cancel();
@@ -71,6 +76,13 @@ impl LocalServiceDiscovery {
         };
         let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "solaris",
+            target_os = "illumos",
+            target_os = "cygwin",
+            target_os = "wasi"
+        )))]
         socket.set_reuse_port(true)?;
         socket.set_nonblocking(true)?;
         socket.set_broadcast(true)?;

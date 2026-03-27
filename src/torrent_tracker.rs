@@ -8,6 +8,8 @@ use crate::tracker::{
 use crate::Result;
 use crate::{InfoHash, TorrentError};
 use std::time::Duration;
+#[cfg(feature = "tracing")]
+use tracing::{instrument, Level};
 
 /// Allows discovering peers in a swarm.
 #[derive(Debug, Clone)]
@@ -21,6 +23,7 @@ pub enum TorrentTracker {
 
 impl TorrentTracker {
     /// Announce the given event for the info hash to the tracker.
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     pub async fn announce(
         &self,
         info_hash: &InfoHash,
@@ -53,6 +56,7 @@ impl TorrentTracker {
     }
 
     /// Scrape the given info hash from the tracker.
+    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
     pub async fn scrape(&self, info_hash: &InfoHash) -> Result<ScrapeResult> {
         match self {
             TorrentTracker::Dht(dht) => {
@@ -107,5 +111,75 @@ impl From<LocalServiceDiscovery> for TorrentTracker {
 impl From<TrackerClient> for TorrentTracker {
     fn from(tracker: TrackerClient) -> Self {
         Self::TrackerClient(tracker)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod close {
+        use super::*;
+        use std::net::Ipv4Addr;
+
+        #[tokio::test]
+        async fn test_dht() {
+            init_logger!();
+            let dht = DhtTracker::builder().build().await.unwrap();
+            let tracker = TorrentTracker::from(dht);
+
+            tracker.close();
+
+            let result = match &tracker {
+                TorrentTracker::Dht(dht) => dht.is_closed(),
+                _ => {
+                    assert!(false, "expected TorrentTracker::Dht, but got {:?}", tracker);
+                    unreachable!()
+                }
+            };
+            assert_eq!(true, result, "expected the DHT tracker to be closed");
+        }
+
+        #[tokio::test]
+        async fn test_lsd() {
+            init_logger!();
+            let lsd = LocalServiceDiscovery::new(Ipv4Addr::LOCALHOST.into())
+                .await
+                .unwrap();
+            let tracker = TorrentTracker::from(lsd);
+
+            tracker.close();
+
+            let result = match &tracker {
+                TorrentTracker::Lsd(lsd) => lsd.is_closed(),
+                _ => {
+                    assert!(false, "expected TorrentTracker::Lsd, but got {:?}", tracker);
+                    unreachable!()
+                }
+            };
+            assert_eq!(true, result, "expected the LSD tracker to be closed");
+        }
+
+        #[tokio::test]
+        async fn test_tracker_client() {
+            init_logger!();
+            let client = TrackerClient::new(Duration::from_secs(1));
+            let tracker = TorrentTracker::from(client);
+
+            tracker.close();
+
+            let result = match &tracker {
+                TorrentTracker::TrackerClient(client) => client.is_closed(),
+                _ => {
+                    assert!(
+                        false,
+                        "expected TorrentTracker::TrackerClient, but got {:?}",
+                        tracker
+                    );
+                    unreachable!()
+                }
+            };
+            assert_eq!(true, result, "expected the tracker client to be closed");
+        }
     }
 }

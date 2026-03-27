@@ -203,7 +203,7 @@ impl ServerNode {
 
     /// Process a received ping query.
     /// This invokes a simple ping-pong between the server and the sender.
-    #[cfg_attr(feature = "tracing", instrument(err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
     async fn on_ping_request(&self, routing_table: &RoutingTable) -> Result<QueryResult> {
         self.metrics.ping_requests.inc();
         Ok(ResponseMessage::Ping {
@@ -215,7 +215,7 @@ impl ServerNode {
     }
 
     /// Process an incoming find nodes query.
-    #[cfg_attr(feature = "tracing", instrument)]
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
     async fn on_find_node_request(
         &self,
         request: FindNodeRequest,

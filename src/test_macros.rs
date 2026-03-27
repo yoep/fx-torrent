@@ -88,7 +88,6 @@ macro_rules! create_torrent_context {
         )
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr) => {{
-        use crate::storage::MemoryStorage;
         use std::sync::Arc;
 
         create_torrent_context!(
@@ -98,14 +97,30 @@ macro_rules! create_torrent_context {
             $config,
             $discoveries,
             $dht,
-            |_, _| Arc::new(MemoryStorage::new())
+            None,
+            |_, _| Arc::new(crate::storage::MemoryStorage::new())
         )
     }};
-    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr, $storage:expr) => {{
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr, $lsd:expr) => {{
+        use std::sync::Arc;
+
+        create_torrent_context!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $discoveries,
+            $dht,
+            $lsd,
+            |_, _| Arc::new(crate::storage::MemoryStorage::new())
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr, $lsd:expr, $storage:expr) => {{
         use crate::dht::DhtTracker;
         use crate::peer::PeerDiscovery;
         use crate::torrent_data::DataPool;
         use crate::tracker::TrackerClient;
+        use crate::LocalServiceDiscovery;
         use crate::{
             TorrentConfig, TorrentContext, TorrentFlags, TorrentMetadata,
             DEFAULT_TORRENT_EXTENSIONS, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
@@ -117,6 +132,7 @@ macro_rules! create_torrent_context {
         let config: TorrentConfig = $config;
         let discoveries: Vec<Box<dyn PeerDiscovery>> = $discoveries;
         let dht: Option<DhtTracker> = $dht;
+        let lsd: Option<LocalServiceDiscovery> = $lsd;
         let metadata: TorrentMetadata = metadata!(uri);
         let info_hash = metadata.info_hash.clone();
         let config = TorrentConfig::builder()
@@ -133,6 +149,9 @@ macro_rules! create_torrent_context {
 
         if let Some(dht) = dht {
             trackers.push(dht.into());
+        }
+        if let Some(lsd) = lsd {
+            trackers.push(lsd.into());
         }
 
         (

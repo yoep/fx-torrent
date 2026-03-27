@@ -507,6 +507,11 @@ impl TrackerClient {
             .unwrap_or_default()
     }
 
+    /// Returns `true` if the tracker client is closed and no longer accepts any operations.
+    pub fn is_closed(&self) -> bool {
+        self.cancellation_token.is_cancelled() || self.sender.is_closed()
+    }
+
     /// Closes the tracker client, resulting in termination of its operations.
     ///
     /// This cancels the internal event loop and closes all managed tracker connections.

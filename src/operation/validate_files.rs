@@ -318,6 +318,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![],
             None,
+            None,
             |info_hash, data_pool| Arc::new(DiskStorage::new(info_hash, temp_path, data_pool))
         );
         let mut operation = TorrentFileValidationOperation::new();
