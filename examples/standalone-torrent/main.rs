@@ -22,7 +22,7 @@ async fn main() -> Result<(), io::Error> {
         .metadata(metadata)
         .options(TorrentFlags::AutoManaged | TorrentFlags::Paused)
         .storage(|_| Box::new(MemoryStorage::new()))
-        .tracker_manager(TrackerClient::new(Duration::from_secs(10)))
+        .tracker(TrackerClient::new(Duration::from_secs(10)).into())
         .build()
         .map_err(|e| {
             io::Error::new(

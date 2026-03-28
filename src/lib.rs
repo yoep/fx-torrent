@@ -113,10 +113,11 @@ When both features are missing, a [dht::Error::MissingCryptoProvider] error will
 
 pub use compact::*;
 pub use config::*;
-pub use dht_option::*;
 pub use errors::*;
 pub use file::*;
 pub use info_hash::*;
+#[cfg(feature = "lsd")]
+pub use lsd::*;
 pub use magnet::*;
 pub use piece::*;
 use piece_chunk_pool::*;
@@ -128,6 +129,7 @@ pub use torrent_health::*;
 pub use torrent_metadata::*;
 pub use torrent_metrics::*;
 pub use torrent_peer::*;
+pub use torrent_tracker::*;
 
 use std::ops::Range;
 
@@ -142,10 +144,11 @@ mod compact;
 mod config;
 #[cfg(feature = "dht")]
 pub mod dht;
-mod dht_option;
 mod errors;
 mod file;
 mod info_hash;
+#[cfg(feature = "lsd")]
+mod lsd;
 mod magnet;
 mod merkle;
 pub mod metrics;
@@ -164,6 +167,7 @@ mod torrent_health;
 mod torrent_metadata;
 mod torrent_metrics;
 mod torrent_peer;
+mod torrent_tracker;
 pub mod tracker;
 
 #[cfg(feature = "extension-donthave")]
@@ -294,102 +298,6 @@ pub mod tests {
     use tokio::sync::mpsc::unbounded_channel;
 
     #[macro_export]
-    macro_rules! create_torrent_context {
-        ($uri:expr, $temp_dir:expr, $options:expr) => {{
-            create_torrent_context!(
-                $uri,
-                $temp_dir,
-                $options,
-                crate::TorrentConfig::builder().path($temp_dir).build()
-            )
-        }};
-        ($uri:expr, $temp_dir:expr, $options:expr, $config:expr) => {{
-            use crate::peer::{PeerDiscovery, TcpPeerDiscovery, UtpPeerDiscovery};
-
-            let tcp_discovery = TcpPeerDiscovery::new()
-                .await
-                .expect("expected a new tcp peer discovery");
-            let utp_discovery = UtpPeerDiscovery::new()
-                .await
-                .expect("expected a new utp peer discovery");
-            let discoveries: Vec<Box<dyn PeerDiscovery>> =
-                vec![Box::new(tcp_discovery), Box::new(utp_discovery)];
-
-            create_torrent_context!($uri, $temp_dir, $options, $config, discoveries)
-        }};
-        ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr) => {{
-            create_torrent_context!(
-                $uri,
-                $temp_dir,
-                $options,
-                $config,
-                $discoveries,
-                Some(crate::dht::DhtTracker::builder().build().await.unwrap())
-            )
-        }};
-        ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr) => {{
-            use crate::storage::MemoryStorage;
-            use std::sync::Arc;
-
-            create_torrent_context!(
-                $uri,
-                $temp_dir,
-                $options,
-                $config,
-                $discoveries,
-                $dht,
-                |_, _| Arc::new(MemoryStorage::new())
-            )
-        }};
-        ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr, $storage:expr) => {{
-            use crate::peer::PeerDiscovery;
-            use crate::torrent_data::DataPool;
-            use crate::tracker::TrackerClient;
-            use crate::{
-                DhtOption, TorrentConfig, TorrentContext, TorrentFlags, TorrentMetadata,
-                DEFAULT_TORRENT_EXTENSIONS, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
-            };
-            use std::time::Duration;
-
-            let uri: &str = $uri;
-            let options: TorrentFlags = $options;
-            let config: TorrentConfig = $config;
-            let discoveries: Vec<Box<dyn PeerDiscovery>> = $discoveries;
-            let dht: DhtOption = DhtOption::from($dht);
-            let metadata: TorrentMetadata = metadata!(uri);
-            let info_hash = metadata.info_hash.clone();
-            let tracker_manager = TrackerClient::new(Duration::from_secs(2));
-            let config = TorrentConfig::builder()
-                .path($temp_dir)
-                .peer_connection_timeout(config.peer_connection_timeout)
-                .max_in_flight_pieces(config.max_in_flight_pieces)
-                .peers_upper_limit(config.peers_upper_limit)
-                .peers_lower_limit(config.peers_lower_limit)
-                .peers_in_flight(config.peers_in_flight)
-                .build();
-            let data_pool = DataPool::new();
-            let (command_sender, receiver) = channel!(512);
-
-            (
-                TorrentContext::new(
-                    metadata,
-                    config,
-                    discoveries.first().map(|e| e.port()),
-                    DEFAULT_TORRENT_PROTOCOL_EXTENSIONS(),
-                    DEFAULT_TORRENT_EXTENSIONS(),
-                    options,
-                    data_pool.clone(),
-                    dht,
-                    tracker_manager,
-                    ($storage)(info_hash, data_pool),
-                    command_sender,
-                ),
-                receiver,
-            )
-        }};
-    }
-
-    #[macro_export]
     macro_rules! create_torrent {
         ($uri:expr, $temp_dir:expr, $options:expr) => {{
             create_torrent!(
@@ -471,7 +379,7 @@ pub mod tests {
             use crate::dht::DhtTracker;
             use crate::operation::TorrentOperation;
             use crate::peer::PeerDiscovery;
-            use crate::{DhtOption, Torrent, TorrentConfig, TorrentFlags};
+            use crate::{Torrent, TorrentConfig, TorrentFlags};
 
             let uri: &str = $uri;
             let options: TorrentFlags = $options;
@@ -488,6 +396,11 @@ pub mod tests {
                 .peers_upper_limit(config.peers_upper_limit)
                 .peers_lower_limit(config.peers_lower_limit)
                 .build();
+            let mut trackers = vec![tracker_manager.into()];
+
+            if let Some(dht) = dht {
+                trackers.push(dht.into());
+            }
 
             Torrent::request()
                 .metadata(torrent_info)
@@ -496,8 +409,7 @@ pub mod tests {
                 .config(config)
                 .operations(operations)
                 .storage($storage)
-                .tracker_manager(tracker_manager)
-                .dht(DhtOption::from(dht))
+                .trackers(trackers)
                 .build()
                 .unwrap()
         }};

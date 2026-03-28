@@ -1,5 +1,5 @@
 use crate::peer::extension::{Extension, Result};
-use crate::peer::{PeerContext, PeerEvent};
+use crate::peer::{ConnectionProtocol, PeerContext, PeerEvent};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -113,6 +113,11 @@ impl HolepunchExtension {
     pub fn new() -> Self {
         Self {}
     }
+
+    /// Returns `true` if the peer is using the uTP connection protocol.
+    fn is_utp_connection(&self, peer: &PeerContext) -> bool {
+        peer.connection_protocol() == ConnectionProtocol::Utp
+    }
 }
 
 #[async_trait]
@@ -127,7 +132,11 @@ impl Extension for HolepunchExtension {
         Ok(())
     }
 
-    async fn on<'a>(&'a self, _event: &'a PeerEvent, _peer: &'a PeerContext) {
+    async fn on<'a>(&'a self, _event: &'a PeerEvent, peer: &'a PeerContext) {
+        if !self.is_utp_connection(peer) {
+            return;
+        }
+
         // TODO
     }
 }

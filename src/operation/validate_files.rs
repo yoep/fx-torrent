@@ -12,8 +12,6 @@ use std::time::Instant;
 use tokio::select;
 use tokio::sync::oneshot;
 use tokio_util::sync::WaitForCancellationFutureOwned;
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 
 #[derive(Debug, PartialEq)]
 enum ValidationState {
@@ -45,10 +43,11 @@ impl TorrentFileValidationOperation {
             let new_state = context.determine_state().await;
             context.update_state(new_state).await;
             // start announcing the torrent again
-            context
-                .tracker_manager()
-                .start_announcing(&context.metadata().info_hash)
-                .await;
+            if let Some(tracker) = context.tracker() {
+                tracker
+                    .start_announcing(&context.metadata().info_hash)
+                    .await;
+            }
         }
     }
 
@@ -60,7 +59,7 @@ impl TorrentFileValidationOperation {
         !is_paused && state != &TorrentState::Error
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn validate_files(&mut self, context: &TorrentContext, files: Vec<File>) {
         let handle = context.handle();
         let info_hash = context.metadata().info_hash.clone();
@@ -71,7 +70,9 @@ impl TorrentFileValidationOperation {
         };
 
         // stop announcing the torrent
-        context.tracker_manager().stop_announcing(&info_hash).await;
+        if let Some(tracker) = context.tracker() {
+            tracker.stop_announcing(&info_hash).await;
+        }
         self.state = ValidationState::Validating;
 
         let pieces = data_pool.pieces().await;
@@ -159,7 +160,7 @@ impl TorrentFileValidationOperation {
         }
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn run_validation(
         torrent: InnerTorrent,
         storage: Arc<dyn Storage>,
@@ -207,7 +208,7 @@ impl TorrentOperation for TorrentFileValidationOperation {
         "torrent file validation operation"
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute(
         &mut self,
         torrent: &mut TorrentContext,
@@ -253,7 +254,7 @@ mod tests {
     use crate::operation::TorrentCreatePiecesAndFilesOperation;
     use crate::storage::DiskStorage;
     use crate::tests::copy_test_file;
-    use crate::{create_torrent_context, TorrentError};
+    use crate::TorrentError;
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::{select, time};
@@ -314,7 +315,8 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
-            DhtOption::none(),
+            None,
+            None,
             |info_hash, data_pool| Arc::new(DiskStorage::new(info_hash, temp_path, data_pool))
         );
         let mut operation = TorrentFileValidationOperation::new();

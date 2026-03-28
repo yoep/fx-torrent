@@ -72,6 +72,7 @@ impl FXWidget for TrackersInfoWidget {
         TRACKER_INFO_WIDGET_NAME
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn tick(&mut self) {
         self.handle_events().await;
         self.details_widget.tick().await;
@@ -157,6 +158,7 @@ impl TrackerDetailsWidget {
         self.trackers.push((tracker, TrackerData::new(url)));
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn tick(&mut self) {
         if self.last_updated.elapsed() < Duration::from_secs(1) {
             return;

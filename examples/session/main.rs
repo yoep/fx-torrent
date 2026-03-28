@@ -1,6 +1,6 @@
 use fx_torrent::dht::DhtTracker;
 use fx_torrent::peer::ProtocolExtensionFlags;
-use fx_torrent::{DhtOption, FxTorrentSession, Session, SessionConfig};
+use fx_torrent::{FxTorrentSession, Session, SessionConfig};
 use std::io;
 use std::time::Duration;
 
@@ -20,13 +20,13 @@ async fn main() -> io::Result<()> {
                 | ProtocolExtensionFlags::LTEP
                 | ProtocolExtensionFlags::Dht,
         )
-        .dht(DhtOption::new(
+        .dht(
             DhtTracker::builder()
                 .default_routing_nodes()
                 .build()
                 .await
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
-        ))
+        )
         .build()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 

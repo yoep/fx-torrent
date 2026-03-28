@@ -12,7 +12,7 @@ use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use itertools::Itertools;
 use log::{debug, info, trace, warn};
 use std::collections::{HashMap, HashSet};
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::{select, time};
@@ -23,7 +23,7 @@ const DEFAULT_ANNOUNCEMENT_INTERVAL: Duration = Duration::from_secs(60);
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Aggregated announcement result returned by one or more trackers.
-#[derive(Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct AnnouncementResult {
     /// The total number of leechers reported by the trackers.
     pub total_leechers: u64,
@@ -42,13 +42,15 @@ impl AnnouncementResult {
     }
 }
 
-impl Debug for AnnouncementResult {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Announcement")
-            .field("total_leechers", &self.total_leechers)
-            .field("total_seeders", &self.total_seeders)
-            .field("peers", &self.total_peers())
-            .finish()
+impl FromIterator<AnnouncementResult> for AnnouncementResult {
+    fn from_iter<T: IntoIterator<Item = AnnouncementResult>>(iter: T) -> Self {
+        let mut result = Self::default();
+        for item in iter {
+            result.total_leechers += item.total_leechers;
+            result.total_seeders += item.total_seeders;
+            result.peers.extend(item.peers);
+        }
+        result
     }
 }
 
@@ -503,6 +505,11 @@ impl TrackerClient {
             .await
             .await
             .unwrap_or_default()
+    }
+
+    /// Returns `true` if the tracker client is closed and no longer accepts any operations.
+    pub fn is_closed(&self) -> bool {
+        self.cancellation_token.is_cancelled() || self.sender.is_closed()
     }
 
     /// Closes the tracker client, resulting in termination of its operations.
@@ -1291,14 +1298,26 @@ mod tests {
         let info_hash =
             InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
         let entry = TrackerEntry { tier: 0, url };
-        let manager = TrackerClient::new(Duration::from_secs(1));
+        let manager = TrackerClient::new(Duration::from_secs(2));
 
-        manager
+        // add the tracker to the tracker client
+        let result = manager
             .add_torrent(peer_id, 6881, info_hash.clone(), Metrics::new())
-            .await
-            .unwrap();
+            .await;
+        assert!(
+            result.is_ok(),
+            "expected Ok() for add_torrent, but got {:?}",
+            result
+        );
 
-        manager.add_tracker_entry(entry).await.unwrap();
+        // add the tracker entry to the client
+        let result = manager.add_tracker_entry(entry).await;
+        assert!(
+            result.is_ok(),
+            "expected Ok() for add_tracker_entry, but got {:?}",
+            result
+        );
+
         let result = manager
             .announce_all(&info_hash, AnnounceEvent::Started)
             .await;

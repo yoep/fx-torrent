@@ -15,8 +15,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 use url::Url;
 
 const BURST_DURATION: Duration = Duration::from_secs(10);
@@ -321,7 +319,7 @@ impl TorrentOperation for TorrentConnectPeersOperation {
         "create peer connections operation"
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute(
         &mut self,
         context: &mut TorrentContext,
@@ -364,8 +362,8 @@ impl Drop for TorrentConnectPeersOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer;
     use crate::peer::MockPeerDiscovery;
-    use crate::{create_torrent_context, peer};
     use std::net::Ipv4Addr;
     use tempfile::tempdir;
     use tokio::time;

@@ -119,6 +119,7 @@ impl DhtNodeHandler {
 
     /// Handle a periodic tick.
     /// This tick can be used for periodic cleanup or other maintenance tasks.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn tick(&mut self) {
         match self {
             DhtNodeHandler::Server(server) => {

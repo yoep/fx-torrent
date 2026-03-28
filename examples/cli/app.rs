@@ -12,11 +12,12 @@ use fx_callback::{Callback, Subscription};
 use fx_torrent::dht::{DhtTracker, Mode};
 use fx_torrent::operation::{
     TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation, TorrentDhtNodesOperation,
-    TorrentDhtPeersOperation, TorrentFileValidationOperation, TorrentMetadataOperation,
-    TorrentOperationFactory, TorrentStatsOperation, TorrentTrackersOperation,
+    TorrentDhtPeersOperation, TorrentFileValidationOperation, TorrentLsdPeersOperation,
+    TorrentMetadataOperation, TorrentOperationFactory, TorrentStatsOperation,
+    TorrentTrackerPeersOperation, TorrentTrackersOperation,
 };
 use fx_torrent::{
-    DhtOption, FxSessionCache, FxTorrentSession, Session, SessionConfig, SessionEvent, TorrentFlags,
+    FxSessionCache, FxTorrentSession, Session, SessionConfig, SessionEvent, TorrentFlags,
 };
 use log::{error, warn};
 use ratatui::layout::Constraint::{Length, Min};
@@ -145,7 +146,7 @@ impl App {
         })
     }
 
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip(terminal), err))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err))]
     pub async fn run(&mut self, mut terminal: DefaultTerminal) -> io::Result<()> {
         let mut reader = EventStream::new();
         self.create_session_tabs().await;
@@ -156,9 +157,9 @@ impl App {
             select! {
                 _ = self.cancellation_token.cancelled() => return Ok(()),
                 _ = time::sleep(RENDER_INTERVAL) => {},
-                event = reader.next().fuse() => self.handle_event(event).await,
-                Some(command) = self.app_command_receiver.recv() => self.handle_command(command).await,
-                Ok(event) = self.session_event_receiver.recv() => self.handle_session_event(&*event).await,
+                event = reader.next().fuse() => self.on_event(event).await,
+                Some(command) = self.app_command_receiver.recv() => self.on_command(command).await,
+                Ok(event) = self.session_event_receiver.recv() => self.on_session_event(&*event).await,
             }
 
             // tick all widgets, which allows them to process events
@@ -172,14 +173,16 @@ impl App {
         }
     }
 
-    async fn handle_session_event(&mut self, event: &SessionEvent) {
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
+    async fn on_session_event(&mut self, event: &SessionEvent) {
         match event {
             SessionEvent::TorrentAdded(_) => {}
             SessionEvent::TorrentRemoved(_) => {}
         }
     }
 
-    async fn handle_command(&mut self, command: AppCommand) {
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    async fn on_command(&mut self, command: AppCommand) {
         match command {
             AppCommand::AddTorrentUri(uri) => self.add_torrent_uri(uri.as_str()).await,
             AppCommand::DhtEnabled(enabled) => self.update_dht(enabled).await,
@@ -194,6 +197,7 @@ impl App {
             AppCommand::WebseedsEnabled(enabled) => self.update_webseeds(enabled).await,
             AppCommand::TcpPeerEnabled(enabled) => self.update_tcp_peer_connections(enabled).await,
             AppCommand::UtpPeerEnabled(enabled) => self.update_utp_peer_connections(enabled).await,
+            AppCommand::LsdEnabled(enabled) => self.update_lsd_enabled(enabled).await,
             AppCommand::Storage(location) => self.update_storage(location).await,
             AppCommand::DhtInfo => self.show_session_info(DHT_INFO_WIDGET_NAME),
             AppCommand::TrackersInfo => self.show_session_info(TRACKER_INFO_WIDGET_NAME),
@@ -256,7 +260,8 @@ impl App {
         }
     }
 
-    async fn handle_event(&mut self, event: Option<io::Result<Event>>) {
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    async fn on_event(&mut self, event: Option<io::Result<Event>>) {
         match event {
             Some(Ok(event)) => match event {
                 Event::Key(key) => {
@@ -362,6 +367,11 @@ impl App {
         self.recreate_session().await;
     }
 
+    async fn update_lsd_enabled(&mut self, enabled: bool) {
+        self.settings.lsd_enabled = enabled;
+        self.recreate_session().await;
+    }
+
     async fn recreate_session(&mut self) {
         self.remove_session_tabs();
         match Self::create_session(&self.settings).await {
@@ -401,8 +411,7 @@ impl App {
     async fn create_session_tabs(&mut self) {
         let mut tab_index = 1;
 
-        let dht = self.session.dht();
-        if let Some(dht) = dht.inner.as_ref() {
+        if let Some(dht) = self.session.dht() {
             let nodes = dht.nodes().await;
             let widget = DhtInfoWidget::new(dht.clone(), nodes);
             self.tabs
@@ -410,11 +419,12 @@ impl App {
             tab_index += 1;
         }
 
-        let tracker_manager = self.session.tracker().await;
-        let trackers = tracker_manager.trackers().await;
-        let widget = TrackersInfoWidget::new(tracker_manager, trackers);
-        self.tabs
-            .insert(tab_index, (Box::new(widget), TabState::with(false, false)));
+        if let Some(tracker) = self.session.tracker().cloned() {
+            let trackers = tracker.trackers().await;
+            let widget = TrackersInfoWidget::new(tracker, trackers);
+            self.tabs
+                .insert(tab_index, (Box::new(widget), TabState::with(false, false)));
+        }
     }
 
     fn remove_session_tabs(&mut self) {
@@ -472,6 +482,7 @@ impl App {
             TorrentOperationFactory::new(move || {
                 Box::new(TorrentConnectPeersOperation::new(webseeds_enabled))
             }),
+            TorrentOperationFactory::new(|| Box::new(TorrentTrackerPeersOperation::new())),
             TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new(None))),
             TorrentOperationFactory::new(|| Box::new(TorrentCreatePiecesAndFilesOperation::new())),
             TorrentOperationFactory::new(|| Box::new(TorrentFileValidationOperation::new())),
@@ -484,7 +495,7 @@ impl App {
                 Mode::Server
             };
 
-            DhtOption::new(
+            Some(
                 DhtTracker::builder()
                     .mode(mode)
                     .enable_indexing(settings.dht_info_hash_indexing_enabled)
@@ -494,7 +505,7 @@ impl App {
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
             )
         } else {
-            DhtOption::none()
+            None
         };
 
         // add the initial configurable operations
@@ -513,7 +524,14 @@ impl App {
             operation_index += 1;
             operations.insert(
                 operation_index,
-                TorrentOperationFactory::new(|| Box::new(TorrentDhtPeersOperation::new(None))),
+                TorrentOperationFactory::new(|| Box::new(TorrentDhtPeersOperation::new())),
+            );
+            operation_index += 1;
+        }
+        if settings.lsd_enabled {
+            operations.insert(
+                operation_index,
+                TorrentOperationFactory::new(|| Box::new(TorrentLsdPeersOperation::new())),
             );
         }
 
@@ -528,7 +546,7 @@ impl App {
             )
             .session_cache(FxSessionCache::new(SESSION_CACHE_LIMIT))
             .operations(operations)
-            .dht(dht)
+            .dht_option(dht)
             .build()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
@@ -554,6 +572,8 @@ pub enum AppCommand {
     TcpPeerEnabled(bool),
     /// Set if utp peer connections are enabled
     UtpPeerEnabled(bool),
+    /// Set if lsd peer connections are enabled
+    LsdEnabled(bool),
     /// Set the new storage location of the session
     Storage(PathBuf),
     /// Show the DHT info widget

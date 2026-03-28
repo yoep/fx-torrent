@@ -8,8 +8,6 @@ use crate::{
 use async_trait::async_trait;
 use log::{debug, trace, warn};
 use std::sync::Arc;
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 
 #[derive(Debug)]
 pub struct TorrentCreatePiecesAndFilesOperation;
@@ -189,7 +187,7 @@ impl TorrentOperation for TorrentCreatePiecesAndFilesOperation {
         "create pieces operation"
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute(
         &mut self,
         torrent: &mut TorrentContext,
@@ -220,7 +218,6 @@ mod tests {
 
     mod create_pieces {
         use super::*;
-        use crate::create_torrent_context;
 
         #[tokio::test]
         async fn test_execute_create_pieces() {
@@ -298,7 +295,6 @@ mod tests {
 
     mod create_files {
         use super::*;
-        use crate::create_torrent_context;
 
         #[tokio::test]
         async fn test_execute() {

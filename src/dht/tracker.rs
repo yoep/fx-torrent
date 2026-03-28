@@ -40,8 +40,6 @@ use tokio::sync::oneshot;
 use tokio::time::{interval, timeout};
 use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
-#[cfg(feature = "tracing")]
-use tracing::{instrument, Level};
 use url::Url;
 
 /// The maximum size of a single UDP packet.
@@ -284,7 +282,7 @@ impl DhtTracker {
     ///      }
     ///  }
     /// ```
-    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO)))]
     pub async fn ping(&self, addr: SocketAddr) -> Result<NodeKey> {
         self.sender
             .send(|tx| TrackerCommand::Ping { addr, response: tx })
@@ -314,7 +312,7 @@ impl DhtTracker {
     ///      Err(e) => println!("Failed to find nodes: {}", e),
     ///  }
     /// ```
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
     pub async fn find_nodes(&self, target_id: &NodeId, timeout: Duration) -> Result<Vec<NodeKey>> {
         let nodes = self
             .sender
@@ -349,7 +347,7 @@ impl DhtTracker {
     /// Each queried node is limited to the given timeout.
     ///
     /// Use `n_depth` to determine the depth of the search within the network.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
     pub async fn get_peers_from(
         &self,
         info_hash: &InfoHash,
@@ -378,7 +376,7 @@ impl DhtTracker {
     /// Each queried node is limited to the given timeout.
     ///
     /// Use `n_depth` to determine the depth of the search within the network.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
     pub async fn get_peers(
         &self,
         info_hash: &InfoHash,
@@ -416,7 +414,7 @@ impl DhtTracker {
 
     /// Scrape the downloaders and seeders for the given info hash.
     /// Each queried node is limited to the given timeout.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
     pub async fn scrape_peers(
         &self,
         info_hash: &InfoHash,
@@ -461,17 +459,17 @@ impl DhtTracker {
     /// Announce the given peer to the DHT network.
     ///
     /// As defined in BEP33, the `announce_peer` supports indicating if the peer is a seeder.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
     pub async fn announce_peer(
         &self,
         info_hash: &InfoHash,
-        peer_addr: &SocketAddr,
+        peer_port: u16,
         is_seed: bool,
     ) -> Result<()> {
         self.sender
             .send(|tx| TrackerCommand::AnnouncePeer {
                 info_hash: info_hash.clone(),
-                peer_addr: *peer_addr,
+                peer_port,
                 is_seed,
                 node: None,
                 response: tx,
@@ -483,18 +481,18 @@ impl DhtTracker {
     /// Announce the given peer to a specific node within the network.
     ///
     /// As defined in BEP33, the `announce_peer` supports indicating if the peer is a seeder.
-    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO)))]
     pub async fn announce_peer_to(
         &self,
         info_hash: &InfoHash,
-        peer_addr: &SocketAddr,
+        peer_port: u16,
         is_seed: bool,
         node: &NodeKey,
     ) -> Result<()> {
         self.sender
             .send(|tx| TrackerCommand::AnnouncePeer {
                 info_hash: info_hash.clone(),
-                peer_addr: *peer_addr,
+                peer_port,
                 is_seed,
                 node: Some(*node),
                 response: tx,
@@ -504,7 +502,7 @@ impl DhtTracker {
     }
 
     /// Returns a sample of available info hashes from the given node.
-    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO)))]
     pub async fn scrape_info_hashes_from(
         &self,
         target: &NodeId,
@@ -522,7 +520,7 @@ impl DhtTracker {
 
     /// Returns the available info hashes from the DHT network.
     /// Each queried node is limited to the given timeout.
-    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO)))]
     pub async fn scrape_info_hashes(
         &self,
         target: &NodeId,
@@ -559,7 +557,7 @@ impl DhtTracker {
 
     /// Put an immutable item within the DHT network.
     /// Each queried node is limited to the given timeout.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
     pub async fn put<V>(&self, value: &V, timeout: Duration) -> Result<()>
     where
         V: Serialize,
@@ -600,7 +598,7 @@ impl DhtTracker {
     /// Each queried node is limited to the given timeout.
     ///
     /// Returns the [PublicKey] to use for item validation.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
     pub async fn put_mutable<V>(
         &self,
         value: &V,
@@ -656,7 +654,7 @@ impl DhtTracker {
     }
 
     /// Put an immutable item to the given node within the DHT network.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
     pub async fn put_to<V>(&self, value: &V, node: &NodeKey) -> Result<()>
     where
         V: Serialize,
@@ -681,7 +679,7 @@ impl DhtTracker {
     /// Each queried node is limited to the given timeout.
     ///
     /// Use `n_depth` to determine the depth of the search within the network.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
     pub async fn get<V>(
         &self,
         hash: Sha1Hash,
@@ -724,7 +722,7 @@ impl DhtTracker {
     /// Each queried node is limited to the given timeout.
     ///
     /// Use `n_depth` to determine the depth of the search within the network.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
     pub async fn get_mutable<V>(
         &self,
         public_key: &PublicKey,
@@ -780,7 +778,7 @@ impl DhtTracker {
     }
 
     /// Get an immutable item from the given node within the DHT network.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
     pub async fn get_from<V>(&self, hash: Sha1Hash, node: &NodeKey) -> Result<Option<V>>
     where
         V: DeserializeOwned,
@@ -807,8 +805,13 @@ impl DhtTracker {
             })
     }
 
+    /// Returns `true` if the DHT tracker is closed and no longer accepts any operations.
+    pub fn is_closed(&self) -> bool {
+        self.cancellation_token.is_cancelled() || self.sender.is_closed()
+    }
+
     /// Close/stop the DHT node.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub fn close(&self) {
         self.cancellation_token.cancel();
     }
@@ -1246,7 +1249,7 @@ pub(crate) enum TrackerCommand {
     /// Announce the given peer to the DHT network.
     AnnouncePeer {
         info_hash: InfoHash,
-        peer_addr: SocketAddr,
+        peer_port: u16,
         is_seed: bool,
         node: Option<NodeKey>,
         response: Reply<Result<()>>,
@@ -1410,7 +1413,7 @@ impl TrackerContext {
     }
 
     /// Run the task loop of the context.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub(crate) async fn run(
         &mut self,
         index_info_hashes_interval: Duration,
@@ -1444,12 +1447,12 @@ impl TrackerContext {
         debug!("{} main loop ended", self);
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn bootstrap(&mut self, traversal: &mut TraversalAlgorithm) {
         traversal.run(self.routing_table.id, self).await;
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_message_received(
         &mut self,
         message: ReaderMessage,
@@ -1488,7 +1491,7 @@ impl TrackerContext {
     }
 
     /// Try to process an incoming DHT message from the given node address.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err))]
     async fn on_incoming_message(
         &mut self,
         message: Message,
@@ -1622,7 +1625,7 @@ impl TrackerContext {
     /// * `addr`- The source address of the node.
     /// * `pending_request` - The pending request of the query.
     /// * `response` - The announce peer response of the node.
-    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     async fn on_announce_response(
         &self,
         key: &TransactionKey,
@@ -1660,7 +1663,7 @@ impl TrackerContext {
     /// * `addr`- The source address of the node.
     /// * `pending_request` - The pending request of the query.
     /// * `response` - The received sample info hashes response.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_sample_info_hashes_response(
         &mut self,
         key: &TransactionKey,
@@ -1716,7 +1719,7 @@ impl TrackerContext {
     }
 
     /// Process a received put response.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_put_response(
         &self,
         key: &TransactionKey,
@@ -1746,7 +1749,7 @@ impl TrackerContext {
     }
 
     /// Process a received get response.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_get_response(
         &mut self,
         key: &TransactionKey,
@@ -1876,7 +1879,7 @@ impl TrackerContext {
     /// * `addr`- The source address of the node.
     /// * `pending_request` - The pending request of the query.
     /// * `response` - The ping response of the node.
-    #[cfg_attr(feature = "tracing", instrument)]
+    #[cfg_attr(feature = "tracing", tracing::instrument)]
     async fn on_ping_response(
         &self,
         key: &TransactionKey,
@@ -1917,7 +1920,7 @@ impl TrackerContext {
     /// * `addr`- The source address of the node.
     /// * `pending_request` - The pending request of the query.
     /// * `response` - The received find node response.
-    #[cfg_attr(feature = "tracing", instrument)]
+    #[cfg_attr(feature = "tracing", tracing::instrument)]
     async fn on_find_node_response(
         &self,
         key: &TransactionKey,
@@ -1968,7 +1971,7 @@ impl TrackerContext {
     }
 
     /// Process a received response message for a query.
-    #[cfg_attr(feature = "tracing", instrument(skip(self, traversal)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, traversal)))]
     async fn on_get_peers_response(
         &mut self,
         key: &TransactionKey,
@@ -2056,7 +2059,7 @@ impl TrackerContext {
     /// * `key` - The transaction key of the query.
     /// * `addr` - The address of the peer that sent the error response.
     /// * `message` - The received error message.
-    #[cfg_attr(feature = "tracing", instrument)]
+    #[cfg_attr(feature = "tracing", tracing::instrument)]
     async fn on_error_response(
         &mut self,
         key: &TransactionKey,
@@ -2078,7 +2081,7 @@ impl TrackerContext {
     }
 
     /// Process a received tracker command.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn handle_command(
         &mut self,
         command: TrackerCommand,
@@ -2126,20 +2129,20 @@ impl TrackerContext {
             }
             TrackerCommand::AnnouncePeer {
                 info_hash,
-                peer_addr,
+                peer_port,
                 is_seed,
                 node,
                 response,
             } => match node {
                 None => {
-                    self.announce_peer_to_network(info_hash, &peer_addr, is_seed)
+                    self.announce_peer_to_network(info_hash, peer_port, is_seed)
                         .await;
                     response.send(Ok(()));
                 }
                 Some(node) => match self.routing_table.find_node_by_key(&node).cloned() {
                     None => response.send(Err(Error::InvalidNodeId)),
                     Some(node) => {
-                        self.announce_peer_to(info_hash, &peer_addr, &node, is_seed, response)
+                        self.announce_peer_to(info_hash, peer_port, &node, is_seed, response)
                             .await
                     }
                 },
@@ -2253,7 +2256,7 @@ impl TrackerContext {
     ///
     /// * `addr` - the node address to ping.
     /// * `sender` - The result sender for the ping operation.
-    #[cfg_attr(feature = "tracing", instrument(skip(self, handler)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, handler)))]
     async fn ping(&mut self, addr: &SocketAddr, handler: Reply<Result<NodeKey>>) {
         self.send_query(
             QueryMessage::Ping {
@@ -2274,7 +2277,7 @@ impl TrackerContext {
     ///
     /// * `target` - The target node id to retrieve the closest nodes of.
     /// * `node` - The node to which the address belongs to, if available.
-    #[cfg_attr(feature = "tracing", instrument(skip(self, node)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, node)))]
     pub(crate) async fn find_node(
         &mut self,
         target: NodeId,
@@ -2285,7 +2288,7 @@ impl TrackerContext {
         Response::from(rx)
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn find_node_internal(
         &mut self,
         target: NodeId,
@@ -2307,7 +2310,7 @@ impl TrackerContext {
         .await;
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn get_peers(
         &mut self,
         info_hash: InfoHash,
@@ -2336,11 +2339,11 @@ impl TrackerContext {
         .await
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn announce_peer_to(
         &mut self,
         info_hash: InfoHash,
-        peer_addr: &SocketAddr,
+        port: u16,
         node: &Node,
         is_seed: bool,
         response: Reply<Result<()>>,
@@ -2358,7 +2361,7 @@ impl TrackerContext {
                     id: self.routing_table.id,
                     implied_port: false,
                     info_hash: info_hash.clone(),
-                    port: peer_addr.port(),
+                    port,
                     token,
                     name: None,
                     seed: is_seed,
@@ -2371,13 +2374,8 @@ impl TrackerContext {
         .await
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
-    async fn announce_peer_to_network(
-        &mut self,
-        info_hash: InfoHash,
-        peer_addr: &SocketAddr,
-        is_seed: bool,
-    ) {
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
+    async fn announce_peer_to_network(&mut self, info_hash: InfoHash, port: u16, is_seed: bool) {
         for node in self.routing_table.nodes().cloned().collect::<Vec<_>>() {
             if let Some(token) = node.announce_token().await {
                 self.send_query(
@@ -2386,7 +2384,7 @@ impl TrackerContext {
                             id: self.routing_table.id,
                             implied_port: false,
                             info_hash: info_hash.clone(),
-                            port: peer_addr.port(),
+                            port,
                             token,
                             name: None,
                             seed: is_seed,
@@ -2401,7 +2399,7 @@ impl TrackerContext {
         }
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn scrape_info_hashes(
         &mut self,
         target: &NodeId,
@@ -2422,7 +2420,7 @@ impl TrackerContext {
         .await
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     async fn index_info_hashes(&mut self) {
         let node_id = self.routing_table.id;
         let search_nodes = Self::find_good_search_nodes(&self.routing_table)
@@ -2448,7 +2446,7 @@ impl TrackerContext {
 
     /// Send an immutable `put` item request to the given node.
     /// The response will eventually be sent to the given reply channel.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn put(
         &mut self,
         node: &Node,
@@ -2531,7 +2529,7 @@ impl TrackerContext {
     ///
     ///
     /// The response will eventually be sent to the given reply channel.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn get(
         &mut self,
         node: &Node,
@@ -2561,7 +2559,7 @@ impl TrackerContext {
         .await
     }
 
-    #[cfg_attr(feature = "tracing", instrument)]
+    #[cfg_attr(feature = "tracing", tracing::instrument)]
     async fn update_external_ip(&mut self, ip: IpAddr) {
         let new_node_id = NodeId::from_ip(&ip);
         let existing_nodes = self.routing_table.nodes().cloned().collect::<Vec<_>>();
@@ -2586,7 +2584,7 @@ impl TrackerContext {
     /// * `addr` - The address to send the query to.
     /// * `pending_request` - The request to resolve once a response has been received for this query.
     /// * `on_failed` - The closure to execute when the query couldn't be sent.
-    #[cfg_attr(feature = "tracing", instrument(skip(self, on_failed)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, on_failed)))]
     async fn send_query<'a, F>(
         &mut self,
         query: QueryMessage,
@@ -2677,7 +2675,7 @@ impl TrackerContext {
     /// * `transaction_id` - The original transaction id of the message.
     /// * `error` - The error payload.
     /// * `addr` - The node address to send the response to.
-    #[cfg_attr(feature = "tracing", instrument(skip_all, err))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err))]
     async fn send_error(
         &self,
         transaction_id: TransactionId,
@@ -2695,7 +2693,7 @@ impl TrackerContext {
         self.send(message, addr).await
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self), err))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err))]
     async fn send(&self, message: Message, addr: &SocketAddr) -> Result<()> {
         if self.cancellation_token.is_cancelled() {
             return Err(Error::Closed);
@@ -2802,7 +2800,7 @@ impl TrackerContext {
         };
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn tick(&mut self) {
         self.callbacks
             .invoke(DhtEvent::Stats(self.metrics.snapshot()));
@@ -2814,7 +2812,7 @@ impl TrackerContext {
     }
 
     /// Refresh the nodes within the routing table.
-    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     async fn refresh_routing_table(&mut self) {
         trace!("{} is refreshing nodes within routing table", self);
 
@@ -3434,7 +3432,7 @@ mod tests {
             let (source, target) = create_node_server_pair!();
             let target_id = target.id().await.unwrap();
             let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
-            let peer_addr = (Ipv4Addr::LOCALHOST, 8080).into();
+            let peer_port = 8080;
 
             // request peers from the target node
             // this will set the initial announce token in the source tracker for the target node
@@ -3460,7 +3458,8 @@ mod tests {
             );
 
             // announce the torrent peer to the target node
-            let result = source.announce_peer(&info_hash, &peer_addr, false).await;
+            let peer_addr = (Ipv4Addr::LOCALHOST, peer_port).into();
+            let result = source.announce_peer(&info_hash, peer_port, false).await;
             verify_announce_peer(&info_hash, &target, &[peer_addr], result).await;
         }
 
@@ -3500,11 +3499,11 @@ mod tests {
             let peer1 = (Ipv4Addr::LOCALHOST, 8080).into();
             let peer2 = (Ipv4Addr::LOCALHOST, 17000).into();
             let _ = source
-                .announce_peer_to(&info_hash, &peer1, false, &target_key)
+                .announce_peer_to(&info_hash, 8080, false, &target_key)
                 .await
                 .unwrap();
             let result = source
-                .announce_peer_to(&info_hash, &peer2, true, &target_key)
+                .announce_peer_to(&info_hash, 17000, true, &target_key)
                 .await;
             verify_announce_peer(&info_hash, &target, &[peer1, peer2], result).await;
         }
@@ -3573,8 +3572,7 @@ mod tests {
             let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
 
             // announce the peer addr to the target node through the announcer
-            let peer_addr = (Ipv4Addr::LOCALHOST, 6881).into();
-            announce_peer(&announcer, &target_addr, &info_hash, peer_addr, false).await;
+            announce_peer(&announcer, &target_addr, &info_hash, 6881, false).await;
 
             // add the target to the source node
             let _ = source.ping(target_addr).await.unwrap();
@@ -3588,8 +3586,7 @@ mod tests {
             assert_eq!(0, result.seeders, "expected no seeders");
 
             // announce another peer as seed
-            let peer_addr = (Ipv4Addr::LOCALHOST, 6882).into();
-            announce_peer(&announcer, &target_addr, &info_hash, peer_addr, true).await;
+            announce_peer(&announcer, &target_addr, &info_hash, 6882, true).await;
 
             // scrape the target
             let result = source
@@ -3617,10 +3614,9 @@ mod tests {
             let (announcer, target) = create_node_server_pair!();
             let target_id = target.id().await.unwrap();
             let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
-            let peer_addr = (Ipv4Addr::LOCALHOST, 8080).into();
 
             // announce the peer addr to the target node through the announcer
-            announce_peer(&announcer, &target_addr, &info_hash, peer_addr, false).await;
+            announce_peer(&announcer, &target_addr, &info_hash, 8080, false).await;
 
             // add the target to the source node
             source
@@ -3705,8 +3701,7 @@ mod tests {
             let target_key = source.ping(target_addr).await.unwrap();
 
             // announce the peer addr to the target node through the announcer
-            let peer_addr = (Ipv4Addr::LOCALHOST, 7800).into();
-            announce_peer(&source, &target_addr, &info_hash, peer_addr, false).await;
+            announce_peer(&source, &target_addr, &info_hash, 7800, false).await;
 
             // scrape the info hashes from the target
             let result = source
@@ -4003,13 +3998,13 @@ mod tests {
             );
 
             // announce the info hashes to the target
-            let peer = (Ipv4Addr::LOCALHOST, 6800).into();
+            let peer = 6800;
             source
-                .announce_peer(&info_hash1, &peer, false)
+                .announce_peer(&info_hash1, peer, false)
                 .await
                 .expect("expected the announce to succeed");
             source
-                .announce_peer(&info_hash2, &peer, false)
+                .announce_peer(&info_hash2, peer, false)
                 .await
                 .expect("expected the announce to succeed");
 
@@ -4054,7 +4049,7 @@ mod tests {
         announcer: &DhtTracker,
         target_addr: &SocketAddr,
         info_hash: &InfoHash,
-        peer_addr: SocketAddr,
+        peer_port: u16,
         is_seed: bool,
     ) {
         let target_key = announcer
@@ -4066,7 +4061,7 @@ mod tests {
             .await
             .expect("expected to have retrieved a token for the target");
         let _ = announcer
-            .announce_peer_to(info_hash, &peer_addr, is_seed, &target_key)
+            .announce_peer_to(info_hash, peer_port, is_seed, &target_key)
             .await
             .expect("expected the peer to have been announced");
     }

@@ -1142,14 +1142,19 @@ impl PeerContext {
         trace!("Peer {} main loop ended", self);
     }
 
-    /// Get the address of the remote peer.
+    /// Returns the address of the remote peer.
     pub fn addr(&self) -> SocketAddr {
         self.client.addr
     }
 
-    /// Get the address reference of the remote peer.
+    /// Returns the address reference of the remote peer.
     pub fn addr_as_ref(&self) -> &SocketAddr {
         &self.client.addr
+    }
+
+    /// Returns the protocol used by the connection to the peer.
+    pub fn connection_protocol(&self) -> ConnectionProtocol {
+        self.connection.protocol()
     }
 
     /// Returns a reference the torrent this peer belongs to.
@@ -1162,12 +1167,12 @@ impl PeerContext {
         &self.event_sender
     }
 
-    /// Get the state of the peer.
+    /// Returns the current state of the peer.
     pub async fn state(&self) -> PeerState {
         self.state.read().await.clone()
     }
 
-    /// Get the client choke state of the peer.
+    /// Returns the client choke state of the peer.
     pub async fn choke_state(&self) -> ChokeState {
         self.client_choke_state.read().await.clone()
     }

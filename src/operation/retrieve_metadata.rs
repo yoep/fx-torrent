@@ -6,10 +6,9 @@ use log::{debug, info, trace, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 
 const OPERATION_NAME: &str = "retrieve metadata operation";
+const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(10);
 const RETRIEVE_INTERVAL: Duration = Duration::from_secs(20);
 const RETRIEVE_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -19,6 +18,7 @@ pub struct TorrentMetadataOperation {
     metadata_present: bool,
     active_tasks: Vec<JoinHandle<()>>,
     last_executed: Option<Instant>,
+    last_announce: Option<Instant>,
     retrieve_timeout: Duration,
 }
 
@@ -29,6 +29,7 @@ impl TorrentMetadataOperation {
             metadata_present: false,
             active_tasks: Default::default(),
             last_executed: None,
+            last_announce: None,
             retrieve_timeout: retrieve_timeout.unwrap_or(RETRIEVE_TIMEOUT),
         }
     }
@@ -40,6 +41,14 @@ impl TorrentMetadataOperation {
             .map_or(true, |last| last.elapsed() >= RETRIEVE_INTERVAL);
 
         torrent.options().contains(TorrentFlags::Metadata) && is_execute_tick_allowed
+    }
+
+    /// Returns `true` if the torrent should be announced to trackers, else `false`.
+    fn is_announcement_allowed(&self) -> bool {
+        match self.last_announce {
+            None => true,
+            Some(last) => last.elapsed() >= ANNOUNCE_INTERVAL,
+        }
     }
 
     /// Periodically remove handles for tasks that have already finished
@@ -62,12 +71,17 @@ impl TorrentMetadataOperation {
     }
 
     #[cfg(feature = "extension-metadata")]
-    async fn retrieve_peer_metadata(&self, torrent: &TorrentContext) {
+    async fn retrieve_peer_metadata(&mut self, torrent: &TorrentContext) {
         // check if there have been any peers discovered yet
         // if not, we want to retrieve the peers from trackers
         if torrent.discovered_peers().await.len() == 0 {
+            if !self.is_announcement_allowed() {
+                return;
+            }
+
             trace!("No peers discovered yet, requesting from trackers");
-            torrent.make_announce_all().await;
+            torrent.announce_all(None);
+            self.last_announce = Some(Instant::now());
         }
 
         // once at least 1 connection is established,
@@ -81,7 +95,7 @@ impl TorrentMetadataOperation {
 
     #[cfg(feature = "dht")]
     async fn retrieve_dht_metadata(&mut self, torrent: &TorrentContext) {
-        let dht = match torrent.dht().inner.as_ref() {
+        let dht = match torrent.dht() {
             None => return,
             Some(dht) => dht.clone(),
         };
@@ -135,7 +149,7 @@ impl TorrentOperation for TorrentMetadataOperation {
         OPERATION_NAME
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute(
         &mut self,
         torrent: &mut TorrentContext,
@@ -169,7 +183,6 @@ impl Drop for TorrentMetadataOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent_context;
     use crate::dht::DhtTracker;
     use tempfile::tempdir;
     use tokio::time;
@@ -191,7 +204,7 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
-            DhtOption::none()
+            None
         );
         let mut operation = TorrentMetadataOperation::new(None);
 
@@ -212,7 +225,7 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
-            DhtOption::none()
+            None
         );
         let mut operation = TorrentMetadataOperation::new(None);
 
@@ -240,7 +253,7 @@ mod tests {
             TorrentFlags::Metadata,
             TorrentConfig::builder().build(),
             vec![],
-            DhtOption::new(dht)
+            Some(dht)
         );
         let mut operation = TorrentMetadataOperation::new(Some(Duration::from_millis(100)));
 

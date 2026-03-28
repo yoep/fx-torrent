@@ -65,6 +65,7 @@ impl FXWidget for ContentWidget {
         "Torrent contents"
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn tick(&mut self) {
         self.peers_widget.tick().await;
 
@@ -176,6 +177,7 @@ impl DetailsWidget {
         self.files_widget.on_priorities_changed(priorities);
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn tick(&mut self) {
         match self.state {
             DetailsState::Files => {

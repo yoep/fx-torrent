@@ -352,7 +352,6 @@ impl Drop for DiskStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent_context;
     use crate::operation::{
         TorrentCreatePiecesAndFilesOperation, TorrentOperation, TorrentOperationResult,
     };

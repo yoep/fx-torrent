@@ -8,8 +8,6 @@ use log::{debug, trace};
 use std::fmt::Debug;
 use std::sync::Arc;
 use tokio::net::lookup_host;
-#[cfg(feature = "tracing")]
-use tracing::instrument;
 
 /// Connect to the DHT nodes defined within the torrent metadata.
 pub struct TorrentDhtNodesOperation {
@@ -51,7 +49,7 @@ impl TorrentDhtNodesOperation {
     async fn connect_dht_nodes(&mut self, context: &TorrentContext) {
         let handle = context.handle();
         let metadata = context.metadata();
-        let dht = match context.dht().inner.as_ref() {
+        let dht = match context.dht() {
             None => return,
             Some(dht) => dht.clone(),
         };
@@ -106,7 +104,7 @@ impl TorrentOperation for TorrentDhtNodesOperation {
         "connect torrent DHT nodes operation"
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute(
         &mut self,
         context: &mut TorrentContext,
@@ -133,7 +131,6 @@ impl Debug for TorrentDhtNodesOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent_context;
     use crate::dht::DhtTracker;
     use tempfile::tempdir;
 

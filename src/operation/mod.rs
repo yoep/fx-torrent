@@ -5,7 +5,10 @@ pub use connect_trackers::*;
 pub use create_pieces_and_files::*;
 #[cfg(feature = "dht")]
 pub use retrieve_dht_peers::*;
+#[cfg(feature = "lsd")]
+pub use retrieve_lsd_peers::*;
 pub use retrieve_metadata::*;
+pub use retrieve_tracker_peers::*;
 pub use stats::*;
 pub use validate_files::*;
 
@@ -16,7 +19,10 @@ mod connect_trackers;
 mod create_pieces_and_files;
 #[cfg(feature = "dht")]
 mod retrieve_dht_peers;
+#[cfg(feature = "lsd")]
+mod retrieve_lsd_peers;
 mod retrieve_metadata;
+mod retrieve_tracker_peers;
 mod stats;
 mod validate_files;
 
@@ -35,7 +41,10 @@ pub(crate) const DEFAULT_OPERATIONS: fn() -> Vec<Box<dyn TorrentOperation>> = ||
         #[cfg(feature = "dht")]
         Box::new(TorrentDhtNodesOperation::new()),
         #[cfg(feature = "dht")]
-        Box::new(TorrentDhtPeersOperation::new(None)),
+        Box::new(TorrentDhtPeersOperation::new()),
+        #[cfg(feature = "lsd")]
+        Box::new(TorrentLsdPeersOperation::new()),
+        Box::new(TorrentTrackerPeersOperation::new()),
         Box::new(TorrentConnectPeersOperation::new(true)),
         Box::new(TorrentMetadataOperation::new(None)),
         Box::new(TorrentCreatePiecesAndFilesOperation::new()),
