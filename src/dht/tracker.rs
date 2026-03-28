@@ -256,6 +256,18 @@ impl DhtTracker {
             .unwrap_or_default()
     }
 
+    /// Returns a list of discovered peers for the given info hash known to the DHT tracker.
+    pub async fn peers_for(&self, info_hash: &InfoHash) -> HashSet<PeerEntry> {
+        self.sender
+            .send(|tx| TrackerCommand::GetStoragePeersByInfoHash {
+                info_hash: info_hash.clone(),
+                response: tx,
+            })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
     /// Try to ping the given node address.
     /// This function waits for a response from the node, so it might be recommended to wrap this fn call in a timeout.
     ///
@@ -282,7 +294,8 @@ impl DhtTracker {
     ///      }
     ///  }
     /// ```
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO
+    )))]
     pub async fn ping(&self, addr: SocketAddr) -> Result<NodeKey> {
         self.sender
             .send(|tx| TrackerCommand::Ping { addr, response: tx })
@@ -312,7 +325,10 @@ impl DhtTracker {
     ///      Err(e) => println!("Failed to find nodes: {}", e),
     ///  }
     /// ```
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip_all, err(level = tracing::Level::INFO))
+    )]
     pub async fn find_nodes(&self, target_id: &NodeId, timeout: Duration) -> Result<Vec<NodeKey>> {
         let nodes = self
             .sender
@@ -347,7 +363,10 @@ impl DhtTracker {
     /// Each queried node is limited to the given timeout.
     ///
     /// Use `n_depth` to determine the depth of the search within the network.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip_all, err(level = tracing::Level::INFO))
+    )]
     pub async fn get_peers_from(
         &self,
         info_hash: &InfoHash,
@@ -376,7 +395,10 @@ impl DhtTracker {
     /// Each queried node is limited to the given timeout.
     ///
     /// Use `n_depth` to determine the depth of the search within the network.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip_all, err(level = tracing::Level::INFO))
+    )]
     pub async fn get_peers(
         &self,
         info_hash: &InfoHash,
@@ -414,7 +436,10 @@ impl DhtTracker {
 
     /// Scrape the downloaders and seeders for the given info hash.
     /// Each queried node is limited to the given timeout.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip_all, err(level = tracing::Level::INFO))
+    )]
     pub async fn scrape_peers(
         &self,
         info_hash: &InfoHash,
@@ -459,7 +484,10 @@ impl DhtTracker {
     /// Announce the given peer to the DHT network.
     ///
     /// As defined in BEP33, the `announce_peer` supports indicating if the peer is a seeder.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip_all, err(level = tracing::Level::INFO))
+    )]
     pub async fn announce_peer(
         &self,
         info_hash: &InfoHash,
@@ -481,7 +509,8 @@ impl DhtTracker {
     /// Announce the given peer to a specific node within the network.
     ///
     /// As defined in BEP33, the `announce_peer` supports indicating if the peer is a seeder.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO
+    )))]
     pub async fn announce_peer_to(
         &self,
         info_hash: &InfoHash,
@@ -502,7 +531,8 @@ impl DhtTracker {
     }
 
     /// Returns a sample of available info hashes from the given node.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO
+    )))]
     pub async fn scrape_info_hashes_from(
         &self,
         target: &NodeId,
@@ -520,7 +550,8 @@ impl DhtTracker {
 
     /// Returns the available info hashes from the DHT network.
     /// Each queried node is limited to the given timeout.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO
+    )))]
     pub async fn scrape_info_hashes(
         &self,
         target: &NodeId,
@@ -557,7 +588,10 @@ impl DhtTracker {
 
     /// Put an immutable item within the DHT network.
     /// Each queried node is limited to the given timeout.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip_all, err(level = tracing::Level::INFO))
+    )]
     pub async fn put<V>(&self, value: &V, timeout: Duration) -> Result<()>
     where
         V: Serialize,
@@ -598,7 +632,10 @@ impl DhtTracker {
     /// Each queried node is limited to the given timeout.
     ///
     /// Returns the [PublicKey] to use for item validation.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip_all, err(level = tracing::Level::INFO))
+    )]
     pub async fn put_mutable<V>(
         &self,
         value: &V,
@@ -654,7 +691,10 @@ impl DhtTracker {
     }
 
     /// Put an immutable item to the given node within the DHT network.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip_all, err(level = tracing::Level::INFO))
+    )]
     pub async fn put_to<V>(&self, value: &V, node: &NodeKey) -> Result<()>
     where
         V: Serialize,
@@ -679,7 +719,10 @@ impl DhtTracker {
     /// Each queried node is limited to the given timeout.
     ///
     /// Use `n_depth` to determine the depth of the search within the network.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip_all, err(level = tracing::Level::INFO))
+    )]
     pub async fn get<V>(
         &self,
         hash: Sha1Hash,
@@ -722,7 +765,10 @@ impl DhtTracker {
     /// Each queried node is limited to the given timeout.
     ///
     /// Use `n_depth` to determine the depth of the search within the network.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip_all, err(level = tracing::Level::INFO))
+    )]
     pub async fn get_mutable<V>(
         &self,
         public_key: &PublicKey,
@@ -778,7 +824,10 @@ impl DhtTracker {
     }
 
     /// Get an immutable item from the given node within the DHT network.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err(level = tracing::Level::INFO)))]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip_all, err(level = tracing::Level::INFO))
+    )]
     pub async fn get_from<V>(&self, hash: Sha1Hash, node: &NodeKey) -> Result<Option<V>>
     where
         V: DeserializeOwned,
@@ -1311,6 +1360,11 @@ pub(crate) enum TrackerCommand {
     /// Returns the peers stored within the [DhtStorage].
     GetStoragePeers {
         response: Reply<HashMap<InfoHash, HashSet<PeerEntry>>>,
+    },
+    /// Returns the peers stored within the [DhtStorage] for the given info hash.
+    GetStoragePeersByInfoHash {
+        info_hash: InfoHash,
+        response: Reply<HashSet<PeerEntry>>,
     },
     /// Returns the node keys of "good" nodes which can be used in search queries.
     GoodSearchNodes {
@@ -2234,6 +2288,12 @@ impl TrackerContext {
                     })
                     .collect::<HashMap<_, _>>(),
             ),
+            TrackerCommand::GetStoragePeersByInfoHash {
+                response,
+                info_hash,
+            } => {
+                response.send(self.handler.peers(&info_hash).cloned().collect());
+            }
             TrackerCommand::GoodSearchNodes { response } => {
                 response.send(
                     Self::find_good_search_nodes(&self.routing_table)
@@ -3126,9 +3186,10 @@ mod tests {
             init_logger!();
             let node_id = NodeId::new();
             let verifier = ItemSignature::new().unwrap();
+            let mode = Mode::Server;
             let tracker = DhtTracker::new(Config {
                 id: node_id,
-                mode: Mode::Server,
+                mode,
                 max_torrents: 1,
                 info_hash_indexing_enabled: true,
                 info_hash_indexing_interval: Duration::from_secs(20),
@@ -3148,6 +3209,11 @@ mod tests {
                 0,
                 tracker.port(),
                 "expected a server port to have been present"
+            );
+            assert_eq!(
+                mode,
+                tracker.mode(),
+                "expected the server mode to be set to the given mode"
             );
         }
 
@@ -3222,6 +3288,8 @@ mod tests {
                 "expected the incoming node {:?} to be added",
                 incoming_id
             );
+            let result = target.total_nodes().await;
+            assert_eq!(1, result, "expected 1 node to be added");
         }
 
         #[tokio::test]
@@ -3524,9 +3592,9 @@ mod tests {
             // due to a strange race condition in Github, we try a few times
             let result = {
                 let mut attempt = 0;
-                let mut result = HashMap::new();
+                let mut result = HashSet::new();
                 while attempt < 3 {
-                    result = target.peers().await;
+                    result = target.peers_for(info_hash).await;
                     if result.len() > 0 {
                         break;
                     }
@@ -3535,15 +3603,8 @@ mod tests {
                 }
                 result
             };
-            assert!(
-                result.contains_key(info_hash),
-                "expected the info hash {} to be present, {:?}",
-                info_hash,
-                result
-            );
 
             // verify if all announced peers are present
-            let result = result.get(info_hash).unwrap();
             for peer in peers {
                 assert!(
                     result.iter().find(|e| &e.addr == peer).is_some(),
@@ -4032,6 +4093,90 @@ mod tests {
                     result
                 );
             }
+        }
+    }
+
+    mod peers {
+        use super::*;
+        use std::str::FromStr;
+
+        #[tokio::test]
+        async fn test_peers() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let (source, target) = create_node_server_pair!();
+            let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
+            let peer_port = 9968;
+
+            // request peers from the target node
+            // this will set the initial announce token in the source tracker for the target node
+            let target_key = source.ping(target_addr).await.unwrap();
+            let result = source
+                .get_peers_from(&info_hash, &target_key, 1, Duration::from_secs(1))
+                .await;
+            assert!(
+                result.is_ok(),
+                "expected the peers to have been queried, but got {:?}",
+                result
+            );
+
+            // announce the torrent peer to the target node
+            source
+                .announce_peer_to(&info_hash, peer_port, false, &target_key)
+                .await
+                .expect("expected the announce to succeed");
+
+            // verify that the peers storage has been updated
+            let result = target.peers().await;
+            assert!(
+                result.contains_key(&info_hash),
+                "expected the info hash {} to have been present",
+                info_hash
+            );
+            assert_eq!(
+                1,
+                result[&info_hash].len(),
+                "expected the info hash {} to have 1 peer",
+                info_hash
+            );
+        }
+
+        #[tokio::test]
+        async fn test_peers_for() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let (source, target) = create_node_server_pair!();
+            let target_addr = (Ipv4Addr::LOCALHOST, target.port()).into();
+            let peer_port = 9900;
+
+            // request peers from the target node
+            // this will set the initial announce token in the source tracker for the target node
+            let target_key = source.ping(target_addr).await.unwrap();
+            let result = source
+                .get_peers_from(&info_hash, &target_key, 1, Duration::from_secs(1))
+                .await;
+            assert!(
+                result.is_ok(),
+                "expected the peers to have been queried, but got {:?}",
+                result
+            );
+
+            // announce the torrent peer to the target node
+            source
+                .announce_peer_to(&info_hash, peer_port, false, &target_key)
+                .await
+                .expect("expected the announce to succeed");
+
+            // verify that the peers storage has been updated
+            let result = target.peers_for(&info_hash).await;
+            assert_eq!(
+                1,
+                result.len(),
+                "expected the info hash {} to have 1 peer",
+                info_hash
+            );
         }
     }
 

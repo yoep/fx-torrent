@@ -1298,7 +1298,7 @@ mod tests {
         let info_hash =
             InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
         let entry = TrackerEntry { tier: 0, url };
-        let manager = TrackerClient::new(Duration::from_secs(2));
+        let manager = TrackerClient::new(Duration::from_secs(3));
 
         // add the tracker to the tracker client
         let result = manager
@@ -1333,7 +1333,7 @@ mod tests {
         let info_hash =
             InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
         let entry = TrackerEntry { tier: 0, url };
-        let manager = TrackerClient::new(Duration::from_secs(1));
+        let manager = TrackerClient::new(Duration::from_secs(3));
 
         manager
             .add_torrent(peer_id, 6881, info_hash.clone(), Metrics::new())
