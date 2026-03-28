@@ -48,7 +48,7 @@ ring-compat = { version = "0.8", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_bencode = "0.2"
 serde_bytes = "0.11"
-sha1 = "0.10.6"
+sha1 = "0.11.0"
 sha2 = "0.10.9"
 socket2 = "0.6"
 thiserror = "2.0"
