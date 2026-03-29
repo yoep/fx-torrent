@@ -32,13 +32,13 @@ impl UtpPeerDiscovery {
     /// Create a new uTP peer discovery instance.
     ///
     /// It will listen on a random port assigned by the OS.
-    /// If you want to listen on a specific port, use [UtpPeerDiscovery::new_with_port] instead.
+    /// If you want to listen on a specific port, use [UtpPeerDiscovery::with_port] instead.
     ///
     /// # Returns
     ///
     /// It returns a new uTP peer discovery instance, else an error when the listener couldn't be bound.
     pub async fn new() -> Result<Self> {
-        Self::new_with_port(0).await
+        Self::with_port(0).await
     }
 
     /// Create a new uTP peer discovery instance.
@@ -49,7 +49,7 @@ impl UtpPeerDiscovery {
     /// # Returns
     ///
     /// It returns a new uTP peer discovery instance, else an error when the listener couldn't be bound.
-    pub async fn new_with_port(port: u16) -> Result<Self> {
+    pub async fn with_port(port: u16) -> Result<Self> {
         let (sender, receiver) = unbounded_channel();
         let cancellation_token = CancellationToken::new();
         let sockets =

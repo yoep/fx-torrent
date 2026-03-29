@@ -1,5 +1,6 @@
 use crate::peer::PeerId;
 use crate::tracker::http::HttpServer;
+use crate::tracker::udp::UdpServer;
 use crate::tracker::{
     AnnounceEntryResponse, AnnounceEvent, Announcement, ConnectionMetrics, Result,
     ScrapeFileMetrics, ScrapeResult, TrackerError, TrackerHandle,
@@ -10,12 +11,13 @@ use derive_more::Display;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use log::debug;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::select;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, Notify};
+use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -79,8 +81,9 @@ impl TrackerServer {
 
     /// Creates a new tracker server listening on the specified `port`.
     pub async fn with_port(port: u16) -> Result<Self> {
-        let server = HttpServer::with_port(port).await?;
-        Self::with_listeners(vec![Box::new(server)]).await
+        let http_server = HttpServer::with_port(port).await?;
+        let udp_server = UdpServer::with_port(http_server.addr().port()).await?;
+        Self::with_listeners(vec![Box::new(http_server), Box::new(udp_server)])
     }
 
     /// Creates a new tracker server backed by the provided listeners.
@@ -88,7 +91,7 @@ impl TrackerServer {
     /// # Errors
     ///
     /// Returns [`TrackerError::Unavailable`] if `listeners` is empty.
-    pub async fn with_listeners(listeners: Vec<Box<dyn TrackerListener>>) -> Result<Self> {
+    pub fn with_listeners(listeners: Vec<Box<dyn TrackerListener>>) -> Result<Self> {
         let (addr, url) = match listeners.get(0) {
             Some(conn) => (conn.addr().clone(), conn.url().clone()),
             None => return Err(TrackerError::Unavailable),
@@ -277,6 +280,76 @@ impl InnerServer {
     fn is_torrent_peer_completed(announcement: &Announcement) -> bool {
         announcement.event == AnnounceEvent::Completed
             || (announcement.bytes_remaining == 0 && announcement.bytes_completed != 0)
+    }
+}
+
+/// The common basic functionality of a tracker server.
+#[derive(Debug)]
+pub(crate) struct BaseServer {
+    pub handle: TrackerHandle,
+    pub queue: Mutex<VecDeque<ServerRequest>>,
+    pub waker: Notify,
+    pub timeout: Duration,
+    pub metrics: ConnectionMetrics,
+    pub cancellation_token: CancellationToken,
+}
+
+impl BaseServer {
+    /// Create a new base with the specified operation timeout duration.
+    pub fn new(handle: TrackerHandle, timeout: Duration) -> Self {
+        Self {
+            handle,
+            queue: Default::default(),
+            waker: Default::default(),
+            timeout,
+            metrics: Default::default(),
+            cancellation_token: Default::default(),
+        }
+    }
+
+    /// Waits for the next incoming server request.
+    ///
+    /// Returns `None` when the connection is shutting down, and no further
+    /// requests will be produced.
+    pub async fn accept(&self) -> Option<ServerRequest> {
+        loop {
+            if self.cancellation_token.is_cancelled() {
+                return None;
+            }
+            if let Some(request) = self.queue.lock().await.pop_front() {
+                return Some(request);
+            }
+
+            self.waker.notified().await;
+        }
+    }
+
+    /// Queue a new pending request.
+    pub async fn request(&self, request: ServerRequest) {
+        let mut queue = self.queue.lock().await;
+        queue.push_back(request);
+        self.waker.notify_waiters();
+    }
+
+    /// Closes the server and stops accepting new connections.
+    pub fn close(&self) {
+        self.cancellation_token.cancel();
+        self.waker.notify_waiters();
+    }
+
+    /// Waits for a response from the tracker server that manages this listener.
+    ///
+    /// If the tracker server does not respond within the specified timeout,
+    /// an error is returned.
+    pub async fn await_response<T>(&self, rx: oneshot::Receiver<T>) -> Result<T> {
+        self.waker.notify_waiters();
+
+        select! {
+            _ = time::sleep(self.timeout) =>
+                Err(TrackerError::Io(io::Error::new(io::ErrorKind::TimedOut, "response timed out"))),
+            response = rx => response
+                .map_err(|e| TrackerError::Io(io::Error::new(io::ErrorKind::BrokenPipe, e))),
+        }
     }
 }
 

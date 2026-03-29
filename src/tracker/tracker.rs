@@ -7,10 +7,12 @@ use crate::InfoHash;
 use async_trait::async_trait;
 use derive_more::Display;
 use fx_handle::Handle;
+use itertools::Either;
 use log::{debug, trace};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::io;
 use std::net::SocketAddr;
 use std::ops::Sub;
 use std::str::FromStr;
@@ -54,6 +56,21 @@ impl FromStr for AnnounceEvent {
             "started" => Ok(AnnounceEvent::Started),
             "stopped" => Ok(AnnounceEvent::Stopped),
             "paused" => Ok(AnnounceEvent::Paused),
+            _ => Err(TrackerError::UnsupportedEvent(value.to_string())),
+        }
+    }
+}
+
+impl TryFrom<u8> for AnnounceEvent {
+    type Error = TrackerError;
+
+    fn try_from(value: u8) -> Result<Self> {
+        match value {
+            0 => Ok(AnnounceEvent::None),
+            1 => Ok(AnnounceEvent::Completed),
+            2 => Ok(AnnounceEvent::Started),
+            3 => Ok(AnnounceEvent::Stopped),
+            4 => Ok(AnnounceEvent::Paused),
             _ => Err(TrackerError::UnsupportedEvent(value.to_string())),
         }
     }
@@ -122,15 +139,6 @@ pub struct ScrapeFileMetrics {
 /// Implementations of this trait will provide specific logic for different tracker connection protocols or types.
 #[async_trait]
 pub(crate) trait TrackerClientConnection: Debug + Send + Sync {
-    /// Asynchronously start the tracker connection.
-    ///
-    /// This method should connect to one of the addresses provided by the tracker.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` that is `Ok` if the connection was successful or an `Err` if there was an issue.
-    async fn start(&mut self) -> Result<()>;
-
     /// Announce the given torrent hash to the tracker.
     /// This will send the known peer info to the tracker with the type of announcement.
     ///
@@ -418,21 +426,26 @@ impl Tracker {
     ) -> Result<Box<dyn TrackerClientConnection>> {
         trace!("Trying to connect to tracker at {}", url);
         let scheme = url.scheme();
-        let mut connection: Box<dyn TrackerClientConnection>;
 
-        match scheme {
-            "udp" => {
-                connection = Box::new(UdpConnection::new(handle, addrs, timeout));
-            }
-            "http" | "https" => {
-                connection = Box::new(HttpClient::new(handle, url.clone(), timeout));
-            }
+        let future = match scheme {
+            "udp" => Either::Left(async {
+                match UdpConnection::new(handle, addrs, timeout).await {
+                    Ok(conn) => Ok(Box::new(conn) as Box<dyn TrackerClientConnection>),
+                    Err(err) => Err(err),
+                }
+            }),
+            "http" | "https" => Either::Right(async {
+                match HttpClient::new(handle, url.clone(), timeout).await {
+                    Ok(client) => Ok(Box::new(client) as Box<dyn TrackerClientConnection>),
+                    Err(err) => Err(err),
+                }
+            }),
             _ => return Err(TrackerError::UnsupportedScheme(scheme.to_string())),
-        }
+        };
 
-        let _ = select! {
-            _ = time::sleep(timeout) => Err(TrackerError::Timeout),
-            result = connection.start() => result,
+        let connection = select! {
+            _ = time::sleep(timeout) => return Err(TrackerError::Io(io::Error::new(io::ErrorKind::TimedOut, "connection timed out"))),
+            conn = future => conn,
         }?;
 
         debug!("Tracker {} connection established", url);
@@ -475,7 +488,10 @@ impl TrackerBuilder {
     ///
     /// Returns an error when the [TrackerBuilder::url] has not been set.
     pub async fn build(&mut self) -> Result<Tracker> {
-        let url = self.url.take().expect("expected the url to be set");
+        let url = self
+            .url
+            .take()
+            .ok_or(TrackerError::InvalidUrl("url is missing".to_string()))?;
         let tier = self.tier.take().unwrap_or(0);
         let timeout = self
             .timeout
@@ -518,21 +534,23 @@ struct InnerTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::read_test_file_to_bytes;
     use crate::tracker::http::HttpServer;
+    use crate::tracker::udp::UdpServer;
     use crate::tracker::TrackerServer;
-    use crate::TorrentMetadata;
+    use std::net::Ipv4Addr;
 
     mod new {
         use super::*;
+        use crate::tracker::udp::UdpServer;
 
         #[tokio::test]
         async fn test_new_valid_udp_url() {
             init_logger!();
-            let url = Url::parse("udp://tracker.opentrackr.org:1337").unwrap();
+            let udp_server = UdpServer::with_port(0).await.unwrap();
+            let server = TrackerServer::with_listeners(vec![Box::new(udp_server)]).unwrap();
 
             let result = Tracker::builder()
-                .url(url)
+                .url(server.url().clone())
                 .build()
                 .await
                 .expect("expected the tracker to be created");
@@ -544,9 +562,7 @@ mod tests {
         async fn test_new_valid_http_url() {
             init_logger!();
             let http_server = HttpServer::with_port(0).await.unwrap();
-            let server = TrackerServer::with_listeners(vec![Box::new(http_server)])
-                .await
-                .unwrap();
+            let server = TrackerServer::with_listeners(vec![Box::new(http_server)]).unwrap();
             let url =
                 Url::parse(format!("http://localhost:{}/announce", server.addr().port()).as_str())
                     .unwrap();
@@ -579,28 +595,59 @@ mod tests {
     #[tokio::test]
     async fn test_tracker_url() {
         init_logger!();
-        let url = Url::parse("udp://tracker.opentrackr.org:1337").unwrap();
+        let server = TrackerServer::new().await.unwrap();
         let tracker = Tracker::builder()
-            .url(url.clone())
+            .url(server.url().clone())
             .build()
             .await
             .expect("expected the tracker to be created");
 
         let result = tracker.url();
 
-        assert_eq!(&url, result, "expected the tracker url to match");
+        assert_eq!(server.url(), result, "expected the tracker url to match");
     }
 
     #[tokio::test]
     async fn test_tracker_announce_udp() {
         init_logger!();
-        let data = read_test_file_to_bytes("debian-udp.torrent");
-        let info = TorrentMetadata::try_from(data.as_slice()).unwrap();
+        let info_hash = InfoHash::from_str("EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+        let udp_server = UdpServer::with_port(0).await.unwrap();
+        let server = TrackerServer::with_listeners(vec![Box::new(udp_server)]).unwrap();
+        let tracker = Tracker::builder()
+            .url(server.url().clone())
+            .build()
+            .await
+            .unwrap();
 
-        let result = execute_tracker_announcement(&info).await;
+        // add a dummy peer to the tracker server
+        server
+            .add_peer(
+                info_hash.clone(),
+                (Ipv4Addr::LOCALHOST, 6881).into(),
+                PeerId::new(),
+                6881,
+                false,
+            )
+            .await;
 
-        assert_ne!(
-            0,
+        // make an announcement to the tracker server
+        let result = tracker
+            .announce(Announcement {
+                info_hash,
+                peer_id: PeerId::new(),
+                peer_port: 7788,
+                event: AnnounceEvent::Started,
+                bytes_completed: 0,
+                bytes_remaining: u64::MAX,
+            })
+            .await
+            .expect("expected the announce to succeed");
+        assert_eq!(
+            1, result.leechers,
+            "expected the announce to return 1 leecher"
+        );
+        assert_eq!(
+            1,
             result.peers.len(),
             "expected the announce to return peers"
         );
@@ -612,13 +659,12 @@ mod tests {
         let info_hash = InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7")
             .expect("expected a valid hash");
         let http_server = HttpServer::with_port(0).await.unwrap();
-        let server = TrackerServer::with_listeners(vec![Box::new(http_server)])
+        let server = TrackerServer::with_listeners(vec![Box::new(http_server)]).unwrap();
+        let tracker = Tracker::builder()
+            .url(server.url().clone())
+            .build()
             .await
             .unwrap();
-        let url =
-            Url::from_str(format!("http://localhost:{}/announce", server.addr().port()).as_str())
-                .unwrap();
-        let tracker = Tracker::builder().url(url).build().await.unwrap();
 
         // add dummy peers to the tracker server
         server
@@ -662,12 +708,17 @@ mod tests {
     #[tokio::test]
     async fn test_tracker_scrape_udp() {
         init_logger!();
-        let data = read_test_file_to_bytes("debian-udp.torrent");
-        let info = TorrentMetadata::try_from(data.as_slice()).unwrap();
-        let tracker = create_tracker(&info).await;
+        let info_hash =
+            InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+        let server = TrackerServer::new().await.unwrap();
+        let tracker = Tracker::builder()
+            .url(server.url().clone())
+            .build()
+            .await
+            .unwrap();
 
         let result = tracker
-            .scrape(&vec![info.info_hash])
+            .scrape(&vec![info_hash])
             .await
             .expect("expected a scrape response");
 
@@ -697,35 +748,5 @@ mod tests {
                 TrackerState::calculate(failure_count)
             );
         }
-    }
-
-    async fn execute_tracker_announcement(info: &TorrentMetadata) -> AnnounceEntryResponse {
-        let info_hash = info.info_hash.clone();
-        let announce = Announcement {
-            info_hash,
-            peer_id: PeerId::new(),
-            peer_port: 6881,
-            event: AnnounceEvent::Started,
-            bytes_completed: 0,
-            bytes_remaining: u64::MAX,
-        };
-        let tracker = create_tracker(&info).await;
-
-        tracker
-            .announce(announce)
-            .await
-            .expect("expected the announce to succeed")
-    }
-
-    async fn create_tracker(metadata: &TorrentMetadata) -> Tracker {
-        let tracker_uris = metadata.tiered_trackers();
-        let tracker_uri = tracker_uris.get(&0).map(|e| e.get(0).unwrap()).unwrap();
-
-        Tracker::builder()
-            .url(tracker_uri.clone())
-            .timeout(Duration::from_secs(2))
-            .build()
-            .await
-            .expect("expected the tracker to have been created")
     }
 }

@@ -11,13 +11,15 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Error, Response};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "tracker-server")]
-pub use server::*;
+use std::io;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use url::Url;
+
+#[cfg(feature = "tracker-server")]
+pub use server::*;
 
 const URL_ENCODE_RESERVED: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -70,20 +72,28 @@ pub struct HttpClient {
 }
 
 impl HttpClient {
-    pub fn new(handle: TrackerHandle, url: Url, timeout: Duration) -> Self {
+    /// Create a new HTTP tracker client connection.
+    /// It returns an error if the connection to the HTTP tracker server failed.
+    pub async fn new(handle: TrackerHandle, url: Url, timeout: Duration) -> Result<Self> {
         let client = Client::builder()
             .redirect(Policy::limited(3))
             .timeout(timeout)
             .build()
             .expect("expected a valid http client");
 
-        Self {
+        trace!(
+            "Http tracker client {} is trying to connect with the server",
+            handle
+        );
+        client.head(url.clone()).send().await?;
+
+        Ok(Self {
             handle,
             url,
             client,
             metrics: Default::default(),
             cancellation_token: Default::default(),
-        }
+        })
     }
 
     fn create_announce_url(&self, announce: Announcement) -> Result<Url> {
@@ -197,15 +207,6 @@ impl HttpClient {
 
 #[async_trait]
 impl TrackerClientConnection for HttpClient {
-    async fn start(&mut self) -> Result<()> {
-        let url = self.url.clone();
-
-        // check if we're able to connect
-        trace!("Http tracker {} is trying to connect with the server", self);
-        self.client.head(url).send().await?;
-        Ok(())
-    }
-
     async fn announce(&self, announce: Announcement) -> Result<AnnounceEntryResponse> {
         let url = self.create_announce_url(announce)?;
 
@@ -213,7 +214,7 @@ impl TrackerClientConnection for HttpClient {
         select! {
             _ = self.cancellation_token.cancelled() => {
                 self.metrics.timeouts.inc();
-                Err(TrackerError::Timeout)
+                Err(TrackerError::Io(io::Error::new(io::ErrorKind::TimedOut, "request timed out")))
             },
             response = self.client.get(url.clone()).send() => self.process_announce_response(response).await,
         }
@@ -226,7 +227,7 @@ impl TrackerClientConnection for HttpClient {
         select! {
             _ = self.cancellation_token.cancelled() => {
                 self.metrics.timeouts.inc();
-                Err(TrackerError::Timeout)
+                Err(TrackerError::Io(io::Error::new(io::ErrorKind::TimedOut, "request timed out")))
             },
             response = self.client.get(url.clone()).send() => self.process_scrape_response(response).await,
         }
@@ -246,20 +247,17 @@ mod server {
     use super::*;
 
     use crate::peer::PeerId;
-    use crate::tracker::{ServerRequest, TrackerListener};
+    use crate::tracker::{BaseServer, ServerRequest, TrackerListener};
     use crate::CompactIpv4Addr;
     use axum::extract::{ConnectInfo, RawQuery, State};
     use axum::http::StatusCode;
     use axum::routing::get;
     use axum::Router;
     use log::{error, warn};
-    use std::collections::VecDeque;
-    use std::io;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use tokio::net::TcpListener;
-    use tokio::sync::{oneshot, Mutex, Notify};
-    use tokio::time;
+    use tokio::sync::oneshot;
 
     #[derive(Debug)]
     pub struct HttpServer {
@@ -278,19 +276,14 @@ mod server {
             };
             let url = Url::parse(&format!("http://{}:{}/announce", ip, addr.port()))?;
             let inner = Arc::new(InnerServer {
-                handle: Default::default(),
+                base: BaseServer::new(TrackerHandle::new(), Duration::from_secs(15)),
                 addr,
                 url,
-                queue: Default::default(),
-                waker: Default::default(),
-                timeout: Duration::from_secs(15),
-                metrics: Default::default(),
-                cancellation_token: Default::default(),
             });
 
             let state = inner.clone();
             tokio::spawn(async move {
-                let cancellation_token = state.cancellation_token.clone();
+                let cancellation_token = state.base.cancellation_token.clone();
                 let router = Router::new()
                     .route("/announce", get(Self::do_announce))
                     .route("/scrape", get(Self::do_scrape))
@@ -455,16 +448,7 @@ mod server {
     #[async_trait]
     impl TrackerListener for HttpServer {
         async fn accept(&self) -> Option<ServerRequest> {
-            loop {
-                if self.inner.cancellation_token.is_cancelled() {
-                    return None;
-                }
-                if let Some(request) = self.inner.queue.lock().await.pop_front() {
-                    return Some(request);
-                }
-
-                self.inner.waker.notified().await;
-            }
+            self.inner.base.accept().await
         }
 
         fn addr(&self) -> &SocketAddr {
@@ -476,26 +460,20 @@ mod server {
         }
 
         fn metrics(&self) -> &ConnectionMetrics {
-            &self.inner.metrics
+            &self.inner.base.metrics
         }
 
         fn close(&self) {
-            self.inner.cancellation_token.cancel();
-            self.inner.waker.notify_waiters();
+            self.inner.base.close();
         }
     }
 
     #[derive(Debug, Display)]
-    #[display("{}", handle)]
+    #[display("{}", base.handle)]
     struct InnerServer {
-        handle: TrackerHandle,
+        base: BaseServer,
         addr: SocketAddr,
         url: Url,
-        queue: Mutex<VecDeque<ServerRequest>>,
-        waker: Notify,
-        timeout: Duration,
-        metrics: ConnectionMetrics,
-        cancellation_token: CancellationToken,
     }
 
     impl InnerServer {
@@ -518,43 +496,26 @@ mod server {
                 bytes_remaining: params.left,
             };
 
-            {
-                let mut queue = self.queue.lock().await;
-                queue.push_back(ServerRequest::Announcement {
+            self.base
+                .request(ServerRequest::Announcement {
                     addr,
                     request: announcement,
                     response: tx,
-                });
-            }
-
-            self.await_response(rx).await
+                })
+                .await;
+            self.base.await_response(rx).await
         }
 
         async fn scrape(&self, info_hashes: Vec<InfoHash>) -> Result<ScrapeResult> {
             let (tx, rx) = oneshot::channel();
 
-            {
-                let mut queue = self.queue.lock().await;
-                queue.push_back(ServerRequest::Scrape {
+            self.base
+                .request(ServerRequest::Scrape {
                     request: info_hashes,
                     response: tx,
-                });
-            }
-
-            self.await_response(rx).await
-        }
-
-        /// Waits for a response from the tracker server that manages this listener.
-        ///
-        /// If the tracker server does not respond within the specified timeout,
-        /// an error is returned.
-        async fn await_response<T>(&self, rx: oneshot::Receiver<T>) -> Result<T> {
-            self.waker.notify_waiters();
-
-            select! {
-                _ = time::sleep(self.timeout) => Err(TrackerError::Timeout),
-                response = rx => response.map_err(|e| TrackerError::Io(io::Error::new(io::ErrorKind::BrokenPipe, e))),
-            }
+                })
+                .await;
+            self.base.await_response(rx).await
         }
     }
 }
@@ -659,26 +620,23 @@ mod tests {
     use super::*;
     use crate::peer::PeerId;
     use crate::tracker::{AnnounceEvent, TrackerListener, TrackerServer};
+    use log::info;
     use std::net::Ipv4Addr;
 
-    use log::info;
-
     #[tokio::test]
-    async fn test_start() {
+    async fn test_new() {
         init_logger!();
         let http_server = HttpServer::with_port(0).await.unwrap();
-        let server = TrackerServer::with_listeners(vec![Box::new(http_server)])
-            .await
-            .unwrap();
-        let mut connection = HttpClient::new(
+        let server = TrackerServer::with_listeners(vec![Box::new(http_server)]).unwrap();
+
+        let result = HttpClient::new(
             TrackerHandle::new(),
             server.url().clone(),
             Duration::from_secs(2),
-        );
+        )
+        .await;
 
-        let result = connection.start().await;
-
-        assert_eq!(Ok(()), result);
+        assert!(result.is_ok(), "expected Ok(), but got {:?}", result);
     }
 
     #[tokio::test]
@@ -702,7 +660,9 @@ mod tests {
             tracker_handle,
             http_server.url().clone(),
             Duration::from_secs(2),
-        );
+        )
+        .await
+        .unwrap();
 
         let url = connection.create_announce_url(announce).unwrap();
         let result = url.query().unwrap();
@@ -720,9 +680,7 @@ mod tests {
         init_logger!();
         let info_hash = InfoHash::from_str("a1dfefec1a9dd7fa8a041ebeeea271db55126d2f").unwrap();
         let http_server = HttpServer::with_port(0).await.unwrap();
-        let server = TrackerServer::with_listeners(vec![Box::new(http_server)])
-            .await
-            .unwrap();
+        let server = TrackerServer::with_listeners(vec![Box::new(http_server)]).unwrap();
         let tracker_handle = TrackerHandle::new();
         let peer_id = PeerId::new();
         let announce = Announcement {
@@ -733,12 +691,10 @@ mod tests {
             bytes_completed: 0,
             bytes_remaining: u64::MAX,
         };
-        let mut connection =
-            HttpClient::new(tracker_handle, server.url().clone(), Duration::from_secs(2));
-
-        // test the tracker connection
-        let result = connection.start().await;
-        assert_eq!(Ok(()), result);
+        let connection =
+            HttpClient::new(tracker_handle, server.url().clone(), Duration::from_secs(2))
+                .await
+                .unwrap();
 
         // add dummies to the tracker server
         server
@@ -781,18 +737,14 @@ mod tests {
         init_logger!();
         let info_hash = InfoHash::from_str("a1dfefec1a9dd7fa8a041ebeeea271db55126d2f").unwrap();
         let http_server = HttpServer::with_port(0).await.unwrap();
-        let server = TrackerServer::with_listeners(vec![Box::new(http_server)])
-            .await
-            .unwrap();
-        let mut connection = HttpClient::new(
+        let server = TrackerServer::with_listeners(vec![Box::new(http_server)]).unwrap();
+        let connection = HttpClient::new(
             TrackerHandle::new(),
             server.url().clone(),
             Duration::from_secs(2),
-        );
-
-        // test the tracker connection
-        let result = connection.start().await;
-        assert_eq!(Ok(()), result);
+        )
+        .await
+        .unwrap();
 
         // add a dummy peer to the server
         server

@@ -33,13 +33,13 @@ impl TcpPeerDiscovery {
     /// Create a new TCP peer discovery instance.
     ///
     /// It will listen on a random port assigned by the OS.
-    /// If you want to listen on a specific port, use [TcpPeerDiscovery::new_with_port] instead.
+    /// If you want to listen on a specific port, use [TcpPeerDiscovery::with_port] instead.
     ///
     /// # Returns
     ///
     /// It returns a new TCP peer discovery instance, else an error when the listener couldn't be bound.
     pub async fn new() -> Result<Self> {
-        Self::new_with_port(0).await
+        Self::with_port(0).await
     }
 
     /// Create a new TCP peer discovery instance.
@@ -50,7 +50,7 @@ impl TcpPeerDiscovery {
     /// # Returns
     ///
     /// It returns a new TCP peer discovery instance, else an error when the listener couldn't be bound.
-    pub async fn new_with_port(port: u16) -> Result<Self> {
+    pub async fn with_port(port: u16) -> Result<Self> {
         let (sender, receiver) = unbounded_channel();
         let sockets = InnerTcpPeerDiscovery::try_binding_sockets(port).await?;
         let addr = sockets

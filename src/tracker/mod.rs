@@ -5,6 +5,10 @@ pub use metrics::*;
 pub use server::*;
 pub use tracker::*;
 
+#[cfg(test)]
+#[macro_use]
+mod test_macros;
+
 mod client;
 mod errors;
 mod http;
