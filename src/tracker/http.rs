@@ -2,7 +2,7 @@ use crate::tracker::{
     AnnounceEntryResponse, AnnounceEvent, Announcement, ConnectionMetrics, Result, ScrapeResult,
     TrackerClientConnection, TrackerError, TrackerHandle,
 };
-use crate::{CompactIpv4Addrs, InfoHash};
+use crate::{CompactIpv4Addrs, CompactIpv6Addrs, InfoHash};
 use async_trait::async_trait;
 use derive_more::Display;
 use itertools::Itertools;
@@ -45,6 +45,9 @@ pub struct HttpResponse {
     pub incomplete: Option<u64>,
     #[serde(default)]
     pub peers: CompactIpv4Addrs,
+    /// The IPv6 peers of the torrent (BEP7).
+    #[serde(default, skip_serializing_if = "CompactIpv6Addrs::is_empty")]
+    pub peers6: CompactIpv6Addrs,
 }
 
 impl Into<AnnounceEntryResponse> for HttpResponse {
@@ -53,7 +56,12 @@ impl Into<AnnounceEntryResponse> for HttpResponse {
             interval_seconds: self.interval.unwrap_or(0) as u64,
             leechers: self.incomplete.unwrap_or(0),
             seeders: self.complete.unwrap_or(0),
-            peers: self.peers.into_iter().map(|e| e.into()).collect(),
+            peers: self
+                .peers
+                .into_iter()
+                .map(|e| e.into())
+                .chain(self.peers6.into_iter().map(|e| e.into()))
+                .collect(),
         }
     }
 }
@@ -322,7 +330,8 @@ mod server {
                             tracker_id: None,
                             complete: None,
                             incomplete: None,
-                            peers: Vec::with_capacity(0).into(),
+                            peers: Default::default(),
+                            peers6: Default::default(),
                         },
                     );
                 }
@@ -344,6 +353,7 @@ mod server {
                                 .filter_map(|e| CompactIpv4Addr::try_from(e).ok())
                                 .collect::<Vec<_>>()
                                 .into(),
+                            peers6: Default::default(),
                         };
                     }
                     Err(e) => {
@@ -355,6 +365,7 @@ mod server {
                             complete: None,
                             incomplete: None,
                             peers: Vec::with_capacity(0).into(),
+                            peers6: Default::default(),
                         }
                     }
                 },
@@ -371,6 +382,7 @@ mod server {
                         complete: None,
                         incomplete: None,
                         peers: Vec::with_capacity(0).into(),
+                        peers6: Default::default(),
                     }
                 }
             }

@@ -1161,6 +1161,69 @@ mod tests {
         }
     }
 
+    mod server {
+        use super::*;
+        use crate::tracker::TrackerListener;
+        use rand::{rng, Rng};
+
+        #[tokio::test]
+        async fn test_invalid_connection_id() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let (mut client, _server) = udp_connection_pair!();
+
+            // modify the client connection id
+            client.session.connection_id = rng().next_u64();
+
+            // make an announcement to the server
+            let result = client
+                .announce(Announcement {
+                    info_hash,
+                    peer_id: PeerId::new(),
+                    peer_port: 6881,
+                    event: AnnounceEvent::Started,
+                    bytes_completed: 0,
+                    bytes_remaining: 0,
+                })
+                .await;
+            match result {
+                Ok(_) => assert!(false, "expected the request to be rejected"),
+                Err(e) => {
+                    assert!(
+                        e.to_string().contains("connection ID mismatch"),
+                        "expected request to be rejected due to invalid connection id"
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn test_close() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let (client, server) = udp_connection_pair!();
+
+            // close the server
+            server.close();
+
+            // try to scrape the server
+            let result = client.scrape(&[info_hash]).await;
+            match result {
+                Ok(_) => assert!(false, "expected the request to be rejected"),
+                Err(TrackerError::Io(e)) => {
+                    assert_eq!(io::ErrorKind::TimedOut, e.kind());
+                }
+                Err(_) => assert!(
+                    false,
+                    "expected Err(TrackerError::Io), but got {:?}",
+                    result
+                ),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_udp_tracker_announce() {
         init_logger!();

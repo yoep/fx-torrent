@@ -1156,7 +1156,10 @@ struct TrackerTorrent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tracker::udp::UdpServer;
     use crate::tracker::TrackerServer;
+    use crate::TorrentError::Peer;
+    use std::net::Ipv4Addr;
     use std::str::FromStr;
     use tokio::sync::mpsc::unbounded_channel;
     use url::Url;
@@ -1293,12 +1296,22 @@ mod tests {
     #[tokio::test]
     async fn test_tracker_manager_announce_all() {
         init_logger!();
-        let url = Url::parse("udp://tracker.opentrackr.org:1337").unwrap();
         let peer_id = PeerId::new();
         let info_hash =
             InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
-        let entry = TrackerEntry { tier: 0, url };
+        let server = TrackerServer::new().await.unwrap();
         let manager = TrackerClient::new(Duration::from_secs(3));
+
+        // add a dummy peer to the server
+        server
+            .add_peer(
+                info_hash.clone(),
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)),
+                PeerId::new(),
+                6881,
+                false,
+            )
+            .await;
 
         // add the tracker to the tracker client
         let result = manager
@@ -1311,6 +1324,10 @@ mod tests {
         );
 
         // add the tracker entry to the client
+        let entry = TrackerEntry {
+            tier: 0,
+            url: server.url().clone(),
+        };
         let result = manager.add_tracker_entry(entry).await;
         assert!(
             result.is_ok(),
@@ -1321,8 +1338,13 @@ mod tests {
         let result = manager
             .announce_all(&info_hash, AnnounceEvent::Started)
             .await;
-
-        assert_ne!(0, result.peers.len(), "expected peers to have been found");
+        assert_eq!(1, result.total_leechers, "expected 1 leecher");
+        assert_eq!(0, result.total_seeders, "expected 0 seeders");
+        assert_eq!(
+            1,
+            result.peers.len(),
+            "expected the peer to have been found"
+        );
     }
 
     #[tokio::test]
@@ -1409,9 +1431,14 @@ mod tests {
     #[tokio::test]
     async fn test_add_callback() {
         init_logger!();
-        let url = Url::parse("udp://tracker.opentrackr.org:1337").unwrap();
-        let entry = TrackerEntry { tier: 0, url };
         let (tx, mut rx) = unbounded_channel();
+        let server =
+            TrackerServer::with_listeners(vec![Box::new(UdpServer::with_port(0).await.unwrap())])
+                .unwrap();
+        let entry = TrackerEntry {
+            tier: 0,
+            url: server.url().clone(),
+        };
         let manager = TrackerClient::new(Duration::from_secs(1));
 
         let mut receiver = manager.subscribe();
