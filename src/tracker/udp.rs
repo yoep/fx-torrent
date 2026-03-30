@@ -12,7 +12,7 @@ use log::{debug, trace};
 use std::fmt::{Debug, Display, Formatter};
 use std::io;
 use std::io::{Cursor, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::select;
@@ -141,7 +141,10 @@ impl UdpConnection {
 
         // make sure we shrink the buffer to the expected size before returning
         self.metrics.bytes_in.inc_by(buffer_size as u64);
-        let message = ResponseMessage::try_from(&buffer[..buffer_size])?;
+        let message = ResponseMessage::try_from(PayloadParser {
+            bytes: &buffer[..buffer_size],
+            addr: &self.session.socket.local_addr()?,
+        })?;
 
         // verify if the transaction id matches
         if message.transaction_id != self.session.transaction_id {
@@ -410,7 +413,10 @@ mod server {
                 addr
             );
             self.base.metrics.bytes_in.inc_by(packet.len() as u64);
-            let request = match RequestMessage::try_from(packet) {
+            let request = match RequestMessage::try_from(PayloadParser {
+                bytes: packet,
+                addr: &addr,
+            }) {
                 Ok(request) => request,
                 Err(e) => {
                     debug!("Udp tracker server {} failed to parse packet, {}", self, e);
@@ -539,7 +545,12 @@ mod server {
                 interval: response.interval_seconds as u32,
                 leechers: response.leechers as u32,
                 seeders: response.seeders as u32,
-                peers: response.peers,
+                peers: response
+                    .peers
+                    .into_iter()
+                    .filter(|e| e.is_ipv4() == addr.is_ipv4())
+                    .take(announce.num_want as usize)
+                    .collect(),
             }))
         }
 
@@ -721,22 +732,22 @@ impl TryFrom<RequestMessage> for Vec<u8> {
     }
 }
 
-impl TryFrom<&[u8]> for RequestMessage {
+impl<'a> TryFrom<PayloadParser<'a>> for RequestMessage {
     type Error = TrackerError;
 
-    fn try_from(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 16 {
+    fn try_from(parser: PayloadParser) -> Result<Self> {
+        if parser.bytes.len() < 16 {
             return Err(TrackerError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Packet too short",
             )));
         }
 
-        let mut cursor = Cursor::new(bytes);
+        let mut cursor = Cursor::new(parser.bytes);
         let connection_id = cursor.read_u64::<BigEndian>()?;
         let action = cursor.read_u32::<BigEndian>()?.try_into()?;
         let transaction_id = cursor.read_u32::<BigEndian>()?;
-        let payload = Payload::try_from(cursor, &action)?;
+        let payload = Payload::try_from(cursor, &action, parser.addr)?;
 
         Ok(Self {
             connection_id,
@@ -772,21 +783,21 @@ impl TryFrom<ResponseMessage> for Vec<u8> {
     }
 }
 
-impl TryFrom<&[u8]> for ResponseMessage {
+impl<'a> TryFrom<PayloadParser<'a>> for ResponseMessage {
     type Error = TrackerError;
 
-    fn try_from(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 8 {
+    fn try_from(parser: PayloadParser) -> Result<Self> {
+        if parser.bytes.len() < 8 {
             return Err(TrackerError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Packet too short",
             )));
         }
 
-        let mut cursor = Cursor::new(bytes);
+        let mut cursor = Cursor::new(parser.bytes);
         let action = cursor.read_u32::<BigEndian>()?.try_into()?;
         let transaction_id = cursor.read_u32::<BigEndian>()?;
-        let payload = Payload::try_from(cursor, &action)?;
+        let payload = Payload::try_from(cursor, &action, parser.addr)?;
 
         Ok(Self {
             action,
@@ -796,10 +807,16 @@ impl TryFrom<&[u8]> for ResponseMessage {
     }
 }
 
+#[derive(Debug)]
+struct PayloadParser<'a> {
+    bytes: &'a [u8],
+    addr: &'a SocketAddr,
+}
+
 /// The message payload of a UDP tracker message.
 trait Payload: Debug + TryInto<Vec<u8>, Error = TrackerError> {
     /// Converse the given cursor into a payload based on the message action.
-    fn try_from(cursor: Cursor<&[u8]>, action: &Action) -> Result<Self>;
+    fn try_from(cursor: Cursor<&[u8]>, action: &Action, addr: &SocketAddr) -> Result<Self>;
 }
 
 #[repr(u32)]
@@ -863,7 +880,7 @@ impl TryFrom<RequestPayload> for Vec<u8> {
 }
 
 impl Payload for RequestPayload {
-    fn try_from(cursor: Cursor<&[u8]>, action: &Action) -> Result<Self> {
+    fn try_from(cursor: Cursor<&[u8]>, action: &Action, _: &SocketAddr) -> Result<Self> {
         match action {
             Action::Connect => Ok(RequestPayload::Connect),
             Action::Announce => AnnounceRequest::try_from(cursor).map(RequestPayload::Announce),
@@ -903,13 +920,14 @@ impl TryFrom<ResponsePayload> for Vec<u8> {
 }
 
 impl Payload for ResponsePayload {
-    fn try_from(mut cursor: Cursor<&[u8]>, action: &Action) -> Result<Self> {
+    fn try_from(mut cursor: Cursor<&[u8]>, action: &Action, addr: &SocketAddr) -> Result<Self> {
         match action {
             Action::Connect => {
                 let connection_id = cursor.read_u64::<BigEndian>()?;
                 Ok(ResponsePayload::Connection(connection_id))
             }
-            Action::Announce => AnnounceResponse::try_from(cursor).map(ResponsePayload::Announce),
+            Action::Announce => AnnounceResponse::try_from(AnnounceResponseParser { cursor, addr })
+                .map(ResponsePayload::Announce),
             Action::Scrape => ScrapeResponse::try_from(cursor).map(ResponsePayload::Scrape),
             Action::Error => {
                 let mut message = String::new();
@@ -986,6 +1004,11 @@ impl TryFrom<Cursor<&[u8]>> for AnnounceRequest {
     }
 }
 
+struct AnnounceResponseParser<'a> {
+    cursor: Cursor<&'a [u8]>,
+    addr: &'a SocketAddr,
+}
+
 #[derive(Debug)]
 struct AnnounceResponse {
     /// The interval in seconds between successive announcements
@@ -1019,20 +1042,45 @@ impl TryFrom<AnnounceResponse> for Vec<u8> {
     }
 }
 
-impl TryFrom<Cursor<&[u8]>> for AnnounceResponse {
+impl<'a> TryFrom<AnnounceResponseParser<'a>> for AnnounceResponse {
     type Error = TrackerError;
 
-    fn try_from(mut cursor: Cursor<&[u8]>) -> Result<Self> {
+    fn try_from(parser: AnnounceResponseParser) -> Result<Self> {
+        let mut cursor = parser.cursor;
+        let addr = parser.addr;
         let interval = cursor.read_u32::<BigEndian>()?;
         let leechers = cursor.read_u32::<BigEndian>()?;
         let seeders = cursor.read_u32::<BigEndian>()?;
 
         let mut addrs = Vec::new();
+        let remaining_bytes = cursor.remaining();
+        match addr.ip() {
+            IpAddr::V4(_) => {
+                if remaining_bytes % 6 != 0 {
+                    return Err(TrackerError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid peers len",
+                    )));
+                }
 
-        // we currently only support ipv4
-        while let Ok(ip) = cursor.read_u32::<BigEndian>() {
-            let port = cursor.read_u16::<BigEndian>()?;
-            addrs.push(SocketAddrV4::new(Ipv4Addr::from(ip), port).into());
+                while let Ok(ip) = cursor.read_u32::<BigEndian>() {
+                    let port = cursor.read_u16::<BigEndian>()?;
+                    addrs.push(SocketAddr::from((Ipv4Addr::from(ip), port)));
+                }
+            }
+            IpAddr::V6(_) => {
+                if remaining_bytes % 18 != 0 {
+                    return Err(TrackerError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid peers len",
+                    )));
+                }
+
+                while let Ok(ip) = cursor.read_u128::<BigEndian>() {
+                    let port = cursor.read_u16::<BigEndian>()?;
+                    addrs.push(SocketAddr::from((Ipv6Addr::from(ip), port)));
+                }
+            }
         }
 
         Ok(Self {
@@ -1163,8 +1211,9 @@ mod tests {
 
     mod server {
         use super::*;
-        use crate::tracker::TrackerListener;
+        use crate::tracker::{ServerRequest, TrackerListener};
         use rand::{rng, Rng};
+        use std::net::Ipv6Addr;
 
         #[tokio::test]
         async fn test_invalid_connection_id() {
@@ -1199,11 +1248,59 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_close() {
+        async fn test_announce_filter_ip_family() {
             init_logger!();
             let info_hash =
                 InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
             let (client, server) = udp_connection_pair!();
+
+            tokio::spawn(async move {
+                while let Some(request) = server.accept().await {
+                    match request {
+                        ServerRequest::Announcement { response, .. } => {
+                            response
+                                .send(AnnounceEntryResponse {
+                                    interval_seconds: 90,
+                                    leechers: 2,
+                                    seeders: 0,
+                                    peers: vec![
+                                        SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)),
+                                        SocketAddr::from((Ipv6Addr::LOCALHOST, 9968)),
+                                    ],
+                                })
+                                .unwrap();
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            // send an announcement
+            let result = client
+                .announce(Announcement {
+                    info_hash,
+                    peer_id: PeerId::new(),
+                    peer_port: 6881,
+                    event: AnnounceEvent::Started,
+                    bytes_completed: 0,
+                    bytes_remaining: 0,
+                })
+                .await
+                .expect("expected the announcement to succeed");
+            assert_eq!(2, result.leechers, "expected 2 leechers");
+            assert_eq!(
+                1,
+                result.peers.len(),
+                "expected the peers to have been filtered on IP family"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_close() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let (client, server) = udp_connection_pair!(Duration::from_millis(250));
 
             // close the server
             server.close();

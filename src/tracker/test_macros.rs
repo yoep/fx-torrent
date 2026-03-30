@@ -1,6 +1,9 @@
 /// Create a new UDP connection client-server instance pair.
 macro_rules! udp_connection_pair {
     () => {{
+        udp_connection_pair!(std::time::Duration::from_secs(1))
+    }};
+    ($timeout:expr) => {{
         use crate::tracker::udp::UdpConnection;
         use crate::tracker::udp::UdpServer;
         use crate::tracker::TrackerHandle;
@@ -10,10 +13,10 @@ macro_rules! udp_connection_pair {
 
         let server = UdpServer::with_port(0).await.unwrap();
         let server_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, server.addr().port()));
-        let client =
-            UdpConnection::new(TrackerHandle::new(), &[server_addr], Duration::from_secs(1))
-                .await
-                .expect("expected the client to connect");
+        let timeout: Duration = $timeout;
+        let client = UdpConnection::new(TrackerHandle::new(), &[server_addr], timeout)
+            .await
+            .expect("expected the client to connect");
 
         (client, server)
     }};
@@ -22,6 +25,9 @@ macro_rules! udp_connection_pair {
 /// Create a new UDP tracker client-server instance pair.
 macro_rules! udp_tracker_pair {
     () => {{
+        udp_tracker_pair!(std::time::Duration::from_secs(1))
+    }};
+    ($timeout:expr) => {{
         use crate::tracker::udp::UdpServer;
         use crate::tracker::TrackerClient;
         use crate::tracker::TrackerEntry;
@@ -30,7 +36,8 @@ macro_rules! udp_tracker_pair {
 
         let udp_server = UdpServer::with_port(0).await.unwrap();
         let server = TrackerServer::with_listeners(vec![Box::new(udp_server)]).unwrap();
-        let client = TrackerClient::new(Duration::from_secs(1));
+        let timeout: Duration = $timeout;
+        let client = TrackerClient::new(timeout);
 
         let client_handle = client
             .add_tracker_entry(TrackerEntry {

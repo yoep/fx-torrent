@@ -1158,7 +1158,6 @@ mod tests {
     use super::*;
     use crate::tracker::udp::UdpServer;
     use crate::tracker::TrackerServer;
-    use crate::TorrentError::Peer;
     use std::net::Ipv4Addr;
     use std::str::FromStr;
     use tokio::sync::mpsc::unbounded_channel;
@@ -1350,18 +1349,25 @@ mod tests {
     #[tokio::test]
     async fn test_tracker_manager_scrape() {
         init_logger!();
-        let url = Url::parse("udp://tracker.opentrackr.org:1337").unwrap();
         let peer_id = PeerId::new();
         let info_hash =
             InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
-        let entry = TrackerEntry { tier: 0, url };
+        let server =
+            TrackerServer::with_listeners(vec![Box::new(UdpServer::with_port(0).await.unwrap())])
+                .unwrap();
         let manager = TrackerClient::new(Duration::from_secs(3));
 
+        // register the torrent
         manager
             .add_torrent(peer_id, 6881, info_hash.clone(), Metrics::new())
             .await
             .unwrap();
 
+        // add the tracker server entry
+        let entry = TrackerEntry {
+            tier: 0,
+            url: server.url().clone(),
+        };
         manager.add_tracker_entry(entry).await.unwrap();
         let result = manager
             .scrape(&info_hash)
