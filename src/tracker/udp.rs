@@ -1,9 +1,3 @@
-use std::fmt::{Debug, Display, Formatter};
-use std::io;
-use std::io::{Cursor, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::time::Duration;
-
 use crate::tracker::{
     AnnounceEntryResponse, AnnounceEvent, Announcement, ConnectionMetrics, ScrapeResult,
     TrackerClientConnection, TrackerHandle,
@@ -15,110 +9,269 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use derive_more::Display;
 use itertools::Itertools;
 use log::{debug, trace};
+use std::fmt::{Debug, Display, Formatter};
+use std::io;
+use std::io::{Cursor, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::select;
 use tokio::sync::Mutex;
-use tokio::time::timeout;
 use tokio_util::bytes::Buf;
 use tokio_util::sync::CancellationToken;
 
-const ERROR_CONNECTION_NOT_INITIALIZED: &'static str = "udp connection not started";
+#[cfg(feature = "tracker-server")]
+pub use server::*;
+
+const PROTOCOL_ID: u64 = 0x41727101980; // see BEP15
+const PACKET_SIZE: usize = 16 * 1024;
 
 /// The UDP connection of a tracker.
 #[derive(Debug, Display)]
 #[display("Tracker {} UDP connection", handle)]
 pub struct UdpConnection {
-    /// The handle of the tracker
     handle: TrackerHandle,
-    addrs: AddressManager,
-    session: Option<UdpConnectionSession>,
+    session: UdpConnectionSession,
     timeout: Duration,
     metrics: ConnectionMetrics,
     cancellation_token: CancellationToken,
 }
 
-#[async_trait]
-impl TrackerClientConnection for UdpConnection {
-    async fn start(&mut self) -> Result<()> {
+impl UdpConnection {
+    /// Create a new udp tracker client connection.
+    /// It returns an error when the connection could not be established.
+    pub async fn new(
+        handle: TrackerHandle,
+        addrs: &[SocketAddr],
+        timeout: Duration,
+    ) -> Result<Self> {
+        trace!("Creating new tracker udp connection for {:?}", addrs);
         let socket = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))).await?;
-        trace!("{} started on {}", self, socket.local_addr()?.port());
-        let mut connected = false;
+        trace!(
+            "Udp tracker client {} started on {}",
+            handle,
+            socket.local_addr()?.port()
+        );
 
-        // try to connect to an available address known for the tracker
-        while let Some(addr) = self.next_addr().await {
-            trace!("{} is trying to connect to {:?}", self, addr);
-            match socket.connect(addr).await {
-                Ok(_) => {
-                    trace!("Successfully connected to tracker address {}", addr);
-                    connected = true;
-                    break;
-                }
-                Err(e) => {
-                    debug!("Failed to connect to tracker address {}, {}", addr, e);
-                }
+        // try to open a connection to an available address known for the tracker
+        Self::establish_connection(&handle, addrs, &socket, timeout).await?;
+
+        // initialize the instance
+        let mut instance = Self {
+            handle,
+            session: UdpConnectionSession {
+                connection_id: PROTOCOL_ID, // the magical connection id constant, see BEP15
+                transaction_id: Self::generate_transaction_id(),
+                socket,
+            },
+            timeout,
+            metrics: Default::default(),
+            cancellation_token: Default::default(),
+        };
+        // try to establish a connection with the tracker
+        instance.send(RequestPayload::Connect).await?;
+        // await the response from the tracker
+        let response = instance.read().await?;
+        match response.payload {
+            ResponsePayload::Connection(connection_id) => {
+                debug!(
+                    "Udp tracker client {} received connect({}) response",
+                    instance.handle, connection_id
+                );
+                // update the active connection session
+                instance.session.connection_id = connection_id;
+            }
+            _ => {
+                return Err(TrackerError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "expected Response::Connection, but got {:?} instead",
+                        response
+                    ),
+                )));
             }
         }
 
-        if connected {
-            // generate a new transaction id on each connection attempt
-            let transaction_id = Self::generate_transaction_id();
-            Self::send_message(
-                RequestMessage::Connect,
-                0x41727101980, // the magical connection id constant, see BEP15
-                transaction_id,
-                &socket,
-                &self.metrics,
-                &self.cancellation_token,
-            )
-            .await?;
-            // once we're able to send a successful message to the tracker
-            // we'll store the socket into a valid session for further use
-            self.session = Some(UdpConnectionSession {
-                connection_id: Default::default(), // set the initial connection id to uninitialized (= 0)
-                transaction_id,
-                socket,
-            });
+        Ok(instance)
+    }
 
-            let response = self.read().await?;
-            match response {
-                ResponseMessage::Connection(response) => {
-                    debug!("Received connect response {:?}", response);
-                    let session = self.session.as_mut().unwrap();
-                    // update the active connection session
-                    session.connection_id = response.connection_id;
-                    Ok(())
-                }
-                _ => {
-                    // invalidate the active session as the connect request failed
-                    self.session = None;
-                    Err(TrackerError::Io(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!(
-                            "expected Response::Connection, but got {:?} instead",
-                            response
-                        ),
-                    )))
-                }
-            }
-        } else {
-            Err(TrackerError::from(io::Error::from(
-                io::ErrorKind::AddrNotAvailable,
-            )))
+    /// Try to send the given request message to the tracker.
+    /// This method can only be used if a [RequestPayload::Connect] has already been established.
+    ///
+    /// # Returns
+    ///
+    /// It returns an error if the request message couldn't be sent.
+    async fn send(&self, request: RequestPayload) -> Result<()> {
+        trace!(
+            "Udp tracker client {} is trying to send message {:?}",
+            self,
+            request
+        );
+        let bytes: Vec<u8> = RequestMessage {
+            connection_id: self.session.connection_id,
+            action: request.action(),
+            transaction_id: self.session.transaction_id,
+            payload: request,
+        }
+        .try_into()?;
+
+        self.metrics.bytes_out.inc_by(bytes.len() as u64);
+        select! {
+            _ = self.cancellation_token.cancelled() => Err(TrackerError::Connection("connection is being closed".to_string())),
+            response = self.session.socket.send(bytes.as_ref()) => {
+                let _ = response?;
+                Ok(())
+            },
         }
     }
 
+    async fn read(&self) -> Result<ResponseMessage> {
+        trace!(
+            "Udp tracker client {} is reading from {}",
+            self,
+            self.session.socket.peer_addr()?
+        );
+        let mut buffer = vec![0; PACKET_SIZE];
+        let buffer_size = tokio::time::timeout(self.timeout, self.session.socket.recv(&mut buffer))
+            .await?
+            .map_err(|e| {
+                self.metrics.timeouts.inc();
+                TrackerError::from(e)
+            })?;
+
+        // make sure we shrink the buffer to the expected size before returning
+        self.metrics.bytes_in.inc_by(buffer_size as u64);
+        let message = ResponseMessage::try_from(PayloadParser {
+            bytes: &buffer[..buffer_size],
+            addr: &self.session.socket.local_addr()?,
+        })?;
+
+        // verify if the transaction id matches
+        if message.transaction_id != self.session.transaction_id {
+            return Err(TrackerError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid transaction id",
+            )));
+        }
+
+        debug!(
+            "Udp tracker client {} received message {:?}",
+            self.handle, message
+        );
+        Ok(message)
+    }
+
+    async fn do_announce(&self, announce: Announcement) -> Result<AnnounceEntryResponse> {
+        let info_hash = announce.info_hash.short_info_hash_bytes();
+        let event = announce.event;
+        let request = AnnounceRequest {
+            info_hash,
+            peer_id: announce.peer_id.value(),
+            downloaded: announce.bytes_completed,
+            left: announce.bytes_remaining,
+            uploaded: 0,
+            event,
+            ip_address: 0,
+            key: 0,
+            num_want: 200,
+            listen_port: announce.peer_port,
+        };
+
+        trace!(
+            "Udp tracker {} is sending announce request {:?}",
+            self,
+            request
+        );
+        self.send(RequestPayload::Announce(request)).await?;
+        let response = self.read().await?;
+        match response.payload {
+            ResponsePayload::Announce(response) => {
+                debug!(
+                    "Udp tracker {} received announce response {:?}",
+                    self, response
+                );
+                Ok(AnnounceEntryResponse {
+                    interval_seconds: response.interval as u64,
+                    leechers: response.leechers as u64,
+                    seeders: response.seeders as u64,
+                    peers: response.peers,
+                })
+            }
+            ResponsePayload::Error(e) => Err(TrackerError::AnnounceError(e)),
+            _ => Err(TrackerError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "expected Response::Announce, but got {:?} instead",
+                    response
+                ),
+            ))),
+        }
+    }
+
+    fn generate_transaction_id() -> u32 {
+        // don't use 0, because that has special meaning (uninitialized)
+        rand::random::<u32>() + 1
+    }
+
+    async fn establish_connection(
+        handle: &TrackerHandle,
+        addrs: &[SocketAddr],
+        socket: &UdpSocket,
+        timeout: Duration,
+    ) -> Result<()> {
+        let addrs = AddressManager::new(addrs);
+
+        while let Some(addr) = addrs.next_addr().await {
+            trace!(
+                "Udp tracker client {} is trying to connect to {:?}",
+                handle,
+                addr
+            );
+            let connection = select! {
+                _ = tokio::time::sleep(timeout) => Err(TrackerError::Io(io::Error::new(io::ErrorKind::TimedOut, "connection timed out"))),
+                conn = socket.connect(addr) => conn.map_err(TrackerError::from),
+            };
+
+            match connection {
+                Ok(_) => {
+                    debug!(
+                        "Udp tracker client {} connected to tracker address {}",
+                        handle, addr
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    trace!(
+                        "Udp tracker client {} connection failed for {}, {}",
+                        handle,
+                        addr,
+                        e
+                    );
+                }
+            }
+        }
+
+        Err(TrackerError::Io(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("failed to connect to {:?}", addrs),
+        )))
+    }
+}
+
+#[async_trait]
+impl TrackerClientConnection for UdpConnection {
     async fn announce(&self, announce: Announcement) -> Result<AnnounceEntryResponse> {
         self.do_announce(announce).await
     }
 
     async fn scrape(&self, hashes: &[InfoHash]) -> Result<ScrapeResult> {
-        self.send(RequestMessage::Scrape(ScrapeRequest {
+        self.send(RequestPayload::Scrape(ScrapeRequest {
             hashes: hashes.to_vec(),
         }))
         .await?;
         let response = self.read().await?;
-        match response {
-            ResponseMessage::Scrape(response) => {
+        match response.payload {
+            ResponsePayload::Scrape(response) => {
                 trace!(
                     "Udp tracker {} is parsing scrape response {:?}",
                     self,
@@ -146,7 +299,7 @@ impl TrackerClientConnection for UdpConnection {
                 }
                 Ok(result)
             }
-            ResponseMessage::Error(e) => Err(TrackerError::AnnounceError(e)),
+            ResponsePayload::Error(e) => Err(TrackerError::AnnounceError(e)),
             _ => Err(TrackerError::Io(io::Error::new(
                 io::ErrorKind::Other,
                 format!("expected Response::Scrape, but got {:?} instead", response),
@@ -164,206 +317,348 @@ impl TrackerClientConnection for UdpConnection {
     }
 }
 
-impl UdpConnection {
-    pub fn new(handle: TrackerHandle, addrs: &[SocketAddr], timeout: Duration) -> Self {
-        trace!("Creating new tracker udp connection for {:?}", addrs);
-        Self {
-            handle,
-            addrs: AddressManager::new(addrs),
-            session: Default::default(),
-            timeout,
-            metrics: Default::default(),
-            cancellation_token: Default::default(),
+#[cfg(feature = "tracker-server")]
+mod server {
+    use super::*;
+    use crate::peer::PeerId;
+    use crate::tracker::{BaseServer, ServerRequest, TrackerListener};
+    use rand::{rng, RngExt};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::oneshot;
+    use url::Url;
+
+    #[derive(Debug)]
+    pub struct UdpServer {
+        inner: Arc<InnerServer>,
+    }
+
+    impl UdpServer {
+        /// Create a new UDP tracker server instance for the given port.
+        pub async fn with_port(port: u16) -> Result<Self> {
+            let listener = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
+            let addr = listener.local_addr()?;
+            let ip = if addr.ip().is_unspecified() {
+                Ipv4Addr::LOCALHOST.into()
+            } else {
+                addr.ip()
+            };
+            let url = Url::parse(&format!("udp://{}:{}/announce", ip, addr.port()))?;
+            let inner = Arc::new(InnerServer {
+                base: BaseServer::new(TrackerHandle::new(), Duration::from_secs(15)),
+                addr,
+                url,
+                socket: listener,
+                connections: Default::default(),
+            });
+
+            let main_inner = inner.clone();
+            tokio::spawn(async move { main_inner.run().await });
+
+            Ok(Self { inner })
         }
     }
 
-    /// Get the next available address of the tracker.
-    ///
-    /// # Returns
-    ///
-    /// It returns an address if one is available, else [None].
-    async fn next_addr(&self) -> Option<&SocketAddr> {
-        self.addrs.next_addr().await
-    }
+    #[async_trait]
+    impl TrackerListener for UdpServer {
+        async fn accept(&self) -> Option<ServerRequest> {
+            self.inner.base.accept().await
+        }
 
-    /// Try to send the given request message to the tracker.
-    /// This method can only be used if a [RequestMessage::Connect] has already been established.
-    ///
-    /// # Returns
-    ///
-    /// It returns an error if the request message couldn't be sent.
-    async fn send(&self, message: RequestMessage) -> Result<()> {
-        trace!(
-            "Udp tracker {} is trying to send message {:?}",
-            self,
-            message
-        );
-        if let Some(session) = &self.session {
-            Self::send_message(
-                message,
-                session.connection_id,
-                session.transaction_id,
-                &session.socket,
-                &self.metrics,
-                &self.cancellation_token,
-            )
-            .await
-        } else {
-            Err(TrackerError::Connection(
-                ERROR_CONNECTION_NOT_INITIALIZED.to_string(),
-            ))
+        fn addr(&self) -> &SocketAddr {
+            &self.inner.addr
+        }
+
+        fn url(&self) -> &Url {
+            &self.inner.url
+        }
+
+        fn metrics(&self) -> &ConnectionMetrics {
+            &self.inner.base.metrics
+        }
+
+        fn close(&self) {
+            self.inner.base.close();
         }
     }
 
-    async fn read(&self) -> Result<ResponseMessage> {
-        trace!("Trying to read udp message");
-        let buffer = self.read_from_socket().await?;
-        let mut cursor = Cursor::new(buffer[0..].to_vec());
-        // read the action from the start of the cursor
-        // after that, the cursor is delegated to the struct `TryFrom` handler
-        let action: Action = cursor.read_u32::<BigEndian>()?.try_into()?;
-        let transaction_id = cursor.read_u32::<BigEndian>()?;
-        let response = UdpResponse {
-            transaction_id,
-            cursor,
-        };
-
-        trace!("Handling udp {} response", action);
-        match action {
-            Action::Connect => {
-                ConnectResponse::try_from(response).map(|e| ResponseMessage::Connection(e))
-            }
-            Action::Announce => {
-                AnnounceResponse::try_from(response).map(|e| ResponseMessage::Announce(e))
-            }
-            Action::Scrape => {
-                ScrapeResponse::try_from(response).map(|e| ResponseMessage::Scrape(e))
-            }
-            Action::Error => {
-                ErrorResponse::try_from(response).map(|e| ResponseMessage::Error(e.message))
-            }
-        }
+    #[derive(Debug, Display)]
+    #[display("{}", base.handle)]
+    struct InnerServer {
+        base: BaseServer,
+        addr: SocketAddr,
+        url: Url,
+        socket: UdpSocket,
+        connections: Mutex<HashMap<SocketAddr, u64>>,
     }
 
-    /// Read the next incoming message buffer from the socket
-    async fn read_from_socket(&self) -> Result<Vec<u8>> {
-        if let Some(session) = &self.session {
+    impl InnerServer {
+        /// Run the main loop of the UDP server.
+        async fn run(&self) {
+            loop {
+                let mut buffer = vec![0u8; PACKET_SIZE];
+                select! {
+                    _ = self.base.cancellation_token.cancelled() => break,
+                    Ok((len, addr)) = self.socket.recv_from(&mut buffer) => self.on_packet(&buffer[..len], addr).await,
+                }
+            }
+
+            debug!("Udp tracker server {} main loop ended", self);
+        }
+
+        async fn on_packet(&self, packet: &[u8], addr: SocketAddr) {
             trace!(
-                "Reading udp message from socket {:?}",
-                session.socket.peer_addr()?
+                "Udp tracker server {} received packet from {:?}",
+                self,
+                addr
             );
-            let mut buffer = vec![0; 16 * 1024];
-            let buffer_size = timeout(self.timeout.clone(), session.socket.recv(&mut buffer))
-                .await?
-                .map_err(|e| {
-                    self.metrics.timeouts.inc();
-                    TrackerError::from(e)
-                })?;
+            self.base.metrics.bytes_in.inc_by(packet.len() as u64);
+            let request = match RequestMessage::try_from(PayloadParser {
+                bytes: packet,
+                addr: &addr,
+            }) {
+                Ok(request) => request,
+                Err(e) => {
+                    debug!("Udp tracker server {} failed to parse packet, {}", self, e);
+                    return;
+                }
+            };
 
-            // make sure we shrink the buffer to the expected size before returning
-            self.metrics.bytes_in.inc_by(buffer_size as u64);
-            Ok(buffer.into_iter().take(buffer_size).collect())
-        } else {
-            Err(TrackerError::Connection(
-                ERROR_CONNECTION_NOT_INITIALIZED.to_string(),
-            ))
-        }
-    }
-
-    async fn do_announce(&self, announce: Announcement) -> Result<AnnounceEntryResponse> {
-        let info_hash = announce.info_hash.short_info_hash_bytes();
-        let event = announce.event;
-        let request = AnnounceRequest {
-            info_hash,
-            peer_id: announce.peer_id.value(),
-            downloaded: announce.bytes_completed,
-            left: announce.bytes_remaining,
-            corrupt: 0,
-            uploaded: 0,
-            event,
-            ip_address: 0,
-            key: 0,
-            num_want: 200,
-            redundant: 0,
-            listen_port: announce.peer_port,
-        };
-
-        trace!(
-            "Udp tracker {} is sending announce request {:?}",
-            self,
-            request
-        );
-        self.send(RequestMessage::Announce(request)).await?;
-        let response = self.read().await?;
-        match response {
-            ResponseMessage::Announce(response) => {
-                debug!(
-                    "Udp tracker {} received announce response {:?}",
-                    self, response
-                );
-                Ok(AnnounceEntryResponse {
-                    interval_seconds: response.interval as u64,
-                    leechers: response.leechers as u64,
-                    seeders: response.seeders as u64,
-                    peers: response.peers,
-                })
+            match request.payload {
+                RequestPayload::Connect => self.on_connect(&request, &addr).await,
+                RequestPayload::Announce(announce) => {
+                    self.on_announce(
+                        request.connection_id,
+                        request.transaction_id,
+                        announce,
+                        &addr,
+                    )
+                    .await
+                }
+                RequestPayload::Scrape(scrape) => {
+                    self.on_scrape(request.connection_id, request.transaction_id, scrape, &addr)
+                        .await
+                }
             }
-            ResponseMessage::Error(e) => Err(TrackerError::AnnounceError(e)),
-            _ => Err(TrackerError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "expected Response::Announce, but got {:?} instead",
-                    response
-                ),
-            ))),
         }
-    }
 
-    /// Try to send the given request message over the UDP socket to the tracker.
-    /// This will write the message, together with the relevant info, as bytes over the given socket.
-    ///
-    /// # Returns
-    ///
-    /// It returns an error when the message couldn't be sent over the given socket.
-    async fn send_message(
-        message: RequestMessage,
-        connection_id: u64,
-        transaction_id: u32,
-        socket: &UdpSocket,
-        metrics: &ConnectionMetrics,
-        cancellation_token: &CancellationToken,
-    ) -> Result<()> {
-        let mut buffer: Vec<u8> = Vec::new();
-        let action = message.action();
-        let message_bytes = TryInto::<Vec<u8>>::try_into(message)?;
+        async fn on_connect(&self, request: &RequestMessage, addr: &SocketAddr) {
+            let mut connections = self.connections.lock().await;
+            let connection_id = Self::generate_connection_id(&connections);
+            let connection_id = connections.entry(*addr).or_insert(connection_id);
 
-        // write the connection id
-        buffer.write_u64::<BigEndian>(connection_id)?;
-        // write the action
-        buffer.write_u32::<BigEndian>(action as u32)?;
-        // write the transaction id
-        buffer.write_u32::<BigEndian>(transaction_id)?;
-        // write the message
-        buffer.write_all(&message_bytes)?;
-
-        trace!(
-            "Udp tracker is sending a total of {} bytes to {:?}",
-            buffer.len(),
-            socket.peer_addr()?
-        );
-        metrics.bytes_out.inc_by(buffer.len() as u64);
-        select! {
-            _ = cancellation_token.cancelled() => Err(TrackerError::Connection("connection is being closed".to_string())),
-            response = socket.send(buffer.as_ref()) => {
-                let _ = response?;
-                Ok(())
-            },
+            trace!(
+                "Udp tracker server {} assigned connection ID {} to {}",
+                self,
+                connection_id,
+                addr
+            );
+            if let Err(e) = self
+                .send(
+                    ResponseMessage {
+                        action: Action::Connect,
+                        transaction_id: request.transaction_id,
+                        payload: ResponsePayload::Connection(*connection_id),
+                    },
+                    addr,
+                )
+                .await
+            {
+                debug!(
+                    "Udp tracker server {} failed to send connection response, {}",
+                    self, e
+                );
+            }
         }
-    }
 
-    fn generate_transaction_id() -> u32 {
-        // don't use 0, because that has special meaning (uninitialized)
-        rand::random::<u32>() + 1
+        async fn on_announce(
+            &self,
+            connection_id: u64,
+            transaction_id: u32,
+            announce: AnnounceRequest,
+            addr: &SocketAddr,
+        ) {
+            let send_result = match self.do_announce(&connection_id, announce, addr).await {
+                Ok(response) => {
+                    self.send(
+                        ResponseMessage {
+                            transaction_id,
+                            action: Action::Announce,
+                            payload: response,
+                        },
+                        addr,
+                    )
+                    .await
+                }
+                Err(e) => {
+                    debug!(
+                        "Udp tracker server {} received invalid announce message, {}",
+                        self, e
+                    );
+                    self.send(
+                        ResponseMessage {
+                            transaction_id,
+                            action: Action::Error,
+                            payload: ResponsePayload::Error(e.to_string()),
+                        },
+                        addr,
+                    )
+                    .await
+                }
+            };
+
+            if let Err(e) = send_result {
+                debug!("Udp tracker server {} failed to send response, {}", self, e);
+            }
+        }
+
+        async fn do_announce(
+            &self,
+            connection_id: &u64,
+            announce: AnnounceRequest,
+            addr: &SocketAddr,
+        ) -> Result<ResponsePayload> {
+            self.assert_connection(connection_id, addr).await?;
+            let info_hash = InfoHash::try_from_bytes(&announce.info_hash)
+                .map_err(|e| TrackerError::Parse(e.to_string()))?;
+            let peer_id = PeerId::try_from(announce.peer_id.as_slice())
+                .map_err(|e| TrackerError::Parse(e.to_string()))?;
+
+            let (tx, rx) = oneshot::channel();
+            self.base
+                .request(ServerRequest::Announcement {
+                    addr: *addr,
+                    request: Announcement {
+                        info_hash,
+                        peer_id,
+                        peer_port: announce.listen_port,
+                        event: announce.event,
+                        bytes_completed: announce.downloaded,
+                        bytes_remaining: announce.left,
+                    },
+                    response: tx,
+                })
+                .await;
+
+            let response = self.base.await_response(rx).await?;
+            Ok(ResponsePayload::Announce(AnnounceResponse {
+                interval: response.interval_seconds as u32,
+                leechers: response.leechers as u32,
+                seeders: response.seeders as u32,
+                peers: response
+                    .peers
+                    .into_iter()
+                    .filter(|e| e.is_ipv4() == addr.is_ipv4())
+                    .take(announce.num_want as usize)
+                    .collect(),
+            }))
+        }
+
+        async fn on_scrape(
+            &self,
+            connection_id: u64,
+            transaction_id: u32,
+            scrape: ScrapeRequest,
+            addr: &SocketAddr,
+        ) {
+            let send_result = match self.do_scrape(&connection_id, scrape, addr).await {
+                Ok(response) => {
+                    self.send(
+                        ResponseMessage {
+                            transaction_id,
+                            action: Action::Scrape,
+                            payload: response,
+                        },
+                        addr,
+                    )
+                    .await
+                }
+                Err(e) => {
+                    self.send(
+                        ResponseMessage {
+                            transaction_id,
+                            action: Action::Error,
+                            payload: ResponsePayload::Error(e.to_string()),
+                        },
+                        addr,
+                    )
+                    .await
+                }
+            };
+
+            if let Err(e) = send_result {
+                debug!("Udp tracker server {} failed to send response, {}", self, e);
+            }
+        }
+
+        async fn do_scrape(
+            &self,
+            connection_id: &u64,
+            scrape: ScrapeRequest,
+            addr: &SocketAddr,
+        ) -> Result<ResponsePayload> {
+            self.assert_connection(connection_id, addr).await?;
+
+            let (tx, rx) = oneshot::channel();
+            self.base
+                .request(ServerRequest::Scrape {
+                    request: scrape.hashes,
+                    response: tx,
+                })
+                .await;
+
+            let response = self.base.await_response(rx).await?;
+            Ok(ResponsePayload::Scrape(ScrapeResponse {
+                metrics: response
+                    .files
+                    .into_values()
+                    .map(|e| ScrapeFileMetrics {
+                        seeders: e.downloaded,
+                        completed: e.complete,
+                        leechers: e.incomplete,
+                    })
+                    .collect(),
+            }))
+        }
+
+        async fn assert_connection(&self, connection_id: &u64, addr: &SocketAddr) -> Result<()> {
+            let connections = self.connections.lock().await;
+            let known_connection_id = match connections.get(addr) {
+                None => {
+                    return Err(TrackerError::Connection(
+                        "connection not established".to_string(),
+                    ))
+                }
+                Some(id) => id,
+            };
+
+            if connection_id != known_connection_id {
+                return Err(TrackerError::Connection(
+                    "connection ID mismatch".to_string(),
+                ));
+            }
+
+            Ok(())
+        }
+
+        async fn send(&self, response: ResponseMessage, addr: &SocketAddr) -> Result<()> {
+            let bytes: Vec<u8> = response.try_into()?;
+            let len = self.socket.send_to(bytes.as_slice(), addr).await?;
+            trace!("Udp tracker server {} sent {} bytes to {}", self, len, addr);
+            Ok(())
+        }
+
+        fn generate_connection_id(connections: &HashMap<SocketAddr, u64>) -> u64 {
+            let mut rng = rng();
+            loop {
+                let connection_id = rng.random::<u64>() + 1;
+                if !connections.values().any(|&id| id == connection_id)
+                    && connection_id != PROTOCOL_ID
+                {
+                    return connection_id;
+                }
+            }
+        }
     }
 }
 
@@ -410,6 +705,120 @@ struct UdpConnectionSession {
     socket: UdpSocket,
 }
 
+#[derive(Debug)]
+struct RequestMessage {
+    connection_id: u64,
+    transaction_id: u32,
+    action: Action,
+    payload: RequestPayload,
+}
+
+impl TryFrom<RequestMessage> for Vec<u8> {
+    type Error = TrackerError;
+
+    fn try_from(message: RequestMessage) -> Result<Self> {
+        let mut buffer: Vec<u8> = Vec::with_capacity(64);
+
+        // write the headers
+        buffer.write_u64::<BigEndian>(message.connection_id)?;
+        buffer.write_u32::<BigEndian>(message.action as u32)?;
+        buffer.write_u32::<BigEndian>(message.transaction_id)?;
+
+        // write the payload
+        let payload: Vec<u8> = message.payload.try_into()?;
+        buffer.write_all(&payload)?;
+
+        Ok(buffer)
+    }
+}
+
+impl<'a> TryFrom<PayloadParser<'a>> for RequestMessage {
+    type Error = TrackerError;
+
+    fn try_from(parser: PayloadParser) -> Result<Self> {
+        if parser.bytes.len() < 16 {
+            return Err(TrackerError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Packet too short",
+            )));
+        }
+
+        let mut cursor = Cursor::new(parser.bytes);
+        let connection_id = cursor.read_u64::<BigEndian>()?;
+        let action = cursor.read_u32::<BigEndian>()?.try_into()?;
+        let transaction_id = cursor.read_u32::<BigEndian>()?;
+        let payload = Payload::try_from(cursor, &action, parser.addr)?;
+
+        Ok(Self {
+            connection_id,
+            action,
+            transaction_id,
+            payload,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ResponseMessage {
+    transaction_id: u32,
+    action: Action,
+    payload: ResponsePayload,
+}
+
+impl TryFrom<ResponseMessage> for Vec<u8> {
+    type Error = TrackerError;
+
+    fn try_from(message: ResponseMessage) -> Result<Self> {
+        let mut buffer: Vec<u8> = Vec::with_capacity(64);
+
+        // write the headers
+        buffer.write_u32::<BigEndian>(message.action as u32)?;
+        buffer.write_u32::<BigEndian>(message.transaction_id)?;
+
+        // write the payload
+        let payload: Vec<u8> = message.payload.try_into()?;
+        buffer.write_all(&payload)?;
+
+        Ok(buffer)
+    }
+}
+
+impl<'a> TryFrom<PayloadParser<'a>> for ResponseMessage {
+    type Error = TrackerError;
+
+    fn try_from(parser: PayloadParser) -> Result<Self> {
+        if parser.bytes.len() < 8 {
+            return Err(TrackerError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Packet too short",
+            )));
+        }
+
+        let mut cursor = Cursor::new(parser.bytes);
+        let action = cursor.read_u32::<BigEndian>()?.try_into()?;
+        let transaction_id = cursor.read_u32::<BigEndian>()?;
+        let payload = Payload::try_from(cursor, &action, parser.addr)?;
+
+        Ok(Self {
+            action,
+            transaction_id,
+            payload,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct PayloadParser<'a> {
+    bytes: &'a [u8],
+    addr: &'a SocketAddr,
+}
+
+/// The message payload of a UDP tracker message.
+trait Payload: Debug + TryInto<Vec<u8>, Error = TrackerError> {
+    /// Converse the given cursor into a payload based on the message action.
+    fn try_from(cursor: Cursor<&[u8]>, action: &Action, addr: &SocketAddr) -> Result<Self>;
+}
+
 #[repr(u32)]
 #[derive(Debug, Display, Clone)]
 enum Action {
@@ -441,85 +850,91 @@ impl TryFrom<u32> for Action {
 
 /// The UDP request message to send to a tracker.
 #[derive(Debug)]
-enum RequestMessage {
+enum RequestPayload {
     Connect,
     Announce(AnnounceRequest),
     Scrape(ScrapeRequest),
 }
 
-impl RequestMessage {
-    /// Get the related action to this request message.
-    /// It returns the relevant action of this request message.
+impl RequestPayload {
+    /// Returns the action of the request.
     fn action(&self) -> Action {
         match self {
-            RequestMessage::Connect => Action::Connect,
-            RequestMessage::Announce(_) => Action::Announce,
-            RequestMessage::Scrape(_) => Action::Scrape,
+            RequestPayload::Connect => Action::Connect,
+            RequestPayload::Announce(_) => Action::Announce,
+            RequestPayload::Scrape(_) => Action::Scrape,
         }
     }
 }
 
-impl TryInto<Vec<u8>> for RequestMessage {
+impl TryFrom<RequestPayload> for Vec<u8> {
     type Error = TrackerError;
 
-    fn try_into(self) -> Result<Vec<u8>> {
-        let mut buffer = Vec::new();
-
-        match self {
-            RequestMessage::Announce(e) => {
-                buffer.write_all(e.info_hash.as_ref())?;
-                buffer.write_all(e.peer_id.as_ref())?;
-                buffer.write_u64::<BigEndian>(e.downloaded)?;
-                buffer.write_u64::<BigEndian>(e.left)?;
-                buffer.write_u64::<BigEndian>(e.uploaded)?;
-                buffer.write_u32::<BigEndian>(e.event as u32)?;
-                buffer.write_u32::<BigEndian>(e.ip_address)?;
-                buffer.write_u32::<BigEndian>(e.key)?;
-                buffer.write_u32::<BigEndian>(e.num_want)?;
-                buffer.write_u16::<BigEndian>(e.listen_port)?;
-            }
-            RequestMessage::Scrape(request) => {
-                let bytes = request
-                    .hashes
-                    .into_iter()
-                    .map(|e| e.short_info_hash_bytes())
-                    .map(|e| e.to_vec())
-                    .concat();
-
-                buffer.write_all(bytes.as_slice())?;
-            }
-            _ => {}
+    fn try_from(message: RequestPayload) -> Result<Self> {
+        match message {
+            RequestPayload::Connect => Ok(vec![]),
+            RequestPayload::Announce(announce) => announce.try_into(),
+            RequestPayload::Scrape(request) => request.try_into(),
         }
+    }
+}
 
-        Ok(buffer)
+impl Payload for RequestPayload {
+    fn try_from(cursor: Cursor<&[u8]>, action: &Action, _: &SocketAddr) -> Result<Self> {
+        match action {
+            Action::Connect => Ok(RequestPayload::Connect),
+            Action::Announce => AnnounceRequest::try_from(cursor).map(RequestPayload::Announce),
+            Action::Scrape => ScrapeRequest::try_from(cursor).map(RequestPayload::Scrape),
+            _ => Err(TrackerError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid action for request message",
+            ))),
+        }
     }
 }
 
 /// The UDP response message received from a tracker.
 #[derive(Debug)]
-enum ResponseMessage {
-    Connection(ConnectResponse),
+enum ResponsePayload {
+    Connection(u64),
     Announce(AnnounceResponse),
     Scrape(ScrapeResponse),
     Error(String),
 }
 
-#[derive(Debug)]
-struct ConnectResponse {
-    pub transaction_id: u32,
-    pub connection_id: u64,
-}
-
-impl TryFrom<UdpResponse> for ConnectResponse {
+impl TryFrom<ResponsePayload> for Vec<u8> {
     type Error = TrackerError;
 
-    fn try_from(mut response: UdpResponse) -> Result<Self> {
-        let connection_id = response.cursor.read_u64::<BigEndian>()?;
+    fn try_from(value: ResponsePayload) -> Result<Self> {
+        match value {
+            ResponsePayload::Connection(connection_id) => {
+                let mut buffer = Vec::new();
+                buffer.write_u64::<BigEndian>(connection_id)?;
+                Ok(buffer)
+            }
+            ResponsePayload::Announce(announce) => announce.try_into(),
+            ResponsePayload::Scrape(scrape) => scrape.try_into(),
+            ResponsePayload::Error(message) => Ok(message.as_bytes().to_vec()),
+        }
+    }
+}
 
-        Ok(Self {
-            transaction_id: response.transaction_id,
-            connection_id,
-        })
+impl Payload for ResponsePayload {
+    fn try_from(mut cursor: Cursor<&[u8]>, action: &Action, addr: &SocketAddr) -> Result<Self> {
+        match action {
+            Action::Connect => {
+                let connection_id = cursor.read_u64::<BigEndian>()?;
+                Ok(ResponsePayload::Connection(connection_id))
+            }
+            Action::Announce => AnnounceResponse::try_from(AnnounceResponseParser { cursor, addr })
+                .map(ResponsePayload::Announce),
+            Action::Scrape => ScrapeResponse::try_from(cursor).map(ResponsePayload::Scrape),
+            Action::Error => {
+                let mut message = String::new();
+                cursor.read_to_string(&mut message)?;
+                Ok(ResponsePayload::Error(message))
+            }
+        }
     }
 }
 
@@ -530,13 +945,68 @@ struct AnnounceRequest {
     pub downloaded: u64,
     pub uploaded: u64,
     pub left: u64,
-    pub corrupt: i64,
-    pub redundant: i64,
     pub event: AnnounceEvent,
     pub ip_address: u32,
     pub key: u32,
     pub num_want: u32,
     pub listen_port: u16,
+}
+
+impl TryFrom<AnnounceRequest> for Vec<u8> {
+    type Error = TrackerError;
+
+    fn try_from(announce: AnnounceRequest) -> Result<Self> {
+        let mut buffer = Vec::new();
+        buffer.write_all(announce.info_hash.as_ref())?;
+        buffer.write_all(announce.peer_id.as_ref())?;
+        buffer.write_u64::<BigEndian>(announce.downloaded)?;
+        buffer.write_u64::<BigEndian>(announce.left)?;
+        buffer.write_u64::<BigEndian>(announce.uploaded)?;
+        buffer.write_u32::<BigEndian>(announce.event as u32)?;
+        buffer.write_u32::<BigEndian>(announce.ip_address)?;
+        buffer.write_u32::<BigEndian>(announce.key)?;
+        buffer.write_u32::<BigEndian>(announce.num_want)?;
+        buffer.write_u16::<BigEndian>(announce.listen_port)?;
+        Ok(buffer)
+    }
+}
+
+impl TryFrom<Cursor<&[u8]>> for AnnounceRequest {
+    type Error = TrackerError;
+
+    fn try_from(mut cursor: Cursor<&[u8]>) -> Result<Self> {
+        let mut info_hash = [0u8; 20];
+        cursor.read_exact(&mut info_hash)?;
+        let mut peer_id = [0u8; 20];
+        cursor.read_exact(&mut peer_id)?;
+        let downloaded = cursor.read_u64::<BigEndian>()?;
+        let left = cursor.read_u64::<BigEndian>()?;
+        let uploaded = cursor.read_u64::<BigEndian>()?;
+        let event_raw = cursor.read_u32::<BigEndian>()?;
+        let event = (event_raw as u8).try_into()?;
+        let ip_address = cursor.read_u32::<BigEndian>()?;
+        let key = cursor.read_u32::<BigEndian>()?;
+        let num_want = cursor.read_u32::<BigEndian>()?;
+        let listen_port = cursor.read_u16::<BigEndian>()?;
+
+        Ok(Self {
+            info_hash,
+            peer_id,
+            downloaded,
+            uploaded,
+            left,
+            event,
+            ip_address,
+            key,
+            num_want,
+            listen_port,
+        })
+    }
+}
+
+struct AnnounceResponseParser<'a> {
+    cursor: Cursor<&'a [u8]>,
+    addr: &'a SocketAddr,
 }
 
 #[derive(Debug)]
@@ -551,23 +1021,65 @@ struct AnnounceResponse {
     pub peers: Vec<SocketAddr>,
 }
 
-impl TryFrom<UdpResponse> for AnnounceResponse {
+impl TryFrom<AnnounceResponse> for Vec<u8> {
     type Error = TrackerError;
 
-    fn try_from(mut response: UdpResponse) -> Result<Self> {
-        let interval = response.cursor.read_u32::<BigEndian>()?;
-        let leechers = response.cursor.read_u32::<BigEndian>()?;
-        let seeders = response.cursor.read_u32::<BigEndian>()?;
+    fn try_from(value: AnnounceResponse) -> Result<Self> {
+        let mut buffer = Vec::new();
+        buffer.write_u32::<BigEndian>(value.interval)?;
+        buffer.write_u32::<BigEndian>(value.leechers)?;
+        buffer.write_u32::<BigEndian>(value.seeders)?;
+
+        for peer in value.peers {
+            match peer.ip() {
+                IpAddr::V4(ip) => buffer.write_u32::<BigEndian>(ip.to_bits())?,
+                IpAddr::V6(ip) => buffer.write_u128::<BigEndian>(ip.to_bits())?,
+            }
+            buffer.write_u16::<BigEndian>(peer.port())?;
+        }
+
+        Ok(buffer)
+    }
+}
+
+impl<'a> TryFrom<AnnounceResponseParser<'a>> for AnnounceResponse {
+    type Error = TrackerError;
+
+    fn try_from(parser: AnnounceResponseParser) -> Result<Self> {
+        let mut cursor = parser.cursor;
+        let addr = parser.addr;
+        let interval = cursor.read_u32::<BigEndian>()?;
+        let leechers = cursor.read_u32::<BigEndian>()?;
+        let seeders = cursor.read_u32::<BigEndian>()?;
 
         let mut addrs = Vec::new();
+        let remaining_bytes = cursor.remaining();
+        match addr.ip() {
+            IpAddr::V4(_) => {
+                if remaining_bytes % 6 != 0 {
+                    return Err(TrackerError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid peers len",
+                    )));
+                }
 
-        // we currently only support ipv4
-        loop {
-            if let Ok(ip) = response.cursor.read_u32::<BigEndian>() {
-                let port = response.cursor.read_u16::<BigEndian>()?;
-                addrs.push(SocketAddrV4::new(Ipv4Addr::from(ip), port).into());
-            } else {
-                break;
+                while let Ok(ip) = cursor.read_u32::<BigEndian>() {
+                    let port = cursor.read_u16::<BigEndian>()?;
+                    addrs.push(SocketAddr::from((Ipv4Addr::from(ip), port)));
+                }
+            }
+            IpAddr::V6(_) => {
+                if remaining_bytes % 18 != 0 {
+                    return Err(TrackerError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid peers len",
+                    )));
+                }
+
+                while let Ok(ip) = cursor.read_u128::<BigEndian>() {
+                    let port = cursor.read_u16::<BigEndian>()?;
+                    addrs.push(SocketAddr::from((Ipv6Addr::from(ip), port)));
+                }
             }
         }
 
@@ -581,33 +1093,40 @@ impl TryFrom<UdpResponse> for AnnounceResponse {
 }
 
 #[derive(Debug)]
-struct ErrorResponse {
-    /// The error message returned by the tracker
-    pub message: String,
+struct ScrapeRequest {
+    hashes: Vec<InfoHash>,
 }
 
-impl TryFrom<UdpResponse> for ErrorResponse {
+impl TryFrom<ScrapeRequest> for Vec<u8> {
     type Error = TrackerError;
 
-    fn try_from(mut response: UdpResponse) -> Result<Self> {
-        let mut message = String::new();
-
-        // try to read the error message
-        response.cursor.read_to_string(&mut message)?;
-
-        Ok(Self { message })
+    fn try_from(value: ScrapeRequest) -> Result<Self> {
+        Ok(value
+            .hashes
+            .into_iter()
+            .map(|e| e.short_info_hash_bytes())
+            .map(|e| e.to_vec())
+            .concat())
     }
 }
 
-#[derive(Debug)]
-struct UdpResponse {
-    pub transaction_id: u32,
-    pub cursor: Cursor<Vec<u8>>,
-}
+impl TryFrom<Cursor<&[u8]>> for ScrapeRequest {
+    type Error = TrackerError;
 
-#[derive(Debug)]
-struct ScrapeRequest {
-    hashes: Vec<InfoHash>,
+    fn try_from(mut cursor: Cursor<&[u8]>) -> Result<Self> {
+        let mut hashes = Vec::new();
+
+        while cursor.has_remaining() {
+            let mut info_hash = [0u8; 20];
+            cursor.read_exact(&mut info_hash)?;
+            hashes.push(
+                InfoHash::try_from_bytes(&info_hash)
+                    .map_err(|e| TrackerError::Parse(e.to_string()))?,
+            );
+        }
+
+        Ok(Self { hashes })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -615,16 +1134,30 @@ struct ScrapeResponse {
     metrics: Vec<ScrapeFileMetrics>,
 }
 
-impl TryFrom<UdpResponse> for ScrapeResponse {
+impl TryFrom<ScrapeResponse> for Vec<u8> {
     type Error = TrackerError;
 
-    fn try_from(mut response: UdpResponse) -> Result<Self> {
+    fn try_from(value: ScrapeResponse) -> Result<Self> {
+        let mut buffer = Vec::new();
+        for metric in value.metrics {
+            buffer.write_u32::<BigEndian>(metric.seeders)?;
+            buffer.write_u32::<BigEndian>(metric.completed)?;
+            buffer.write_u32::<BigEndian>(metric.leechers)?;
+        }
+        Ok(buffer)
+    }
+}
+
+impl TryFrom<Cursor<&[u8]>> for ScrapeResponse {
+    type Error = TrackerError;
+
+    fn try_from(mut cursor: Cursor<&[u8]>) -> Result<Self> {
         let mut scrape_response = ScrapeResponse::default();
 
-        while response.cursor.has_remaining() {
-            let seeders = response.cursor.read_u32::<BigEndian>()?;
-            let completed = response.cursor.read_u32::<BigEndian>()?;
-            let leechers = response.cursor.read_u32::<BigEndian>()?;
+        while cursor.has_remaining() {
+            let seeders = cursor.read_u32::<BigEndian>()?;
+            let completed = cursor.read_u32::<BigEndian>()?;
+            let leechers = cursor.read_u32::<BigEndian>()?;
 
             scrape_response.metrics.push(ScrapeFileMetrics {
                 seeders,
@@ -648,87 +1181,273 @@ struct ScrapeFileMetrics {
 mod tests {
     use super::*;
     use crate::peer::PeerId;
-    use crate::TorrentMetadata;
-    use tokio::net::lookup_host;
+    use crate::torrent_metrics;
+    use std::str::FromStr;
 
-    #[test]
-    fn test_generate_transaction_id() {
-        let result = UdpConnection::generate_transaction_id();
+    mod client {
+        use super::*;
 
-        assert_ne!(
-            0, result,
-            "expected the transaction id to be greater than 0"
-        );
+        #[test]
+        fn test_generate_transaction_id() {
+            let result = UdpConnection::generate_transaction_id();
+
+            assert_ne!(
+                0, result,
+                "expected the transaction id to be greater than 0"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_udp_connect() {
+            init_logger!();
+            let (client, _server) = udp_connection_pair!();
+
+            assert_ne!(
+                PROTOCOL_ID, client.session.connection_id,
+                "expected the connection ID to have been updated"
+            );
+        }
     }
 
-    #[tokio::test]
-    async fn test_udp_connection_next_addr() {
-        init_logger!();
-        let tracker_handle = TrackerHandle::new();
-        let socket_addr = (Ipv4Addr::UNSPECIFIED, 1599).try_into().unwrap();
-        let connection = UdpConnection::new(tracker_handle, &[socket_addr], Duration::from_secs(1));
+    mod server {
+        use super::*;
+        use crate::tracker::{ServerRequest, TrackerListener};
+        use rand::{rng, Rng};
+        use std::net::Ipv6Addr;
 
-        let result = connection.next_addr().await;
-        assert_eq!(Some(&socket_addr), result);
+        #[tokio::test]
+        async fn test_invalid_connection_id() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let (mut client, _server) = udp_connection_pair!();
 
-        let result = connection.next_addr().await;
-        assert_eq!(None, result);
+            // modify the client connection id
+            client.session.connection_id = rng().next_u64();
+
+            // make an announcement to the server
+            let result = client
+                .announce(Announcement {
+                    info_hash,
+                    peer_id: PeerId::new(),
+                    peer_port: 6881,
+                    event: AnnounceEvent::Started,
+                    bytes_completed: 0,
+                    bytes_remaining: 0,
+                })
+                .await;
+            match result {
+                Ok(_) => assert!(false, "expected the request to be rejected"),
+                Err(e) => {
+                    assert!(
+                        e.to_string().contains("connection ID mismatch"),
+                        "expected request to be rejected due to invalid connection id"
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn test_announce_filter_ip_family() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let (client, server) = udp_connection_pair!();
+
+            tokio::spawn(async move {
+                while let Some(request) = server.accept().await {
+                    match request {
+                        ServerRequest::Announcement { response, .. } => {
+                            response
+                                .send(AnnounceEntryResponse {
+                                    interval_seconds: 90,
+                                    leechers: 2,
+                                    seeders: 0,
+                                    peers: vec![
+                                        SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)),
+                                        SocketAddr::from((Ipv6Addr::LOCALHOST, 9968)),
+                                    ],
+                                })
+                                .unwrap();
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            // send an announcement
+            let result = client
+                .announce(Announcement {
+                    info_hash,
+                    peer_id: PeerId::new(),
+                    peer_port: 6881,
+                    event: AnnounceEvent::Started,
+                    bytes_completed: 0,
+                    bytes_remaining: 0,
+                })
+                .await
+                .expect("expected the announcement to succeed");
+            assert_eq!(2, result.leechers, "expected 2 leechers");
+            assert_eq!(
+                1,
+                result.peers.len(),
+                "expected the peers to have been filtered on IP family"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_close() {
+            init_logger!();
+            let info_hash =
+                InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+            let (client, server) = udp_connection_pair!(Duration::from_millis(250));
+
+            // close the server
+            server.close();
+
+            // try to scrape the server
+            let result = client.scrape(&[info_hash]).await;
+            match result {
+                Ok(_) => assert!(false, "expected the request to be rejected"),
+                Err(TrackerError::Io(e)) => {
+                    assert_eq!(io::ErrorKind::TimedOut, e.kind());
+                }
+                Err(_) => assert!(
+                    false,
+                    "expected Err(TrackerError::Io), but got {:?}",
+                    result
+                ),
+            }
+        }
     }
 
     #[tokio::test]
     async fn test_udp_tracker_announce() {
         init_logger!();
-        let torrent_info = metadata!("debian-udp.torrent");
-        let announce = Announcement {
-            info_hash: torrent_info.info_hash.clone(),
-            peer_id: PeerId::new(),
-            peer_port: 6881,
-            event: AnnounceEvent::Started,
-            bytes_completed: 0,
-            bytes_remaining: u64::MAX,
-        };
-        let mut connection = create_connection(&torrent_info).await;
+        let info_hash =
+            InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+        let (handle, client, server) = udp_tracker_pair!();
 
-        connection
-            .start()
+        // add a new peer to the server
+        server
+            .add_peer(
+                info_hash.clone(),
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 9900)),
+                PeerId::new(),
+                9900,
+                false,
+            )
+            .await;
+
+        // register the torrent in the client
+        client
+            .add_torrent(
+                PeerId::new(),
+                6881,
+                info_hash.clone(),
+                torrent_metrics::Metrics::default(),
+            )
             .await
-            .expect("expected the connection to start");
+            .expect("expected the torrent to be added");
 
-        let result = connection
-            .announce(announce)
+        // announce the torrent
+        let result = client
+            .announce(handle, &info_hash, AnnounceEvent::Started)
             .await
             .expect("expected the announce to succeed");
-        assert_ne!(
-            0, result.interval_seconds,
-            "expected the interval to be greater than 0"
+        assert_eq!(
+            1, result.total_leechers,
+            "expected the announce to have 1 leecher"
         );
-        assert_ne!(
-            0,
+        assert_eq!(
+            0, result.total_seeders,
+            "expected the announce to have 1 seeder"
+        );
+        assert_eq!(
+            1,
             result.peers.len(),
-            "expected the number of peers to be greater than 0"
+            "expected the announce to have 1 peer"
         );
     }
 
     #[tokio::test]
     async fn test_udp_tracker_scrape() {
         init_logger!();
-        let torrent_info = metadata!("debian-udp.torrent");
-        let mut connection = create_connection(&torrent_info).await;
+        let info_hash =
+            InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+        let (_, client, server) = udp_tracker_pair!();
 
-        connection
-            .start()
+        // add peers to the server
+        server
+            .add_peer(
+                info_hash.clone(),
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 9968)),
+                PeerId::new(),
+                9968,
+                true,
+            )
+            .await;
+        server
+            .add_peer(
+                info_hash.clone(),
+                SocketAddr::from(([127, 0, 0, 2], 11990)),
+                PeerId::new(),
+                11990,
+                false,
+            )
+            .await;
+
+        // register the torrent in the client
+        client
+            .add_torrent(
+                PeerId::new(),
+                6881,
+                info_hash.clone(),
+                torrent_metrics::Metrics::default(),
+            )
             .await
-            .expect("expected the connection to start");
+            .expect("expected the torrent to be added");
 
-        let result = connection
-            .scrape(&vec![torrent_info.info_hash])
+        // scrape the info hash
+        let result = client
+            .scrape(&info_hash)
             .await
             .expect("expected the scrape to succeed");
-        assert_eq!(
-            1,
-            result.files.len(),
-            "expected the scrape metrics to match the torrent info"
-        )
+        assert!(
+            result.files.get(&info_hash).is_some(),
+            "expected info hash {} to have been present in the scrape result",
+            info_hash
+        );
+    }
+
+    #[tokio::test]
+    async fn test_udp_tracker_scrape_no_result() {
+        init_logger!();
+        let info_hash =
+            InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
+        let (_, client, _server) = udp_tracker_pair!();
+
+        // register the torrent in the client
+        client
+            .add_torrent(
+                PeerId::new(),
+                6881,
+                info_hash.clone(),
+                torrent_metrics::Metrics::default(),
+            )
+            .await
+            .expect("expected the torrent to be added");
+
+        // scrape the info hash
+        let result = client
+            .scrape(&info_hash)
+            .await
+            .expect("expected the scrape to succeed");
+        assert!(
+            result.files.get(&info_hash).is_some(),
+            "expected info hash {} to have been present in the scrape result",
+            info_hash
+        );
     }
 
     #[tokio::test]
@@ -741,29 +1460,5 @@ mod tests {
 
         let result = manager.next_addr().await;
         assert_eq!(None, result, "expected no address to be returned");
-    }
-
-    async fn create_connection(metadata: &TorrentMetadata) -> UdpConnection {
-        let tracker_handle = TrackerHandle::new();
-        let addrs = get_tracker_addresses(&metadata).await;
-
-        UdpConnection::new(tracker_handle, &addrs, Duration::from_secs(1))
-    }
-
-    /// Get the unordered tracker addresses of the given torrent info.
-    async fn get_tracker_addresses(torrent_info: &TorrentMetadata) -> Vec<SocketAddr> {
-        let mut addresses = Vec::new();
-        for url in torrent_info.trackers().into_iter() {
-            let host = url.host_str().unwrap();
-            let port = url.port().unwrap_or(80);
-
-            if let Ok(e) = lookup_host((host, port))
-                .await
-                .map(|e| e.collect::<Vec<SocketAddr>>())
-            {
-                addresses.extend(e);
-            }
-        }
-        addresses
     }
 }

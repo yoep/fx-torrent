@@ -3731,7 +3731,11 @@ mod tests {
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
-                TorrentConfig::builder().build()
+                TorrentConfig::builder().build(),
+                DEFAULT_OPERATIONS(),
+                vec![],
+                |_| Box::new(MemoryStorage::new()),
+                None
             );
 
             // wait for the pieces to have been create
@@ -3864,7 +3868,11 @@ mod tests {
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
-                TorrentConfig::builder().build()
+                TorrentConfig::builder().build(),
+                DEFAULT_OPERATIONS(),
+                vec![],
+                |_| { Box::new(MemoryStorage::new()) },
+                None
             );
 
             // wait for the pieces to have been create

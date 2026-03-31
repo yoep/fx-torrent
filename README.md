@@ -78,6 +78,7 @@ It uses [Ratatui](https://ratatui.rs/) as the terminal UI library.
 - [x] [BEP4](https://www.bittorrent.org/beps/bep_0004.html) - Assigned Numbers
 - [x] [BEP5](https://www.bittorrent.org/beps/bep_0005.html) - DHT Protocol
 - [x] [BEP6](https://www.bittorrent.org/beps/bep_0006.html) - Fast Extension
+- [x] [BEP7](https://www.bittorrent.org/beps/bep_0007.html) - IPv6 Tracker Extension
 - [x] [BEP9](https://www.bittorrent.org/beps/bep_0009.html) - Extension for Peers to Send Metadata Files
 - [x] [BEP10](https://www.bittorrent.org/beps/bep_0010.html) - Extension Protocol
 - [x] [BEP11](https://www.bittorrent.org/beps/bep_0011.html) - Peer Exchange (PEX)

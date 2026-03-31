@@ -1018,7 +1018,7 @@ impl InnerSession {
         }
         if config.enable_utp_peer {
             discoveries.push(Box::new(
-                UtpPeerDiscovery::new_with_port(port)
+                UtpPeerDiscovery::with_port(port)
                     .await
                     .map_err(|e| TorrentError::Peer(e))?,
             ));
@@ -1324,7 +1324,6 @@ pub mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let dht = DhtTracker::builder().build().await.unwrap();
             let session = FxTorrentSession::builder()
                 .config(
                     SessionConfig::builder()
