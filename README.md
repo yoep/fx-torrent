@@ -3,7 +3,7 @@
 ![Build](https://github.com/yoep/fx-torrent/workflows/Build/badge.svg)
 [![Crates](https://img.shields.io/crates/v/fx-torrent)](https://crates.io/crates/fx-torrent)
 [![License: Apache-2.0](https://img.shields.io/github/license/yoep/fx-torrent)](./LICENSE)
-[![Documentation](https://docs.rs/fx-torrent/badge.svg)](https://docs.rs/fx-torrent/0.7.0/fx_torrent/)
+[![Documentation](https://docs.rs/fx-torrent/badge.svg)](https://docs.rs/fx-torrent/0.8.0/fx_torrent/)
 [![codecov](https://codecov.io/gh/yoep/fx-torrent/graph/badge.svg?token=CDT6SG6YEL)](https://codecov.io/gh/yoep/fx-torrent)
 
 FX-Torrent is the most complete BitTorrent implementation fully written in Rust, which supports both Linux, MacOS, and Windows.
