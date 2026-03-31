@@ -1534,7 +1534,7 @@ impl TrackerContext {
                 payload_len,
                 addr,
             } => {
-                warn!(
+                debug!(
                     "{} failed to read incoming message (len {}) from {}, {}",
                     self, payload_len, addr, error
                 );
