@@ -208,22 +208,7 @@ macro_rules! assert_timeout {
 /// A macro wrapper for [`tokio::time::timeout`] that awaits a future with a timeout duration.
 macro_rules! timeout {
     ($future:expr, $duration:expr) => {{
-        use std::io;
-        use std::time::Duration;
-        use tokio::time::timeout;
-
-        let future = $future;
-        let duration: Duration = $duration;
-
-        timeout(duration, future)
-            .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("after {}.{:03}s", duration.as_secs(), duration.as_millis()),
-                )
-            })
-            .expect("operation timed-out")
+        timeout!($future, $duration, "operation timed-out")
     }};
     ($future:expr, $duration:expr, $message:expr) => {{
         use std::io;
