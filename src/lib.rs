@@ -322,7 +322,7 @@ pub mod tests {
             let tcp_discovery = TcpPeerDiscovery::new()
                 .await
                 .expect("expected a new tcp peer discovery");
-            let utp_discovery = UtpPeerDiscovery::new_with_port(tcp_discovery.port())
+            let utp_discovery = UtpPeerDiscovery::with_port(tcp_discovery.port())
                 .await
                 .expect("expected a new utp peer discovery");
             let discoveries: Vec<Box<dyn PeerDiscovery>> =

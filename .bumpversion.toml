@@ -1,5 +1,5 @@
 [tool.bumpversion]
-current_version = "0.7.0"
+current_version = "0.8.0"
 commit = true
 tag = true
 tag_name = "v{new_version}"
@@ -8,11 +8,6 @@ tag_name = "v{new_version}"
 filename = "Cargo.toml"
 search = "version = \"{current_version}\""
 replace = "version = \"{new_version}\""
-
-[[tool.bumpversion.files]]
-filename = "README.md"
-search = "tag/v{current_version}"
-replace = "tag/v{new_version}"
 
 [[tool.bumpversion.files]]
 filename = "README.md"

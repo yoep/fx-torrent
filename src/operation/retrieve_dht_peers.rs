@@ -15,6 +15,7 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 /// Retrieve potential peer addresses for the torrent through the DHT network.
 #[derive(Debug)]
 pub struct TorrentDhtPeersOperation {
+    initialized: bool,
     last_executed: Option<Instant>,
     active_tasks: Vec<JoinHandle<()>>,
     retrieve_timeout: Duration,
@@ -33,6 +34,7 @@ impl TorrentDhtPeersOperation {
     /// Each queried node will be limited to `query_timeout`.
     pub fn new_with_timeout(query_timeout: Duration) -> Self {
         Self {
+            initialized: false,
             last_executed: Default::default(),
             active_tasks: Default::default(),
             retrieve_timeout: query_timeout,
@@ -60,6 +62,26 @@ impl TorrentDhtPeersOperation {
         } else {
             elapsed >= RETRIEVE_SHORT_INTERVAL
         }
+    }
+
+    async fn initialize(&mut self, context: &mut TorrentContext) {
+        if self.initialized {
+            return;
+        }
+
+        self.initialized = true;
+        let dht = match context.dht() {
+            None => return,
+            Some(dht) => dht,
+        };
+
+        let peers = dht.peers_for(&context.metadata().info_hash).await;
+        debug!(
+            "Torrent {} discovered initial {} DHT peers",
+            context,
+            peers.len()
+        );
+        context.add_peer_addresses(peers.into_iter().map(|e| e.addr).collect());
     }
 
     /// Retrieve peers from the DHT network for the torrent context.
@@ -108,6 +130,7 @@ impl TorrentOperation for TorrentDhtPeersOperation {
         context: &mut TorrentContext,
         _: &[Arc<dyn PeerDiscovery>],
     ) -> TorrentOperationResult {
+        self.initialize(context).await;
         self.cleanup_finished_tasks();
 
         if self.should_retrieve_peers(context).await {
@@ -157,6 +180,10 @@ mod tests {
         // execute the operation
         let result = operation.execute(&mut context, vec![].as_slice()).await;
         assert_eq!(TorrentOperationResult::Continue, result);
+        assert_eq!(
+            true, operation.initialized,
+            "expected the operation to have been initialized"
+        );
 
         // check if the last_executed has been set
         let result = &operation.last_executed;

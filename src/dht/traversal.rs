@@ -4,7 +4,7 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use itertools::Itertools;
 use log::trace;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -13,7 +13,7 @@ use tokio::sync::Semaphore;
 #[derive(Debug)]
 pub(crate) struct TraversalAlgorithm {
     queried: HashSet<SocketAddr>,
-    unqueried: VecDeque<PendingQuery>,
+    unqueried: Vec<PendingQuery>,
     sender: ChannelSender<TrackerCommand>,
     permits: Arc<Semaphore>,
     limit: usize,
@@ -45,14 +45,12 @@ impl TraversalAlgorithm {
     }
 
     /// Execute the traversal algorithm for the given target node ID.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn run(&mut self, target_id: NodeId, context: &mut TrackerContext) {
-        if self.permits.available_permits() == 0 {
-            return;
-        }
-        if self.unqueried.is_empty() {
-            return;
-        }
-        if self.queried.len() >= self.limit {
+        if self.queried.len() >= self.limit
+            || self.permits.available_permits() == 0
+            || self.unqueried.is_empty()
+        {
             return;
         }
 
@@ -63,45 +61,58 @@ impl TraversalAlgorithm {
     /// Add the given node details to the traversal for querying.
     /// The node will be ignored if it has been queried before.
     pub fn add_node(&mut self, id: Option<NodeId>, addr: SocketAddr) {
-        if self.queried.contains(&addr) {
-            trace!("DHT traversal ignoring node, {} already queried", addr);
+        if self.queried.contains(&addr) || self.unqueried.iter().any(|e| e.addr == addr) {
+            trace!("DHT traversal ignoring node, {} is already known", addr);
             return;
         }
 
-        self.unqueried.push_back(PendingQuery { id, addr });
+        self.unqueried.push(PendingQuery { id, addr });
     }
 
     /// Start the traversal algorithm from scratch.
     /// This will remove all queried nodes from the traversal and restart the algorithm.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub fn restart(&mut self) {
-        for addr in self.queried.drain().collect::<Vec<_>>() {
-            self.add_node(None, addr);
-        }
+        self.unqueried.extend(
+            self.queried
+                .drain()
+                .map(|addr| PendingQuery { id: None, addr }),
+        );
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn send_pending_queries(&mut self, target_id: NodeId, context: &mut TrackerContext) {
-        let mut queries = vec![];
-        while let Some(query) = self.unqueried.pop_front() {
+        let mut futures = FuturesUnordered::new();
+        while let Some(query) = self.unqueried.pop() {
             if self.queried.contains(&query.addr) {
                 continue;
             }
 
             let permit = match self.permits.clone().try_acquire_owned() {
                 Ok(permit) => permit,
-                Err(_) => break,
+                Err(_) => {
+                    // no more permits available, put it back in the unqueried list
+                    self.unqueried.push(query);
+                    break;
+                }
             };
 
             self.queried.insert(query.addr);
             let node = Node::new(NodeId::from_ip(&query.addr.ip()), query.addr);
             let response = context.find_node(target_id, &node).await;
-            queries.push(async move { (permit, response.await) });
+            futures.push(async move {
+                let _permit = permit; // drops the permit when the query is completed
+                response.await
+            });
+        }
+
+        if futures.is_empty() {
+            return;
         }
 
         let command_sender = self.sender.clone();
         tokio::spawn(async move {
-            let mut futures = FuturesUnordered::from_iter(queries);
-            while let Some((permit, response)) = futures.next().await {
-                drop(permit);
+            while let Some(response) = futures.next().await {
                 match response {
                     Ok(nodes) => {
                         trace!(
@@ -124,15 +135,16 @@ impl TraversalAlgorithm {
         });
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn sort_unqueried_by_distance(&mut self, target_id: &NodeId) {
         self.unqueried = self
             .unqueried
             .iter()
             .sorted_by(|a, b| match (a.id.as_ref(), b.id.as_ref()) {
                 (Some(a), Some(b)) => {
-                    let a_distance = target_id.distance(a);
-                    let b_distance = target_id.distance(b);
-                    a_distance.cmp(&b_distance)
+                    let dist_a = target_id.distance(a);
+                    let dist_b = target_id.distance(b);
+                    dist_b.cmp(&dist_a)
                 }
                 (None, Some(_)) => std::cmp::Ordering::Less,
                 (Some(_), None) => std::cmp::Ordering::Greater,

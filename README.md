@@ -1,10 +1,9 @@
 # FX-Torrent
 
 ![Build](https://github.com/yoep/fx-torrent/workflows/Build/badge.svg)
-[![Version](https://img.shields.io/github/v/tag/yoep/fx-torrent?label=version)](https://github.com/yoep/fx-torrent/releases/tag/v0.7.0)
 [![Crates](https://img.shields.io/crates/v/fx-torrent)](https://crates.io/crates/fx-torrent)
 [![License: Apache-2.0](https://img.shields.io/github/license/yoep/fx-torrent)](./LICENSE)
-[![Documentation](https://docs.rs/fx-torrent/badge.svg)](https://docs.rs/fx-torrent/0.7.0/fx_torrent/)
+[![Documentation](https://docs.rs/fx-torrent/badge.svg)](https://docs.rs/fx-torrent/0.8.0/fx_torrent/)
 [![codecov](https://codecov.io/gh/yoep/fx-torrent/graph/badge.svg?token=CDT6SG6YEL)](https://codecov.io/gh/yoep/fx-torrent)
 
 FX-Torrent is the most complete BitTorrent implementation fully written in Rust, which supports both Linux, MacOS, and Windows.
@@ -79,6 +78,7 @@ It uses [Ratatui](https://ratatui.rs/) as the terminal UI library.
 - [x] [BEP4](https://www.bittorrent.org/beps/bep_0004.html) - Assigned Numbers
 - [x] [BEP5](https://www.bittorrent.org/beps/bep_0005.html) - DHT Protocol
 - [x] [BEP6](https://www.bittorrent.org/beps/bep_0006.html) - Fast Extension
+- [x] [BEP7](https://www.bittorrent.org/beps/bep_0007.html) - IPv6 Tracker Extension
 - [x] [BEP9](https://www.bittorrent.org/beps/bep_0009.html) - Extension for Peers to Send Metadata Files
 - [x] [BEP10](https://www.bittorrent.org/beps/bep_0010.html) - Extension Protocol
 - [x] [BEP11](https://www.bittorrent.org/beps/bep_0011.html) - Peer Exchange (PEX)

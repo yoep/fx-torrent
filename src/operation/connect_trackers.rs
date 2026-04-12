@@ -198,19 +198,31 @@ impl TorrentOperation for TorrentTrackersOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracker::TrackerClientEvent;
+    use crate::tracker::UdpServer;
+    use crate::tracker::{TrackerClientEvent, TrackerServer};
     use fx_callback::Callback;
+    use percent_encoding::{percent_encode, AsciiSet, NON_ALPHANUMERIC};
     use tempfile::tempdir;
     use tokio::sync::mpsc::unbounded_channel;
+
+    const URL_ENCODE_RESERVED: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'~')
+        .remove(b'.');
 
     #[tokio::test]
     async fn test_execute_metadata_info_unknown() {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let uri = "magnet:?xt=urn:btih:2C6B6858D61DA9543D4231A71DB4B1C9264B0685&dn=Ubuntu%2022.04%20LTS&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
+        let server =
+            TrackerServer::with_listeners(vec![Box::new(UdpServer::with_port(0).await.unwrap())])
+                .unwrap();
+        let server_uri = percent_encode(server.url().as_str().as_bytes(), URL_ENCODE_RESERVED);
+        let uri = format!("magnet:?xt=urn:btih:2C6B6858D61DA9543D4231A71DB4B1C9264B0685&dn=Ubuntu%2022.04%20LTS&tr={}", server_uri);
         let (mut context, _) = create_torrent_context!(
-            uri,
+            uri.as_str(),
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
@@ -230,7 +242,7 @@ mod tests {
             }
         });
 
-        // verify that the chain is stopped if the metadata is unknown and no tracker connections have yet been established
+        // verify that the chain is stopped if the metadata is unknown and no tracker connections have not yet been established
         // to achieve this, prevent the initial operation execution from creating the tiered trackers cache
         operation.initialized = true;
         let result = operation.execute(&mut context, vec![].as_slice()).await;

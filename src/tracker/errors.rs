@@ -35,12 +35,10 @@ pub enum TrackerError {
     AnnounceError(String),
     #[error("an io error occurred while communicating with the tracker, {0}")]
     Io(io::Error),
-    #[error("failed to parse tracker response, {0}")]
+    #[error("failed to parse message, {0}")]
     Parse(String),
     #[error("tracker url \"{0}\" is already registered")]
     DuplicateUrl(Url),
-    #[error("timed out while performing the operation")]
-    Timeout,
     #[error("unable to execute the operation, no active trackers available")]
     NoTrackers,
 }
@@ -60,7 +58,6 @@ impl PartialEq for TrackerError {
             (Self::Io(_), Self::Io(_)) => true,
             (Self::Parse(_), Self::Parse(_)) => true,
             (Self::DuplicateUrl(_), Self::DuplicateUrl(_)) => true,
-            (Self::Timeout, Self::Timeout) => true,
             (Self::NoTrackers, Self::NoTrackers) => true,
             _ => false,
         }
