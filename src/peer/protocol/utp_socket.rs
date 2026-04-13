@@ -215,11 +215,6 @@ impl TryFrom<&[u8]> for Packet {
         let mut payload = Vec::new();
         cursor.read_to_end(&mut payload)?;
 
-        // check the package version
-        if version != 1 {
-            return Err(Error::UnsupportedVersion(version as u32));
-        }
-
         Ok(Self {
             state_type,
             extension,
@@ -298,7 +293,7 @@ impl UtpSocket {
 
         // start the main loop of the socket a new thread
         let inner_main_loop = inner.clone();
-        tokio::spawn(async move { inner_main_loop.start(&inner_main_loop).await });
+        tokio::spawn(async move { inner_main_loop.run(&inner_main_loop).await });
 
         Ok(Self { inner })
     }
@@ -392,21 +387,18 @@ pub(crate) struct UtpSocketContext {
 }
 
 impl UtpSocketContext {
-    /// Start the main loop of the utp socket.
-    async fn start(&self, context: &Arc<UtpSocketContext>) {
-        loop {
-            let mut packet_header_bytes = vec![0u8; MAX_PACKET_SIZE];
+    /// Run the main loop of the utp socket.
+    async fn run(&self, context: &Arc<UtpSocketContext>) {
+        let mut buffer = [0u8; MAX_PACKET_SIZE];
 
+        loop {
             select! {
                 _ = self.cancellation_token.cancelled() => break,
-                result = self.socket.recv_from(&mut packet_header_bytes) => {
+                result = self.socket.recv_from(&mut buffer) => {
                     match result {
+                        Ok((0, _)) => break, // socket closed
                         Ok((bytes_read, addr)) => {
-                            if bytes_read > 0 {
-                                self.handle_packet_bytes(&packet_header_bytes[..bytes_read], addr, context).await;
-                            } else {
-                                break;
-                            }
+                            self.on_packet_received(&buffer[..bytes_read], addr, context).await;
                         },
                         Err(e) => {
                             warn!("Utp socket {} reader failed to receive packet, {}", self, e);
@@ -417,6 +409,11 @@ impl UtpSocketContext {
             }
         }
         debug!("Utp socket {} main loop ended", self);
+    }
+
+    /// Returns the unique id of the socket.
+    pub fn id(&self) -> &UtpSocketId {
+        &self.id
     }
 
     /// Try to send the given packet over the uTP socket to the given remote peer address.
@@ -459,7 +456,7 @@ impl UtpSocketContext {
     }
 
     /// Handle a received packet payload from the socket.
-    async fn handle_packet_bytes(
+    async fn on_packet_received(
         &self,
         packet_bytes: &[u8],
         addr: SocketAddr,
