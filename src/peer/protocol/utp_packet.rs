@@ -1,10 +1,14 @@
-use crate::peer::protocol::ConnectionId;
+use crate::peer::protocol::{CloseReason, ConnectionId};
 use crate::peer::{Error, Result};
 use bit_vec::BitVec;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use log::debug;
 use std::fmt::{Debug, Formatter};
+use std::io;
 use std::io::{Cursor, Read, Write};
+
+/// The uTP packet header len in bytes.
+pub const UTP_HEADER_SIZE: usize = 20;
 
 /// An uTP packet to be sent or received by uTP sockets & connections.
 /// See BEP29 for more information.
@@ -38,8 +42,7 @@ impl Packet {
         // write the type & version into the first byte
         buffer[0] = (self.state_type as u8) << 4 | 1;
         // write the extension bytes
-        let extension_bytes = self.extension.as_bytes()?;
-        buffer.write_all(&extension_bytes)?;
+        buffer.write_u8(self.extension.as_u8())?;
         // write the connection number
         buffer.write_u16::<BigEndian>(self.connection_id)?;
         // write the current timestamp
@@ -52,6 +55,11 @@ impl Packet {
         buffer.write_u16::<BigEndian>(self.sequence_number)?;
         // write the acknowledgment number
         buffer.write_u16::<BigEndian>(self.acknowledge_number)?;
+        // write the extension bytes right after the header
+        if self.extension != Extension::None {
+            let extension_bytes = self.extension.as_bytes()?;
+            buffer.write_all(&extension_bytes)?;
+        }
         // append the payload
         buffer.write_all(self.payload.as_slice())?;
 
@@ -77,13 +85,18 @@ impl TryFrom<&[u8]> for Packet {
         let state_type_value = byte >> 4;
         let state_type = StateType::try_from(state_type_value)?;
         // read the extension from the second byte
-        let extension = Extension::try_from(&mut cursor)?;
+        let extension_number = cursor.read_u8()?;
         let connection_id = cursor.read_u16::<BigEndian>()?;
         let timestamp_microseconds = cursor.read_u32::<BigEndian>()?;
         let timestamp_difference_microseconds = cursor.read_u32::<BigEndian>()?;
         let window_size = cursor.read_u32::<BigEndian>()?;
         let sequence_number = cursor.read_u16::<BigEndian>()?;
         let acknowledge_number = cursor.read_u16::<BigEndian>()?;
+        // read the extensions, if the extension_number is not 0
+        let extension = match extension_number {
+            0 => Extension::None,
+            _ => Extension::try_from(&mut cursor)?,
+        };
         // read the remaining bytes as payload
         let mut payload = Vec::new();
         cursor.read_to_end(&mut payload)?;
@@ -158,6 +171,7 @@ impl TryFrom<u8> for StateType {
 pub enum Extension {
     None,
     SelectiveAck { bitmask: BitVec },
+    CloseReason { reason: CloseReason },
 }
 
 impl Extension {
@@ -167,6 +181,7 @@ impl Extension {
         match self {
             Extension::None => 0,
             Extension::SelectiveAck { .. } => 1,
+            Extension::CloseReason { .. } => 3,
         }
     }
 
@@ -176,6 +191,7 @@ impl Extension {
         let extension_payload = match self {
             Extension::None => vec![],
             Extension::SelectiveAck { bitmask } => bitmask.to_bytes(),
+            Extension::CloseReason { reason } => (*reason as u16).to_be_bytes().to_vec(),
         };
 
         // write the extension number
@@ -188,6 +204,9 @@ impl Extension {
             bytes.write_all(&extension_payload)?;
         }
 
+        // terminate the extensions with a 0 byte
+        bytes.write_u8(0)?;
+
         Ok(bytes)
     }
 }
@@ -196,22 +215,41 @@ impl TryFrom<&mut Cursor<&[u8]>> for Extension {
     type Error = Error;
 
     fn try_from(cursor: &mut Cursor<&[u8]>) -> Result<Self> {
-        let number = cursor.read_u8()?;
-        if number == 0 {
-            return Ok(Extension::None);
-        }
-
+        // read the extension info right after the uTP header
+        let extension = cursor.read_u8()?;
         let extension_len = cursor.read_u8()?;
-        let mut bytes = vec![0u8; extension_len as usize];
-        cursor.read_exact(&mut bytes)?;
 
-        match number {
+        let mut bytes = vec![0u8; extension_len as usize];
+        cursor.read_exact(&mut bytes).map_err(|e| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("failed to read {} extension bytes, {}", extension_len, e),
+            ))
+        })?;
+
+        // read the terminating 0 byte
+        cursor.read_u8()?;
+
+        match extension {
             1 => Ok(Extension::SelectiveAck {
                 bitmask: BitVec::from_bytes(&bytes),
             }),
+            3 => {
+                let bytes: [u8; 2] = bytes.try_into().map_err(|e: Vec<u8>| {
+                    Error::Parsing(format!(
+                        "failed to parse close reason, got {} bytes",
+                        e.len()
+                    ))
+                })?;
+                let reason = u16::from_be_bytes(bytes);
+
+                Ok(Extension::CloseReason {
+                    reason: CloseReason::try_from(reason)?,
+                })
+            }
             _ => {
                 // log but ignore the unknown extension number
-                debug!("Utp extension {} is currently not supported", number);
+                debug!("Utp extension {} is currently not supported", extension);
                 Ok(Extension::None)
             }
         }
@@ -308,6 +346,22 @@ mod tests {
         fn test_deserialize() {
             let extension = Extension::SelectiveAck {
                 bitmask: BitVec::from_bytes(&[0b10100000]),
+            };
+
+            let bytes = extension
+                .as_bytes()
+                .expect("expected the extension to have been serialized");
+            let mut cursor = Cursor::new(bytes.as_slice());
+            let result =
+                Extension::try_from(&mut cursor).expect("expected the extension to be valid");
+
+            assert_eq!(extension, result);
+        }
+
+        #[test]
+        fn test_extension_close_reason() {
+            let extension = Extension::CloseReason {
+                reason: CloseReason::NoMemory,
             };
 
             let bytes = extension

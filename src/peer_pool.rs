@@ -147,10 +147,10 @@ impl PeerPool {
             reason
         );
         match reason {
-            CloseReason::ConnectionFailed => {
+            CloseReason::Timeout | CloseReason::TimedOutHandshake => {
                 info.failed();
             }
-            CloseReason::FastProtocol => {
+            CloseReason::InvalidAllowFastMessage => {
                 info.failed();
                 info.last_connected = Some(Instant::now());
             }
@@ -244,8 +244,8 @@ impl PeerPool {
 
         for (addr, state) in futures::future::join_all(futures).await {
             let reason = match state {
-                PeerState::Closed => CloseReason::Remote,
-                PeerState::Error => CloseReason::Error,
+                PeerState::Closed => CloseReason::None,
+                PeerState::Error => CloseReason::InvalidMessage,
                 _ => continue,
             };
             let peer = match self.peer_closed(&addr, reason).await {
@@ -487,7 +487,7 @@ mod tests {
 
                 // close the peer connection
                 let result = pool
-                    .peer_closed(&peer_addr.clone().into(), CloseReason::ConnectionFailed)
+                    .peer_closed(&peer_addr.clone().into(), CloseReason::Timeout)
                     .await;
                 assert!(
                     result.is_none(),
@@ -522,7 +522,10 @@ mod tests {
 
                 // close the peer connection
                 let result = pool
-                    .peer_closed(&peer_addr.clone().into(), CloseReason::FastProtocol)
+                    .peer_closed(
+                        &peer_addr.clone().into(),
+                        CloseReason::InvalidAllowFastMessage,
+                    )
                     .await;
                 assert!(result.is_some(), "expected the peer to have been removed");
 

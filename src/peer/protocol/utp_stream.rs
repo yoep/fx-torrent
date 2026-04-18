@@ -1,7 +1,8 @@
 use crate::channel::{ChannelReceiver, ChannelSender, Reply};
 use crate::peer::protocol::{
-    ConnectionId, Extension, Packet, SequenceNumber, StateType, UtpConnId, UtpSocketContext,
-    UtpSocketExtension, UtpSocketExtensions, UtpSocketId, MAX_PACKET_PAYLOAD_SIZE,
+    CloseReason, Extension, Packet, SequenceNumber, StateType, UtpConnId, UtpMessage,
+    UtpSocketContext, UtpSocketExtension, UtpSocketExtensions, UtpSocketId,
+    MAX_PACKET_PAYLOAD_SIZE,
 };
 use crate::peer::{Error, Result};
 use async_trait::async_trait;
@@ -31,7 +32,10 @@ use tokio_util::sync::CancellationToken;
 const MAX_UNACKED_PACKETS: usize = 128;
 /// The maximum amount of bytes allowed within the read buffer.
 const MAX_READ_BUFFER: usize = 1024 * 1024; // 1MB
-const RETRY_INTERVAL: Duration = Duration::from_millis(500);
+/// The bucket size of recorded delays in the LEDBAT algorithm.
+const LED_BAT_BUCKET_SIZE: usize = 16;
+/// The minimum Round-Trip-Time value to consider for the LEDBAT algorithm.
+const LED_BAT_MIN_RTT: Duration = Duration::from_millis(100);
 
 /// The state of an uTP stream connection.
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -46,136 +50,6 @@ pub enum UtpStreamState {
     Connected,
     /// The stream has been closed
     Closed,
-}
-
-/// A parsed uTP message.
-#[derive(Clone, PartialEq)]
-enum Message {
-    /// Connect to the utp peer with the connection id
-    Connect(ConnectionId),
-    /// The latest known state of an uTP peer with `sequence_number` & `acknowledge_number`.
-    State(ConnectionId, SequenceNumber, SequenceNumber),
-    /// Message containing data information
-    Data(ConnectionId, Vec<u8>),
-    /// Terminate the connection forcefully.
-    Terminate(ConnectionId),
-    /// Close the connection
-    Close(ConnectionId),
-}
-
-impl Message {
-    /// Convert this message into an uTP packet.
-    pub fn into_packet(
-        self,
-        sequence_number: SequenceNumber,
-        acknowledge_number: SequenceNumber,
-        base_time: Instant,
-        last_packet_timestamp: u32,
-        window_size: u32,
-    ) -> Packet {
-        let timestamp_microseconds = base_time.elapsed().as_micros() as u32;
-        let timestamp_difference_microseconds =
-            timestamp_microseconds.wrapping_sub(last_packet_timestamp);
-        match self {
-            Message::Connect(connection_id) => Packet {
-                state_type: StateType::Syn,
-                extension: Extension::None,
-                connection_id,
-                timestamp_microseconds,
-                timestamp_difference_microseconds,
-                window_size,
-                sequence_number,
-                acknowledge_number,
-                payload: Vec::with_capacity(0),
-            },
-            Message::State(connection_id, seq_number, ack_number) => Packet {
-                state_type: StateType::State,
-                extension: Extension::None,
-                connection_id,
-                timestamp_microseconds,
-                timestamp_difference_microseconds,
-                window_size,
-                sequence_number: seq_number,
-                acknowledge_number: ack_number,
-                payload: Vec::with_capacity(0),
-            },
-            Message::Data(connection_id, payload) => Packet {
-                state_type: StateType::Data,
-                extension: Extension::None,
-                connection_id,
-                timestamp_microseconds,
-                timestamp_difference_microseconds,
-                window_size,
-                sequence_number,
-                acknowledge_number,
-                payload,
-            },
-            Message::Terminate(connection_id) => Packet {
-                state_type: StateType::Reset,
-                extension: Extension::None,
-                connection_id,
-                timestamp_microseconds,
-                timestamp_difference_microseconds,
-                window_size,
-                sequence_number,
-                acknowledge_number,
-                payload: Vec::with_capacity(0),
-            },
-            Message::Close(connection_id) => Packet {
-                state_type: StateType::Fin,
-                extension: Extension::None,
-                connection_id,
-                timestamp_microseconds,
-                timestamp_difference_microseconds,
-                window_size,
-                sequence_number,
-                acknowledge_number,
-                payload: Vec::with_capacity(0),
-            },
-        }
-    }
-}
-
-impl TryFrom<&Packet> for Message {
-    type Error = Error;
-
-    fn try_from(value: &Packet) -> Result<Self> {
-        match value.state_type {
-            StateType::Syn => Ok(Message::Connect(value.connection_id)),
-            StateType::State => Ok(Message::State(
-                value.connection_id,
-                value.sequence_number,
-                value.acknowledge_number,
-            )),
-            StateType::Data => Ok(Message::Data(value.connection_id, value.payload.clone())),
-            StateType::Fin => Ok(Message::Close(value.connection_id)),
-            StateType::Reset => Ok(Message::Terminate(value.connection_id)),
-        }
-    }
-}
-
-impl From<&Message> for StateType {
-    fn from(value: &Message) -> Self {
-        match value {
-            Message::Connect(_) => StateType::Syn,
-            Message::State(_, _, _) => StateType::State,
-            Message::Data(_, _) => StateType::Data,
-            Message::Terminate(_) => StateType::Reset,
-            Message::Close(_) => StateType::Fin,
-        }
-    }
-}
-
-impl Debug for Message {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Message::Connect(id) => write!(f, "Connect({})", id),
-            Message::State(id, seq, ack) => write!(f, "State({}, {}, {})", id, seq, ack),
-            Message::Data(id, data) => write!(f, "Data({}, len {})", id, data.len()),
-            Message::Terminate(id) => write!(f, "Terminate({})", id),
-            Message::Close(id) => write!(f, "Close({})", id),
-        }
-    }
 }
 
 /// A uTorrent transport protocol connection stream.
@@ -358,17 +232,16 @@ impl UtpStream {
             addr,
             socket,
             connection_type,
-            base_time: Instant::now(),
             state,
             seq_number,
             ack_number,
             last_ack_number: seq_number - 1,
             pending_incoming_packets: Default::default(),
             pending_outgoing_packets: Default::default(),
-            last_packet_timestamp: Default::default(),
             read_buffer: Default::default(),
             write_buffer: BytesMut::with_capacity(MAX_READ_BUFFER),
             pending_flush: None,
+            led_bat: Default::default(),
             remote_window_size: MAX_READ_BUFFER as u32,
             extensions,
             cancellation_token: Default::default(),
@@ -533,14 +406,11 @@ pub struct UtpStreamContext {
     /// Our last packet sequence number that was acknowledged by the remote peer. (incoming)
     last_ack_number: SequenceNumber,
     /// The pending incoming packets which have been received out of order from the remote peer.
-    pending_incoming_packets: HashMap<SequenceNumber, Message>,
+    pending_incoming_packets: HashMap<SequenceNumber, UtpMessage>,
     /// The pending packets which have not been acked by the remote peer.
     pending_outgoing_packets: Vec<PendingPacket>,
-    /// The time of the stream creation.
-    /// This value is used to calculate the delay.
-    base_time: Instant,
-    /// The timestamp of the last received packet from the remote peer.
-    last_packet_timestamp: u32,
+    /// The LedBat algorithm state.
+    led_bat: LedBat,
     /// The uTP stream incoming data buffer of the remote peer.
     read_buffer: ReadBuffer,
     /// The uTP stream outgoing data buffer to the remote peer.
@@ -568,26 +438,25 @@ impl UtpStreamContext {
             return;
         }
 
-        let mut resend_interval = interval(RETRY_INTERVAL);
+        let mut resend_interval = interval(Duration::from_secs(1));
         loop {
             select! {
                 _ = self.cancellation_token.cancelled() => break,
-                packet = message_receiver.recv() => {
-                    if let Some(packet) = packet {
-                        self.on_received_packet(packet).await;
-                    } else {
+                packet = message_receiver.recv() => match packet {
+                    Some(packet) => self.on_received_packet(packet).await,
+                    None => {
                         debug!("Utp stream {} socket has been closed", self);
                         break;
                     }
-                }
+                },
                 Some(command) = command_receiver.recv() => self.on_command(command).await,
-                // _ = resend_interval.tick() => self.resend_timeout_packets().await,
+                _ = resend_interval.tick() => self.resend_timeout_packets().await,
             }
 
             self.do_flush().await;
         }
 
-        let _ = self.close().await;
+        let _ = self.close(CloseReason::None).await;
         debug!("Utp stream {} main loop ended", self);
     }
 
@@ -608,8 +477,7 @@ impl UtpStreamContext {
         &self.extensions
     }
 
-    /// Check if writing of the given payload to the remote peer is allowed.
-    /// It checks if the stream is in a valid state, and that the remote peer window size allows the writing of the given data.
+    /// Check if the stream may send at least one more byte to the remote peer.
     ///
     /// # Returns
     ///
@@ -633,14 +501,14 @@ impl UtpStreamContext {
         // update the remote window size info
         self.update_remote_window_size(&packet).await;
 
-        match Message::try_from(&packet) {
+        match UtpMessage::try_from(&packet) {
             Ok(message) => self.on_message_received(message, packet).await,
             Err(e) => debug!("Utp stream {} failed to parse packet, {}", self, e),
         }
     }
 
     /// Try to process the received remote peer message.
-    async fn on_message_received(&mut self, message: Message, packet: Packet) {
+    async fn on_message_received(&mut self, message: UtpMessage, packet: Packet) {
         // process the last ack number of the remote peer
         self.on_remote_acknowledgment(packet.acknowledge_number)
             .await;
@@ -827,7 +695,7 @@ impl UtpStreamContext {
     }
 
     /// Process an in-order incoming uTP message.
-    async fn on_incoming_message(&mut self, message: Message, seq_number: SequenceNumber) {
+    async fn on_incoming_message(&mut self, message: UtpMessage, seq_number: SequenceNumber) {
         trace!(
             "Utp stream {} is processing incoming message {}, {:?}",
             self,
@@ -835,15 +703,18 @@ impl UtpStreamContext {
             message
         );
         match message {
-            Message::Data(_, payload) => {
+            UtpMessage::Data { payload, .. } => {
                 self.on_received_payload(payload).await;
             }
-            Message::Terminate(_) => {
-                debug!("Utp stream {} received termination message", self);
+            UtpMessage::Terminate { reason, .. } => {
+                debug!(
+                    "Utp stream {} received termination message, {:?}",
+                    self, reason
+                );
                 self.on_close_message().await;
             }
-            Message::Close(_) => {
-                debug!("Utp stream {} received close message", self);
+            UtpMessage::Close { reason, .. } => {
+                debug!("Utp stream {} received close message, {:?}", self, reason);
                 self.on_close_message().await;
             }
             _ => {}
@@ -878,13 +749,18 @@ impl UtpStreamContext {
         Ok(data.len())
     }
 
-    /// Flush the current write buffer to the remote peer.
+    /// Flush as many bytes from the write buffer as the current send window permits.
+    ///
+    /// The number of bytes sent is bounded by
+    /// `min(write_buffer, effective_window − bytes_in_flight)`, so a single call
+    /// may only transmit a fraction of the write buffer when the window is small.
+    /// The caller should retry once the window grows (i.e., on receiving ACKs).
     async fn flush(&mut self) -> Result<()> {
         let len = self.write_buffer.remaining();
         if !self.is_writing_allowed(len) {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::ResourceBusy,
-                "write buffer is full",
+                "congestion window is full",
             )));
         }
 
@@ -919,7 +795,9 @@ impl UtpStreamContext {
 
     /// Send the initial syn message to the remote peer.
     async fn send_syn(&mut self) -> Result<()> {
-        let syn_message = Message::Connect(self.key.recv_id);
+        let syn_message = UtpMessage::Connect {
+            connection: self.key.recv_id,
+        };
 
         self.send_message(syn_message, self.seq_number, self.ack_number)
             .await?;
@@ -934,7 +812,7 @@ impl UtpStreamContext {
 
     /// Send an acknowledgment for a received remote peer packet.
     async fn send_acknowledgment(&mut self, ack_number: SequenceNumber) -> Result<()> {
-        let message = Message::State(self.key.send_id, self.seq_number, ack_number);
+        let message = UtpMessage::State(self.key.send_id, self.seq_number, ack_number);
         self.send_message(message, self.seq_number, ack_number)
             .await?;
         Ok(())
@@ -945,7 +823,10 @@ impl UtpStreamContext {
     async fn send_data(&mut self, bytes: &[u8]) -> Result<()> {
         // send the data in chunks to not exceed the maximum uTP packet size
         for chunk in bytes.chunks(MAX_PACKET_PAYLOAD_SIZE) {
-            let message = Message::Data(self.key.send_id, chunk.to_vec());
+            let message = UtpMessage::Data {
+                connection: self.key.send_id,
+                payload: chunk.to_vec(),
+            };
             self.send_message(message, self.seq_number, self.ack_number)
                 .await?;
         }
@@ -954,9 +835,12 @@ impl UtpStreamContext {
     }
 
     /// Send the close state to the remote peer.
-    async fn send_close(&mut self) -> Result<()> {
+    async fn send_close(&mut self, reason: CloseReason) -> Result<()> {
         self.send_message(
-            Message::Close(self.key.send_id),
+            UtpMessage::Close {
+                connection: self.key.send_id,
+                reason,
+            },
             self.seq_number,
             self.ack_number,
         )
@@ -966,18 +850,20 @@ impl UtpStreamContext {
     /// Send the given message to the remote peer.
     async fn send_message(
         &mut self,
-        message: Message,
+        message: UtpMessage,
         seq_number: SequenceNumber,
         ack_number: SequenceNumber,
     ) -> Result<()> {
         trace!("Utp stream {} is sending {:?}", self, message);
         let addr = self.addr;
         let window_size = self.window_size().await;
+        let timestamp_microseconds = self.led_bat.base_time.elapsed().as_micros() as u32;
+        let timestamp_microseconds_delay = self.led_bat.client_last_recorded_delay;
         let mut packet = message.into_packet(
             seq_number,
             ack_number,
-            self.base_time,
-            self.last_packet_timestamp,
+            timestamp_microseconds,
+            timestamp_microseconds_delay,
             window_size,
         );
 
@@ -1015,26 +901,32 @@ impl UtpStreamContext {
 
     /// Resend all packets which have not yet been acked and have timed out.
     async fn resend_timeout_packets(&mut self) {
-        if self.last_packet_timestamp == 0 {
+        if self.led_bat.is_empty() || self.cancellation_token.is_cancelled() {
+            return;
+        }
+        if self.led_bat.last_received_packet.elapsed() > Duration::from_mins(1) {
+            let _ = self.close(CloseReason::Timeout).await;
             return;
         }
 
-        let now = self.base_time.elapsed().as_micros() as u32;
         let window_size = self.window_size().await;
 
+        let now = self.led_bat.base_time.elapsed().as_micros() as u32;
+        let timeout_after = self.led_bat.packet_timeout();
         let mut timed_out_packets = self
             .pending_outgoing_packets
             .extract_if(.., |e| {
                 now.saturating_sub(e.packet.timestamp_microseconds)
-                    > self.last_packet_timestamp.min(5000)
+                    > timeout_after.as_micros() as u32
             })
             .collect_vec();
+
         for pending_packet in timed_out_packets.iter_mut() {
             // update the packet with the latest info
             pending_packet.packet.timestamp_microseconds = now;
             pending_packet.packet.window_size = window_size;
             pending_packet.packet.acknowledge_number = self.ack_number;
-            pending_packet.packet.timestamp_difference_microseconds = self.last_packet_timestamp;
+            pending_packet.packet.timestamp_difference_microseconds = self.led_bat.base_delay();
 
             trace!(
                 "Utp stream {} is resending packet {:?}",
@@ -1067,8 +959,8 @@ impl UtpStreamContext {
             .pending_incoming_packets
             .iter()
             .map(|(_, message)| {
-                if let Message::Data(_, data) = message {
-                    return data.len();
+                if let UtpMessage::Data { payload, .. } = message {
+                    return payload.len();
                 }
 
                 0
@@ -1094,8 +986,20 @@ impl UtpStreamContext {
     }
 
     /// Update the timestamp difference information of the stream connection.
+    ///
+    /// The `timestamp_difference_microseconds` field in the received packet is the
+    /// forward-path delay as measured by the remote peer (remote_received_time −
+    /// our_sent_timestamp). We feed this into LEDBAT as our one-way delay sample.
     async fn update_timestamp_difference(&mut self, packet: &Packet) {
-        self.last_packet_timestamp = packet.timestamp_microseconds;
+        if packet.timestamp_difference_microseconds == 0 {
+            return;
+        }
+
+        let now = self.led_bat.base_time.elapsed().as_micros() as u32;
+        self.led_bat.record(
+            packet.timestamp_microseconds.wrapping_sub(now),
+            packet.timestamp_difference_microseconds,
+        );
     }
 
     /// Update the currently allowed window size of the remote peer.
@@ -1105,12 +1009,12 @@ impl UtpStreamContext {
     }
 
     /// Try to gracefully close the connection with the remote peer.
-    async fn close(&mut self) -> Result<()> {
+    async fn close(&mut self, reason: CloseReason) -> Result<()> {
         if self.state == UtpStreamState::Closed {
             return Ok(());
         }
 
-        let result = self.send_close().await;
+        let result = self.send_close(reason).await;
         // update the state to close before cancelling the context
         // as the main loop might otherwise execute the close twice
         self.update_state(UtpStreamState::Closed);
@@ -1248,6 +1152,74 @@ impl PendingPacket {
     }
 }
 
+#[derive(Debug)]
+struct LedBat {
+    /// The start base time of the LEDBAT algorithm.
+    base_time: Instant,
+    /// The current bucket cursor.
+    cursor: usize,
+    /// The observed one-way delays in microseconds.
+    delay_buckets: [u32; LED_BAT_BUCKET_SIZE],
+    /// The last delay that has been recorded by our client.
+    client_last_recorded_delay: u32,
+    /// The last time a packet has been received from the remote peer.
+    last_received_packet: Instant,
+}
+
+impl LedBat {
+    /// Returns `true` if the LedBat delay sliding window is empty (no delays have been recorded yet).
+    fn is_empty(&self) -> bool {
+        self.delay_buckets.iter().all(|e| *e == 0)
+    }
+
+    /// Returns the base delay for the LedBat algorithm.
+    fn base_delay(&self) -> u32 {
+        let mut lowest_delay = u32::MAX;
+        let mut lowest_diff = u32::MAX;
+
+        for delay in self.delay_buckets.iter().filter(|e| **e != 0) {
+            lowest_diff = lowest_diff.min(delay.abs_diff(lowest_delay));
+            lowest_delay = lowest_delay.min(*delay);
+        }
+
+        lowest_diff
+    }
+
+    /// Returns the duration a packet would have before being timed-out based
+    /// on the current LedBat state.
+    fn packet_timeout(&self) -> Duration {
+        // check if we're currently awaiting the initial SYN packet
+        // in this case, we haven't recorded any delays yet
+        if self.is_empty() {
+            return Duration::from_secs(3);
+        }
+
+        Duration::from_micros(self.base_delay() as u64).min(LED_BAT_MIN_RTT) * 2
+    }
+
+    /// Record a new delay measurement in the LedBat algorithm.
+    /// The `client_delay` is our own-measured delay,
+    /// while `remote_delay` is the delay measured by the remote peer.
+    fn record(&mut self, client_delay: u32, remote_delay: u32) {
+        self.client_last_recorded_delay = client_delay;
+        self.delay_buckets[self.cursor] = remote_delay;
+        self.cursor = (self.cursor + 1) % LED_BAT_BUCKET_SIZE;
+        self.last_received_packet = Instant::now();
+    }
+}
+
+impl Default for LedBat {
+    fn default() -> Self {
+        Self {
+            base_time: Instant::now(),
+            cursor: 0,
+            delay_buckets: [0u32; LED_BAT_BUCKET_SIZE],
+            client_last_recorded_delay: 0,
+            last_received_packet: Instant::now(),
+        }
+    }
+}
+
 /// Determines if the value `a` is considered less than the value `b` using a wrap-around comparison.
 ///
 /// This function is particularly useful in contexts where values wrap around a fixed range, such as
@@ -1270,31 +1242,6 @@ mod tests {
     use crate::peer::protocol::tests::UtpPacketCaptureExtension;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc::unbounded_channel;
-
-    #[test]
-    fn test_state_type_from_message() {
-        let connection_id = 0;
-
-        let message = Message::Connect(connection_id);
-        let result = StateType::from(&message);
-        assert_eq!(StateType::Syn, result);
-
-        let message = Message::State(connection_id, 0, 0);
-        let result = StateType::from(&message);
-        assert_eq!(StateType::State, result);
-
-        let message = Message::Data(connection_id, Vec::with_capacity(0));
-        let result = StateType::from(&message);
-        assert_eq!(StateType::Data, result);
-
-        let message = Message::Terminate(connection_id);
-        let result = StateType::from(&message);
-        assert_eq!(StateType::Reset, result);
-
-        let message = Message::Close(connection_id);
-        let result = StateType::from(&message);
-        assert_eq!(StateType::Fin, result);
-    }
 
     #[tokio::test]
     async fn test_utp_stream_new_incoming() {

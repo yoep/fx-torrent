@@ -255,7 +255,7 @@ impl TorrentConnectPeersOperation {
                     command_sender
                         .fire_and_forget(TorrentCommand::PeerClosed {
                             addr: peer_addr,
-                            reason: CloseReason::ConnectionFailed,
+                            reason: CloseReason::Timeout,
                         })
                         .await;
                 }
@@ -497,7 +497,7 @@ mod tests {
             .expect("expected a command to have been sent");
         match command {
             TorrentCommand::PeerClosed { reason, .. } => {
-                assert_eq!(CloseReason::ConnectionFailed, reason);
+                assert_eq!(CloseReason::Timeout, reason);
             }
             _ => assert!(
                 false,

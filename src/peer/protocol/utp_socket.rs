@@ -1,5 +1,5 @@
 use crate::peer::protocol::{Packet, StateType};
-use crate::peer::protocol::{UtpStream, UtpStreamContext, MAX_PACKET_SIZE};
+use crate::peer::protocol::{UtpStream, UtpStreamContext, MAX_PACKET_SIZE, UTP_HEADER_SIZE};
 use crate::peer::{Error, Result};
 use async_trait::async_trait;
 use derive_more::Display;
@@ -17,9 +17,6 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{Mutex, RwLock};
 use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
-
-/// The uTP packet header len in bytes.
-const UTP_HEADER_SIZE: usize = 20;
 
 /// The UTP socket identifier.
 pub type UtpHandle = Handle;
