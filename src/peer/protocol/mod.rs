@@ -1,9 +1,10 @@
 pub use bt::*;
+use utp_packet::*;
 pub use utp_socket::*;
 pub use utp_stream::*;
 
 mod bt;
-mod utils;
+mod utp_packet;
 mod utp_socket;
 mod utp_stream;
 

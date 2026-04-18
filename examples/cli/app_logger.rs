@@ -163,16 +163,11 @@ impl InnerAppLogger {
 
     fn send_entry(&self, record: &Record) {
         let time = Local::now();
-        let target = {
-            let target = record.target();
-            let target = format!("{}{}", target, " ".repeat(40));
-            target[0..40].to_string()
-        };
         let text = format!(
-            "{} {} --- {} : {}",
+            "{} {:5.5} --- {:40.40} : {}",
             time.format("%Y-%m-%d %H:%M:%S%.f"),
             record.level(),
-            target,
+            record.target(),
             record.args()
         );
 

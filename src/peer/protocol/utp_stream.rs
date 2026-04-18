@@ -1,5 +1,4 @@
 use crate::channel::{ChannelReceiver, ChannelSender, Reply};
-use crate::peer::protocol::utils::now_as_micros;
 use crate::peer::protocol::{
     ConnectionId, Extension, Packet, SequenceNumber, StateType, UtpConnId, UtpSocketContext,
     UtpSocketExtension, UtpSocketExtensions, UtpSocketId, MAX_PACKET_PAYLOAD_SIZE,
@@ -66,21 +65,17 @@ enum Message {
 
 impl Message {
     /// Convert this message into an uTP packet.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - The message to parse into an uTP packet.
-    /// * `sequence_number` - The current sequence number of the uTP stream.
-    /// * `acknowledge_number` - The last received sequence number of the uTP stream from the remote peer.
-    /// * `timestamp_difference_microseconds` - The latency of the uTP stream connection in microseconds.
     pub fn into_packet(
         self,
         sequence_number: SequenceNumber,
         acknowledge_number: SequenceNumber,
-        timestamp_difference_microseconds: u32,
+        base_time: Instant,
+        last_packet_timestamp: u32,
         window_size: u32,
     ) -> Packet {
-        let timestamp_microseconds = now_as_micros();
+        let timestamp_microseconds = base_time.elapsed().as_micros() as u32;
+        let timestamp_difference_microseconds =
+            timestamp_microseconds.wrapping_sub(last_packet_timestamp);
         match self {
             Message::Connect(connection_id) => Packet {
                 state_type: StateType::Syn,
@@ -363,15 +358,17 @@ impl UtpStream {
             addr,
             socket,
             connection_type,
+            base_time: Instant::now(),
             state,
             seq_number,
             ack_number,
             last_ack_number: seq_number - 1,
             pending_incoming_packets: Default::default(),
             pending_outgoing_packets: Default::default(),
-            timestamp_difference_microseconds: Default::default(),
+            last_packet_timestamp: Default::default(),
             read_buffer: Default::default(),
             write_buffer: BytesMut::with_capacity(MAX_READ_BUFFER),
+            pending_flush: None,
             remote_window_size: MAX_READ_BUFFER as u32,
             extensions,
             cancellation_token: Default::default(),
@@ -393,6 +390,11 @@ impl AsyncRead for UtpStream {
             }
         };
         if !read_buf.has_remaining() {
+            // EOF the read buffer when the stream is being closed
+            if self.cancellation_token.is_cancelled() {
+                return Poll::Ready(Ok(()));
+            }
+
             self.read_buffer.register(cx.waker());
             return Poll::Pending;
         }
@@ -524,7 +526,7 @@ pub struct UtpStreamContext {
     connection_type: ConnectionType,
     /// The state of the stream connection
     state: UtpStreamState,
-    /// The last sent packet sequence number to the remote peer.
+    /// The next sequence number that will be used when sending packets. (outgoing)
     seq_number: SequenceNumber,
     /// The last packet sequence number that has been acknowledged to the remote peer. (outgoing)
     ack_number: SequenceNumber,
@@ -534,12 +536,17 @@ pub struct UtpStreamContext {
     pending_incoming_packets: HashMap<SequenceNumber, Message>,
     /// The pending packets which have not been acked by the remote peer.
     pending_outgoing_packets: Vec<PendingPacket>,
-    /// The delay of packets between the sender and receiver of packets.
-    timestamp_difference_microseconds: u32,
+    /// The time of the stream creation.
+    /// This value is used to calculate the delay.
+    base_time: Instant,
+    /// The timestamp of the last received packet from the remote peer.
+    last_packet_timestamp: u32,
     /// The uTP stream incoming data buffer of the remote peer.
     read_buffer: ReadBuffer,
     /// The uTP stream outgoing data buffer to the remote peer.
     write_buffer: BytesMut,
+    /// A pending flush waiting for the stream to become Connected.
+    pending_flush: Option<Reply<Result<()>>>,
     /// The currently allowed window size of the remote peer.
     remote_window_size: u32,
     /// The immutable extensions of the uTP stream.
@@ -574,8 +581,10 @@ impl UtpStreamContext {
                     }
                 }
                 Some(command) = command_receiver.recv() => self.on_command(command).await,
-                _ = resend_interval.tick() => self.resend_timeout_packets().await,
+                // _ = resend_interval.tick() => self.resend_timeout_packets().await,
             }
+
+            self.do_flush().await;
         }
 
         let _ = self.close().await;
@@ -654,33 +663,40 @@ impl UtpStreamContext {
             return;
         }
 
-        let mut send_state_message = false;
+        // calculate the difference between the received sequence and our last inbound ack number
+        let to_be_ack_number_for_remote = remote_sequence_number.wrapping_sub(1);
+        let sequence_diff = current_ack_number.saturating_sub(to_be_ack_number_for_remote);
+        // store the out-of-order ahead packet in the buffer is allowed
+        if sequence_diff <= MAX_UNACKED_PACKETS as u16 {
+            // buffer the incoming out-of-order packet
+            self.pending_incoming_packets
+                .insert(remote_sequence_number, message);
+        }
 
-        {
-            // calculate the difference between the received sequence and our last inbound ack number
-            let sequence_diff = current_ack_number.saturating_sub(remote_sequence_number - 1);
-            // store the out-of-order ahead packet in the buffer is allowed
-            if sequence_diff <= MAX_UNACKED_PACKETS as u16 {
-                // buffer the incoming out-of-order packet
-                self.pending_incoming_packets
-                    .insert(remote_sequence_number, message);
-            }
-            // if the packet is in order, we process it with any other pending incoming packets
-            if sequence_diff == 0 {
-                loop {
-                    let next_seq_number = self.ack_number + 1;
-                    if let Some(message) = self.pending_incoming_packets.remove(&next_seq_number) {
-                        // process the incoming message in-order
-                        let state_type = StateType::from(&message);
-                        self.on_incoming_message(message, next_seq_number).await;
-                        // update the processed ack number if the message is everything but a state message
-                        if state_type != StateType::State {
-                            self.ack_number = next_seq_number;
-                            send_state_message = true;
-                        }
-                    } else {
-                        // we don't have the next sequence packet available, stop processing messages
-                        break;
+        // if the packet is out-of-order,
+        // do not try to process it
+        if sequence_diff > 0 {
+            trace!(
+                "Utp stream {} received out-of-order packet ({}), skipping",
+                self,
+                remote_sequence_number
+            );
+            return;
+        }
+
+        let mut send_state_message = false;
+        loop {
+            let next_seq_number = self.ack_number.wrapping_add(1);
+            match self.pending_incoming_packets.remove(&next_seq_number) {
+                None => break, // we don't have the next sequence packet available, stop processing messages
+                Some(message) => {
+                    // process the incoming message in-order
+                    let state_type = StateType::from(&message);
+                    self.on_incoming_message(message, next_seq_number).await;
+                    // update the processed ack number if the message is everything but a state message
+                    if state_type != StateType::State {
+                        self.ack_number = next_seq_number;
+                        send_state_message = true;
                     }
                 }
             }
@@ -713,7 +729,9 @@ impl UtpStreamContext {
                 response.send(self.write(data).await);
             }
             StreamCommand::Flush { response } => {
-                response.send(self.flush().await);
+                if let Some(queued) = self.pending_flush.replace(response) {
+                    queued.send(self.flush().await);
+                }
             }
         }
     }
@@ -770,31 +788,29 @@ impl UtpStreamContext {
     }
 
     /// Handle the `SYN_ACK` sequence number sent by the remote peer if applicable.
-    ///
-    /// # Returns
-    ///
-    /// It returns true if the packet is a syn ack, else false.
     async fn on_syn_ack(&mut self, seq_number: SequenceNumber, packet_type: StateType) {
+        // Only process SYN_ACKs if we are currently awaiting a connection confirmation
         let is_state_syn_send = self.state == UtpStreamState::SynSent;
         if !is_state_syn_send || packet_type != StateType::State {
             return;
         }
 
-        let ack_number = seq_number;
-        // set the index of the remote ack number to be inline with the incoming sequence number determined by the remote peer
-        // this prevents us from acknowledging every packet up to the remote sequence number
+        // The remote peer's seq_number will be used for their first data/state packet.
+        // To avoid "pre-acknowledging" data we haven't seen, we set our last-received
+        // index to one less than their starting sequence.
+        let ack_number = seq_number.wrapping_sub(1);
         self.ack_number = ack_number;
         self.update_state(UtpStreamState::Connected);
 
         debug!(
-            "Utp stream {} connection established, initial ack number set to {}",
-            self, ack_number
+            "Utp stream {} connection established ({:?}), initial ack number set to {}",
+            self, self.key, ack_number
         );
     }
 
     /// Handle a [StateType::Fin] packet from the remote peer.
     /// This will finalize the connection gracefully.
-    fn on_close_message(&mut self) {
+    async fn on_close_message(&mut self) {
         self.cancellation_token.cancel();
         self.update_state(UtpStreamState::Closed);
         self.read_buffer.wake();
@@ -806,6 +822,7 @@ impl UtpStreamContext {
             let mut buffer = self.read_buffer.lock().await;
             buffer.extend_from_slice(bytes.as_slice());
         }
+        trace!("Utp stream {} received {} data bytes", self, bytes.len());
         self.read_buffer.wake();
     }
 
@@ -823,11 +840,11 @@ impl UtpStreamContext {
             }
             Message::Terminate(_) => {
                 debug!("Utp stream {} received termination message", self);
-                self.on_close_message();
+                self.on_close_message().await;
             }
             Message::Close(_) => {
                 debug!("Utp stream {} received close message", self);
-                self.on_close_message();
+                self.on_close_message().await;
             }
             _ => {}
         }
@@ -876,6 +893,30 @@ impl UtpStreamContext {
         self.send_data(&bytes).await
     }
 
+    /// Try to execute a queued flush, if one is available.
+    async fn do_flush(&mut self) {
+        let flush = match self.pending_flush.take() {
+            Some(e) => e,
+            None => return,
+        };
+
+        match self.state {
+            UtpStreamState::Connected => {
+                flush.send(self.flush().await);
+            }
+            UtpStreamState::Closed => {
+                flush.send(Err(Error::Io(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "stream is closed",
+                ))));
+            }
+            _ => {
+                self.pending_flush = Some(flush);
+                return;
+            }
+        }
+    }
+
     /// Send the initial syn message to the remote peer.
     async fn send_syn(&mut self) -> Result<()> {
         let syn_message = Message::Connect(self.key.recv_id);
@@ -905,7 +946,6 @@ impl UtpStreamContext {
         // send the data in chunks to not exceed the maximum uTP packet size
         for chunk in bytes.chunks(MAX_PACKET_PAYLOAD_SIZE) {
             let message = Message::Data(self.key.send_id, chunk.to_vec());
-            self.seq_number += 1;
             self.send_message(message, self.seq_number, self.ack_number)
                 .await?;
         }
@@ -915,7 +955,6 @@ impl UtpStreamContext {
 
     /// Send the close state to the remote peer.
     async fn send_close(&mut self) -> Result<()> {
-        self.seq_number += 1;
         self.send_message(
             Message::Close(self.key.send_id),
             self.seq_number,
@@ -937,7 +976,8 @@ impl UtpStreamContext {
         let mut packet = message.into_packet(
             seq_number,
             ack_number,
-            self.timestamp_difference_microseconds,
+            self.base_time,
+            self.last_packet_timestamp,
             window_size,
         );
 
@@ -958,6 +998,11 @@ impl UtpStreamContext {
             elapsed.subsec_micros() % 1000
         );
 
+        // increase the next sequence number if we're not sending a state packet
+        if pending_packet.packet.state_type != StateType::State {
+            self.seq_number = self.seq_number.wrapping_add(1);
+        }
+
         // store the pending packet if it's not a state packet (unless it's the initial outgoing Syn state confirmation)
         // this is done as state packets don't have a unique seq number that is confirmed by the remote peer
         if pending_packet.packet.state_type != StateType::State
@@ -970,27 +1015,26 @@ impl UtpStreamContext {
 
     /// Resend all packets which have not yet been acked and have timed out.
     async fn resend_timeout_packets(&mut self) {
-        if self.timestamp_difference_microseconds == 0 {
+        if self.last_packet_timestamp == 0 {
             return;
         }
 
-        let timestamp_now = now_as_micros();
+        let now = self.base_time.elapsed().as_micros() as u32;
         let window_size = self.window_size().await;
 
         let mut timed_out_packets = self
             .pending_outgoing_packets
             .extract_if(.., |e| {
-                timestamp_now.saturating_sub(e.packet.timestamp_microseconds)
-                    > self.timestamp_difference_microseconds.min(5000)
+                now.saturating_sub(e.packet.timestamp_microseconds)
+                    > self.last_packet_timestamp.min(5000)
             })
             .collect_vec();
         for pending_packet in timed_out_packets.iter_mut() {
             // update the packet with the latest info
-            pending_packet.packet.timestamp_microseconds = now_as_micros();
+            pending_packet.packet.timestamp_microseconds = now;
             pending_packet.packet.window_size = window_size;
             pending_packet.packet.acknowledge_number = self.ack_number;
-            pending_packet.packet.timestamp_difference_microseconds =
-                self.timestamp_difference_microseconds;
+            pending_packet.packet.timestamp_difference_microseconds = self.last_packet_timestamp;
 
             trace!(
                 "Utp stream {} is resending packet {:?}",
@@ -1051,19 +1095,7 @@ impl UtpStreamContext {
 
     /// Update the timestamp difference information of the stream connection.
     async fn update_timestamp_difference(&mut self, packet: &Packet) {
-        let timestamp = now_as_micros();
-        let timestamp_difference = timestamp.saturating_sub(packet.timestamp_microseconds);
-        let delay = Duration::from_micros(timestamp_difference as u64);
-        if delay >= Duration::from_secs(1) {
-            debug!(
-                "Utp stream {} high latency detected, {}.{:03}ms",
-                self,
-                delay.as_millis(),
-                delay.subsec_micros() % 1000
-            );
-        }
-
-        self.timestamp_difference_microseconds = timestamp_difference;
+        self.last_packet_timestamp = packet.timestamp_microseconds;
     }
 
     /// Update the currently allowed window size of the remote peer.
@@ -1167,7 +1199,7 @@ pub struct UtpSelectiveAckExtension;
 impl UtpSocketExtension for UtpSelectiveAckExtension {
     async fn incoming(&self, packet: &mut Packet, stream: &UtpStreamContext) {
         match packet.extension {
-            Extension::SelectiveAck => {
+            Extension::SelectiveAck { .. } => {
                 // TODO
                 warn!(
                     "Utp stream {} selective acks extensions not yet implemented",
@@ -1206,7 +1238,6 @@ impl PendingPacket {
 
     /// Increase the resend counter of the pending packet.
     fn increase_resend(&mut self) {
-        self.packet.timestamp_microseconds = now_as_micros();
         self.total_resends += 1;
     }
 
@@ -1331,6 +1362,7 @@ mod tests {
     async fn test_utp_stream_handle_received_packet_ack_syn_sent() {
         init_logger!();
         let sequence_number = 64;
+        let now = Instant::now();
         let (sender, receiver) = unbounded_channel();
         let socket = create_utp_socket!();
         let context = socket.context();
@@ -1357,7 +1389,7 @@ mod tests {
             state_type: StateType::State,
             extension: Extension::None,
             connection_id: recv_id,
-            timestamp_microseconds: now_as_micros(),
+            timestamp_microseconds: now.elapsed().as_micros() as u32,
             timestamp_difference_microseconds: 1500,
             window_size: MAX_READ_BUFFER as u32,
             sequence_number,
@@ -1379,10 +1411,14 @@ mod tests {
             .cloned()
             .expect("expected to have received an incoming syn ack packet");
         let result = stream.ack_number().await;
-        assert_eq!(sequence_number, result, "expected the ack number of the remote peer to have been set to the incoming sequence number");
+        let expected_initial_ack_number = sequence_number - 1;
         assert_eq!(
-            incoming_packet.sequence_number, result,
-            "expected the ack seq_number to have been the same as the initial ack packet"
+            expected_initial_ack_number, result,
+            "expected the ack number of the remote peer to have been set to the incoming sequence number minus one"
+        );
+        assert_eq!(
+            sequence_number, incoming_packet.sequence_number,
+            "expected the seq_number of the incoming syn ack packet to match"
         );
 
         // check the pending outgoing packets
@@ -1608,7 +1644,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[tokio::test]
     async fn test_utp_stream_outgoing_read_incoming_write() {
         init_logger!();
         let expected_result = "Lorem ipsum dolor sit amet, consectetur adipiscing elit.";
@@ -1637,7 +1673,9 @@ mod tests {
         incoming_stream.write(bytes).await.unwrap();
         incoming_stream.flush().await.unwrap();
 
-        let (result_buffer_len, buffer) = timeout!(rx.recv(), Duration::from_millis(500)).unwrap();
+        // wait for the data to be received in the outgoing stream
+        let (result_buffer_len, buffer) = timeout!(rx.recv(), Duration::from_millis(500))
+            .expect("expected the data to have been received");
         let result = String::from_utf8(buffer).unwrap();
         assert_eq!(
             bytes_len, result_buffer_len,

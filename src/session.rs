@@ -1009,21 +1009,21 @@ impl InnerSession {
         let config = self.config.read().await;
         let mut discoveries: Vec<Box<dyn PeerDiscovery>> = Vec::new();
 
-        if config.enable_tcp_peer {
-            let tcp_discovery = TcpPeerDiscovery::new()
+        if config.enable_utp_peer {
+            let utp_discovery = UtpPeerDiscovery::with_port(port)
                 .await
                 .map_err(|e| TorrentError::Peer(e))?;
-            port = tcp_discovery.port();
+            port = utp_discovery.port();
+            discoveries.push(Box::new(utp_discovery));
+        }
+        if config.enable_tcp_peer {
+            let tcp_discovery = TcpPeerDiscovery::with_port(port)
+                .await
+                .map_err(|e| TorrentError::Peer(e))?;
             discoveries.push(Box::new(tcp_discovery));
         }
-        if config.enable_utp_peer {
-            discoveries.push(Box::new(
-                UtpPeerDiscovery::with_port(port)
-                    .await
-                    .map_err(|e| TorrentError::Peer(e))?,
-            ));
-        }
 
+        debug!("Session {} listening on port {}", self, port);
         Ok(discoveries)
     }
 }

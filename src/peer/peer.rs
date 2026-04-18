@@ -2836,6 +2836,7 @@ mod tests {
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
+                vec![],
                 vec![]
             );
             let (outgoing, incoming) = create_peer_pair!(&torrent);
@@ -2864,6 +2865,7 @@ mod tests {
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
+                vec![],
                 vec![]
             );
             let incoming_capture = UtpPacketCaptureExtension::new();
@@ -2885,9 +2887,16 @@ mod tests {
             assert_ne!(PeerState::Error, result);
             assert_ne!(PeerState::Closed, result);
 
+            // close the incoming peer connection
             incoming.close().await;
             let result = incoming.state().await;
-            assert_eq!(PeerState::Closed, result);
+            assert_eq!(
+                PeerState::Closed,
+                result,
+                "expected the incoming connection to be closed"
+            );
+
+            // wait for the outgoing peer connection to reach the closed state
             assert_timeout!(
                 Duration::from_secs(1),
                 PeerState::Closed == outgoing.state().await,

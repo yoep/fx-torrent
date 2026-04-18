@@ -1,15 +1,14 @@
+use crate::peer::protocol::{Packet, StateType};
 use crate::peer::protocol::{UtpStream, UtpStreamContext, MAX_PACKET_SIZE};
 use crate::peer::{Error, Result};
 use async_trait::async_trait;
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use derive_more::Display;
 use fx_handle::Handle;
 use log::{debug, trace, warn};
 use rand::{rng, RngExt};
 use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 use std::io;
-use std::io::{Cursor, Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +17,9 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{Mutex, RwLock};
 use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
+
+/// The uTP packet header len in bytes.
+const UTP_HEADER_SIZE: usize = 20;
 
 /// The UTP socket identifier.
 pub type UtpHandle = Handle;
@@ -75,176 +77,6 @@ impl UtpConnId {
             recv_id: connection_id_recv,
             send_id: connection_id_send,
         }
-    }
-}
-
-/// The extensions of an uTP packet.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Extension {
-    None = 0,
-    SelectiveAck = 1,
-}
-
-impl TryFrom<u8> for Extension {
-    type Error = Error;
-
-    fn try_from(value: u8) -> Result<Self> {
-        match value {
-            0 => Ok(Extension::None),
-            1 => Ok(Extension::SelectiveAck),
-            _ => {
-                // log but ignore the unknown extension number
-                debug!("Utp extension {} is currently not supported", value);
-                Ok(Extension::None)
-            }
-        }
-    }
-}
-
-/// The state type of UTP packets.
-/// See BEP29 for more info about the states of packets.
-#[repr(u8)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum StateType {
-    /// Regular data packet type
-    Data = 0,
-    /// Finalize the connection
-    Fin = 1,
-    /// State packet
-    State = 2,
-    /// Terminate the connection forcefully
-    Reset = 3,
-    /// Initiate a connection
-    Syn = 4,
-}
-
-impl TryFrom<u8> for StateType {
-    type Error = Error;
-
-    fn try_from(value: u8) -> Result<Self> {
-        match value {
-            0 => Ok(StateType::Data),
-            1 => Ok(StateType::Fin),
-            2 => Ok(StateType::State),
-            3 => Ok(StateType::Reset),
-            4 => Ok(StateType::Syn),
-            _ => Err(Error::UnsupportedMessage(value)),
-        }
-    }
-}
-
-/// An uTP packet to be sent or received by uTP sockets & connections.
-/// See BEP29 for more information.
-#[derive(Clone, PartialEq)]
-pub struct Packet {
-    /// The packet type
-    pub state_type: StateType,
-    /// The uTP packet extension
-    pub extension: Extension,
-    /// Unique connection identifier of the stream to which the packet belongs
-    pub connection_id: ConnectionId,
-    /// The timestamp of when this packet was sent
-    pub timestamp_microseconds: u32,
-    /// The difference between the local time and the timestamp in the last received packet
-    pub timestamp_difference_microseconds: u32,
-    /// The number of bytes in-flight that have not been acked yet
-    pub window_size: u32,
-    /// The packet sequence number
-    pub sequence_number: u16,
-    /// The sequence number of the last received packet
-    pub acknowledge_number: u16,
-    /// The payload of the packet.
-    pub payload: Vec<u8>,
-}
-
-impl Packet {
-    /// Convert the packet into the uTP protocol wire bytes.
-    pub fn as_bytes(&self) -> Result<Vec<u8>> {
-        let mut buffer = vec![0u8; 2];
-
-        // write the type & version into the first byte
-        buffer[0] = (self.state_type as u8) << 4 | 1;
-        // write the extension number in the next byte
-        buffer[1] = self.extension as u8;
-        // write the connection number
-        buffer.write_u16::<BigEndian>(self.connection_id)?;
-        // write the current timestamp
-        buffer.write_u32::<BigEndian>(self.timestamp_microseconds)?;
-        // write the timestamp difference
-        buffer.write_u32::<BigEndian>(self.timestamp_difference_microseconds)?;
-        // write the current in-flight window size
-        buffer.write_u32::<BigEndian>(self.window_size)?;
-        // write the sequence number
-        buffer.write_u16::<BigEndian>(self.sequence_number)?;
-        // write the acknowledgment number
-        buffer.write_u16::<BigEndian>(self.acknowledge_number)?;
-        // append the payload
-        buffer.write_all(self.payload.as_slice())?;
-
-        Ok(buffer)
-    }
-}
-
-impl TryFrom<&[u8]> for Packet {
-    type Error = Error;
-
-    fn try_from(value: &[u8]) -> Result<Self> {
-        let mut cursor = Cursor::new(value);
-
-        // start by reading the version from the first byte
-        let byte = cursor.read_u8()?;
-        let version = byte & 0x0f;
-
-        // if the version doesn't match v1, we reject the packet
-        if version != 1 {
-            return Err(Error::UnsupportedVersion(version as u32));
-        }
-
-        let state_type_value = byte >> 4;
-        let state_type = StateType::try_from(state_type_value)?;
-        // read the extension from the second byte
-        let extension = Extension::try_from(cursor.read_u8()?)?;
-        let connection_id = cursor.read_u16::<BigEndian>()?;
-        let timestamp_microseconds = cursor.read_u32::<BigEndian>()?;
-        let timestamp_difference_microseconds = cursor.read_u32::<BigEndian>()?;
-        let window_size = cursor.read_u32::<BigEndian>()?;
-        let sequence_number = cursor.read_u16::<BigEndian>()?;
-        let acknowledge_number = cursor.read_u16::<BigEndian>()?;
-        // read the remaining bytes as payload
-        let mut payload = Vec::new();
-        cursor.read_to_end(&mut payload)?;
-
-        Ok(Self {
-            state_type,
-            extension,
-            connection_id,
-            timestamp_microseconds,
-            timestamp_difference_microseconds,
-            window_size,
-            sequence_number,
-            acknowledge_number,
-            payload,
-        })
-    }
-}
-
-impl Debug for Packet {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Packet")
-            .field("state_type", &self.state_type)
-            .field("extension", &self.extension)
-            .field("connection_id", &self.connection_id)
-            .field("timestamp_microseconds", &self.timestamp_microseconds)
-            .field(
-                "timestamp_difference_microseconds",
-                &self.timestamp_difference_microseconds,
-            )
-            .field("window_size", &self.window_size)
-            .field("sequence_number", &self.sequence_number)
-            .field("acknowledge_number", &self.acknowledge_number)
-            .field("payload", &self.payload.len())
-            .finish()
     }
 }
 
@@ -462,6 +294,15 @@ impl UtpSocketContext {
         addr: SocketAddr,
         context: &Arc<UtpSocketContext>,
     ) {
+        if packet_bytes.len() < UTP_HEADER_SIZE {
+            trace!(
+                "Utp socket {} incoming packet from {} too small",
+                self,
+                addr
+            );
+            return;
+        }
+
         let packet_size = packet_bytes.len();
         match Packet::try_from(packet_bytes) {
             Ok(packet) => {
@@ -582,6 +423,7 @@ pub struct UtpSocketId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer::protocol::Extension;
     use crate::peer::protocol::UtpStreamState;
     use std::net::Ipv4Addr;
     use std::time::{SystemTime, UNIX_EPOCH};

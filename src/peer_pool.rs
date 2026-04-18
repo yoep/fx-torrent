@@ -148,10 +148,10 @@ impl PeerPool {
         );
         match reason {
             CloseReason::ConnectionFailed => {
-                info.failure_count += 1;
+                info.failed();
             }
             CloseReason::FastProtocol => {
-                info.failure_count += 1;
+                info.failed();
                 info.last_connected = Some(Instant::now());
             }
             _ => {
@@ -192,8 +192,9 @@ impl PeerPool {
     ///
     /// * `len` - The total number of peer list address to retrieve.
     pub fn new_connection_candidates(&mut self, len: usize) -> Vec<SocketAddr> {
-        let remaining_slots = self.limit - self.peers.len();
-        let len = len.min(remaining_slots).min(self.peers.len());
+        let peers_len = self.peers.len();
+        let remaining_slots = self.limit.saturating_sub(peers_len);
+        let len = len.min(remaining_slots).min(peers_len);
 
         self.peers
             .iter_mut()
@@ -368,6 +369,11 @@ impl PeerInfo {
     /// It returns true when the peer is a candidate, else false.
     pub fn is_connect_candidate(&self) -> bool {
         !self.is_in_use && !self.is_banned && self.failure_count < CONNECTION_FAILURE_THRESHOLD
+    }
+
+    /// Increase the failure count for this peer.
+    fn failed(&mut self) {
+        self.failure_count += 1;
     }
 }
 
