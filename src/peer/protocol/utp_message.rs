@@ -210,4 +210,40 @@ mod tests {
         let result = StateType::from(&message);
         assert_eq!(StateType::Fin, result);
     }
+
+    #[test]
+    fn test_into_packet_terminate() {
+        let connection_id = 1342;
+        let sequence_number = 12;
+        let acknowledge_number = 877;
+        let timestamp_microseconds = 10024;
+        let timestamp_difference_microseconds = 2048;
+        let window_size = 1024 * 1024;
+        let reason = CloseReason::InvalidChokeMessage;
+        let message = UtpMessage::Terminate {
+            connection: connection_id,
+            reason,
+        };
+        let expected_result = Packet {
+            state_type: StateType::Reset,
+            extension: Extension::CloseReason { reason },
+            connection_id,
+            timestamp_microseconds,
+            timestamp_difference_microseconds,
+            window_size,
+            sequence_number,
+            acknowledge_number,
+            payload: vec![],
+        };
+
+        let result = message.into_packet(
+            sequence_number,
+            acknowledge_number,
+            timestamp_microseconds,
+            timestamp_difference_microseconds,
+            window_size,
+        );
+
+        assert_eq!(expected_result, result);
+    }
 }

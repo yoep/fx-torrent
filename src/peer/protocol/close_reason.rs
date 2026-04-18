@@ -184,4 +184,9 @@ mod tests {
             ))
         );
     }
+
+    #[test]
+    fn test_default() {
+        assert_eq!(CloseReason::default(), CloseReason::None);
+    }
 }

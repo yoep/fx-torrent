@@ -1093,11 +1093,12 @@ pub mod tests {
                 SessionConfig::builder()
                     .client_name("fetch magnet test")
                     .path(temp_path)
+                    .enable_utp_peer(false)
                     .build(),
             )
             .extensions(DEFAULT_TORRENT_EXTENSIONS())
             .operations(vec![
-                TorrentOperationFactory::new(|| Box::new(TorrentConnectPeersOperation::new(true))),
+                TorrentOperationFactory::new(|| Box::new(TorrentConnectPeersOperation::new(false))),
                 TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new(None))),
                 TorrentOperationFactory::new(|| {
                     Box::new(TorrentCreatePiecesAndFilesOperation::new())
@@ -1108,7 +1109,7 @@ pub mod tests {
 
         // initially, add the torrent without any flags
         let target_torrent = session
-            .add_torrent_from_uri(uri, TorrentFlags::none())
+            .add_torrent_from_uri(uri, TorrentFlags::Metadata)
             .await
             .unwrap();
 
