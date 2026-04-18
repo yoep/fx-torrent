@@ -4,7 +4,7 @@ use crate::peer::extension::{
     Extension, ExtensionName, ExtensionNumber, ExtensionRegistry, Extensions,
 };
 use crate::peer::peer_connection::PeerConnection;
-use crate::peer::protocol::UtpStream;
+use crate::peer::protocol::{CloseReason, UtpStream};
 use crate::peer::protocol::{ExtendedHandshake, Handshake, HashRequest, Message, Piece, Request};
 use crate::peer::{Error, Metrics, PeerId, Result};
 use crate::torrent::InnerTorrent;
@@ -967,7 +967,7 @@ impl Peer for BitTorrentPeer {
     }
 
     async fn close(&self) {
-        self.inner.close(CloseReason::Client).await
+        self.inner.close(CloseReason::None).await
     }
 }
 
@@ -987,26 +987,6 @@ impl PartialEq for BitTorrentPeer {
     fn eq(&self, other: &Self) -> bool {
         self.inner.client == other.inner.client
     }
-}
-
-/// The reason a peer connection is being closed
-#[derive(Debug, Display, PartialEq)]
-pub enum CloseReason {
-    /// Establishing a connection to the remote peer failed.
-    #[display("connection failed")]
-    ConnectionFailed,
-    /// The client closed the peer connection
-    #[display("client closed connection")]
-    Client,
-    /// The remote peer closed the peer connection
-    #[display("remote closed connection")]
-    Remote,
-    /// The client has closed the connection due to an invalid received fast protocol message
-    #[display("invalid fast protocol message received")]
-    FastProtocol,
-    /// The client encountered an error while communicating with the remote peer
-    #[display("error")]
-    Error,
 }
 
 /// The piece that should be requested from the remote peer.
@@ -1335,7 +1315,7 @@ impl PeerContext {
     /// Handle events that are sent from the peer reader.
     async fn handle_reader_event(&self, event: PeerResponse) {
         match event {
-            PeerResponse::Closed => self.close(CloseReason::Remote).await,
+            PeerResponse::Closed => self.close(CloseReason::None).await,
             PeerResponse::Message(message) => {
                 if let Message::ExtendedPayload(extension_number, payload) = message {
                     trace!(
@@ -2110,7 +2090,7 @@ impl PeerContext {
                 "Fast protocol is disabled, closing connection with peer {}",
                 self
             );
-            self.close(CloseReason::FastProtocol).await;
+            self.close(CloseReason::InvalidAllowFastMessage).await;
             return;
         }
 
@@ -2130,7 +2110,7 @@ impl PeerContext {
         if mutex.contains(&request) {
             warn!("Peer {} requested duplicate request {:?}", self, request);
             if self.is_protocol_enabled(ProtocolExtensionFlags::Fast).await {
-                self.close(CloseReason::FastProtocol).await;
+                self.close(CloseReason::InvalidAllowFastMessage).await;
             }
 
             return;
@@ -2198,7 +2178,7 @@ impl PeerContext {
     async fn remote_fast_piece(&self, piece: PieceIndex) {
         // When the fast extension is disabled, if a peer receives an Allowed Fast message then the peer MUST close the connection.
         if !self.is_protocol_enabled(ProtocolExtensionFlags::Fast).await {
-            self.close(CloseReason::FastProtocol).await;
+            self.close(CloseReason::InvalidAllowFastMessage).await;
             return;
         }
 
@@ -2221,7 +2201,7 @@ impl PeerContext {
     async fn handle_piece_suggestion(&self, piece: PieceIndex) {
         // When the fast extension is disabled, if a peer receives a Suggest Piece message, the peer MUST close the connection.
         if !self.is_protocol_enabled(ProtocolExtensionFlags::Fast).await {
-            self.close(CloseReason::FastProtocol).await;
+            self.close(CloseReason::InvalidAllowFastMessage).await;
             return;
         }
 
@@ -2255,7 +2235,7 @@ impl PeerContext {
                 "Peer {} received extended handshake before the initial handshake was completed",
                 self
             );
-            self.close(CloseReason::Client).await;
+            self.close(CloseReason::None).await;
         }
     }
 
@@ -2755,7 +2735,7 @@ impl PeerContext {
     /// Close the connection of the peer.
     /// This cancels the main loop of the peer and notifies the parent torrent of the closure.
     pub(crate) async fn close(&self, reason: CloseReason) {
-        debug!("Peer {} is closing, {}", self, reason);
+        debug!("Peer {} is closing, {:?}", self, reason);
         // cancel the main loop of the peer to stop any ongoing operation
         self.cancellation_token.cancel();
         // clear any permits as they cannot be completed from now on
@@ -2836,6 +2816,7 @@ mod tests {
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
+                vec![],
                 vec![]
             );
             let (outgoing, incoming) = create_peer_pair!(&torrent);
@@ -2864,6 +2845,7 @@ mod tests {
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
+                vec![],
                 vec![]
             );
             let incoming_capture = UtpPacketCaptureExtension::new();
@@ -2885,9 +2867,16 @@ mod tests {
             assert_ne!(PeerState::Error, result);
             assert_ne!(PeerState::Closed, result);
 
+            // close the incoming peer connection
             incoming.close().await;
             let result = incoming.state().await;
-            assert_eq!(PeerState::Closed, result);
+            assert_eq!(
+                PeerState::Closed,
+                result,
+                "expected the incoming connection to be closed"
+            );
+
+            // wait for the outgoing peer connection to reach the closed state
             assert_timeout!(
                 Duration::from_secs(1),
                 PeerState::Closed == outgoing.state().await,

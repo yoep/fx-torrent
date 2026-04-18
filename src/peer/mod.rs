@@ -5,6 +5,7 @@ pub use errors::*;
 pub use metrics::*;
 pub use peer::*;
 pub use peer_id::*;
+pub use protocol::CloseReason;
 
 #[cfg(test)]
 #[macro_use]

@@ -1,9 +1,14 @@
 pub use bt::*;
+pub use close_reason::*;
+use utp_message::*;
+use utp_packet::*;
 pub use utp_socket::*;
 pub use utp_stream::*;
 
 mod bt;
-mod utils;
+mod close_reason;
+mod utp_message;
+mod utp_packet;
 mod utp_socket;
 mod utp_stream;
 

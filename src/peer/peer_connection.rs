@@ -61,7 +61,7 @@ where
             metrics,
             cancellation_token.clone(),
         );
-        tokio::spawn(async move { reader.start_read_loop().await });
+        tokio::spawn(async move { reader.run().await });
 
         PeerConnection::<TcpStream> {
             id,
@@ -93,7 +93,7 @@ where
             metrics,
             cancellation_token.clone(),
         );
-        tokio::spawn(async move { reader.start_read_loop().await });
+        tokio::spawn(async move { reader.run().await });
 
         PeerConnection::<UtpStream> {
             id,
@@ -252,8 +252,8 @@ where
         }
     }
 
-    /// Start the main loop of the reader.
-    async fn start_read_loop(&mut self) {
+    /// Run the main loop of the reader.
+    async fn run(&mut self) {
         // as initial message, try to read the handshake
         let cancellation_token = self.cancellation_token.clone();
         select! {
@@ -547,7 +547,7 @@ mod tests {
 
             let _ = select! {
                 _ = time::sleep(Duration::from_millis(250)) => Err(Error::Io(io::Error::new(io::ErrorKind::TimedOut, "expected the reader main loop to have ended"))),
-                _ = reader.start_read_loop() => Ok(()),
+                _ = reader.run() => Ok(()),
             }.unwrap();
 
             let result = timeout!(

@@ -1009,21 +1009,21 @@ impl InnerSession {
         let config = self.config.read().await;
         let mut discoveries: Vec<Box<dyn PeerDiscovery>> = Vec::new();
 
-        if config.enable_tcp_peer {
-            let tcp_discovery = TcpPeerDiscovery::new()
+        if config.enable_utp_peer {
+            let utp_discovery = UtpPeerDiscovery::with_port(port)
                 .await
                 .map_err(|e| TorrentError::Peer(e))?;
-            port = tcp_discovery.port();
+            port = utp_discovery.port();
+            discoveries.push(Box::new(utp_discovery));
+        }
+        if config.enable_tcp_peer {
+            let tcp_discovery = TcpPeerDiscovery::with_port(port)
+                .await
+                .map_err(|e| TorrentError::Peer(e))?;
             discoveries.push(Box::new(tcp_discovery));
         }
-        if config.enable_utp_peer {
-            discoveries.push(Box::new(
-                UtpPeerDiscovery::with_port(port)
-                    .await
-                    .map_err(|e| TorrentError::Peer(e))?,
-            ));
-        }
 
+        debug!("Session {} listening on port {}", self, port);
         Ok(discoveries)
     }
 }
@@ -1093,11 +1093,12 @@ pub mod tests {
                 SessionConfig::builder()
                     .client_name("fetch magnet test")
                     .path(temp_path)
+                    .enable_utp_peer(false)
                     .build(),
             )
             .extensions(DEFAULT_TORRENT_EXTENSIONS())
             .operations(vec![
-                TorrentOperationFactory::new(|| Box::new(TorrentConnectPeersOperation::new(true))),
+                TorrentOperationFactory::new(|| Box::new(TorrentConnectPeersOperation::new(false))),
                 TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new(None))),
                 TorrentOperationFactory::new(|| {
                     Box::new(TorrentCreatePiecesAndFilesOperation::new())
@@ -1108,7 +1109,7 @@ pub mod tests {
 
         // initially, add the torrent without any flags
         let target_torrent = session
-            .add_torrent_from_uri(uri, TorrentFlags::none())
+            .add_torrent_from_uri(uri, TorrentFlags::Metadata)
             .await
             .unwrap();
 

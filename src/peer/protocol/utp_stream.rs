@@ -1,34 +1,41 @@
-use crate::peer::protocol::utils::now_as_micros;
+use crate::channel::{ChannelReceiver, ChannelSender, Reply};
 use crate::peer::protocol::{
-    ConnectionId, Extension, Packet, SequenceNumber, StateType, UtpConnId, UtpSocketContext,
-    UtpSocketExtension, UtpSocketExtensions, MAX_PACKET_PAYLOAD_SIZE,
+    CloseReason, Extension, Packet, SequenceNumber, StateType, UtpConnId, UtpMessage,
+    UtpSocketContext, UtpSocketExtension, UtpSocketExtensions, UtpSocketId,
+    MAX_PACKET_PAYLOAD_SIZE,
 };
 use crate::peer::{Error, Result};
 use async_trait::async_trait;
 use derive_more::Display;
+use futures::task::AtomicWaker;
 use futures::Future;
+use itertools::Itertools;
 use log::{debug, trace, warn};
 use rand::random;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::io;
 use std::net::SocketAddr;
-use std::pin::{pin, Pin};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::select;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::{Mutex, MutexGuard, RwLock};
+use tokio::sync::{Mutex, MutexGuard, TryLockError};
 use tokio::time::interval;
+use tokio_util::bytes::{Buf, Bytes, BytesMut};
 use tokio_util::sync::CancellationToken;
 
 /// The maximum amount out-of-order packets which can stored in memory.
 const MAX_UNACKED_PACKETS: usize = 128;
 /// The maximum amount of bytes allowed within the read buffer.
-const MAX_READ_BUFFER: usize = 1 * 1024 * 1024; // 1MB
-const RETRY_INTERVAL: Duration = Duration::from_millis(500);
+const MAX_READ_BUFFER: usize = 1024 * 1024; // 1MB
+/// The bucket size of recorded delays in the LEDBAT algorithm.
+const LED_BAT_BUCKET_SIZE: usize = 16;
+/// The minimum Round-Trip-Time value to consider for the LEDBAT algorithm.
+const LED_BAT_MIN_RTT: Duration = Duration::from_millis(100);
 
 /// The state of an uTP stream connection.
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -45,146 +52,18 @@ pub enum UtpStreamState {
     Closed,
 }
 
-/// A parsed uTP message.
-#[derive(Clone, PartialEq)]
-enum Message {
-    /// Connect to the utp peer with the connection id
-    Connect(ConnectionId),
-    /// The latest known state of an uTP peer with `sequence_number` & `acknowledge_number`.
-    State(ConnectionId, SequenceNumber, SequenceNumber),
-    /// Message containing data information
-    Data(ConnectionId, Vec<u8>),
-    /// Terminate the connection forcefully.
-    Terminate(ConnectionId),
-    /// Close the connection
-    Close(ConnectionId),
-}
-
-impl Message {
-    /// Convert this message into an uTP packet.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - The message to parse into an uTP packet.
-    /// * `sequence_number` - The current sequence number of the uTP stream.
-    /// * `acknowledge_number` - The last received sequence number of the uTP stream from the remote peer.
-    /// * `timestamp_difference_microseconds` - The latency of the uTP stream connection in microseconds.
-    pub fn into_packet(
-        self,
-        sequence_number: SequenceNumber,
-        acknowledge_number: SequenceNumber,
-        timestamp_difference_microseconds: u32,
-        window_size: u32,
-    ) -> Packet {
-        let timestamp_microseconds = now_as_micros();
-        match self {
-            Message::Connect(connection_id) => Packet {
-                state_type: StateType::Syn,
-                extension: Extension::None,
-                connection_id,
-                timestamp_microseconds,
-                timestamp_difference_microseconds,
-                window_size,
-                sequence_number,
-                acknowledge_number,
-                payload: Vec::with_capacity(0),
-            },
-            Message::State(connection_id, seq_number, ack_number) => Packet {
-                state_type: StateType::State,
-                extension: Extension::None,
-                connection_id,
-                timestamp_microseconds,
-                timestamp_difference_microseconds,
-                window_size,
-                sequence_number: seq_number,
-                acknowledge_number: ack_number,
-                payload: Vec::with_capacity(0),
-            },
-            Message::Data(connection_id, payload) => Packet {
-                state_type: StateType::Data,
-                extension: Extension::None,
-                connection_id,
-                timestamp_microseconds,
-                timestamp_difference_microseconds,
-                window_size,
-                sequence_number,
-                acknowledge_number,
-                payload,
-            },
-            Message::Terminate(connection_id) => Packet {
-                state_type: StateType::Reset,
-                extension: Extension::None,
-                connection_id,
-                timestamp_microseconds,
-                timestamp_difference_microseconds,
-                window_size,
-                sequence_number,
-                acknowledge_number,
-                payload: Vec::with_capacity(0),
-            },
-            Message::Close(connection_id) => Packet {
-                state_type: StateType::Fin,
-                extension: Extension::None,
-                connection_id,
-                timestamp_microseconds,
-                timestamp_difference_microseconds,
-                window_size,
-                sequence_number,
-                acknowledge_number,
-                payload: Vec::with_capacity(0),
-            },
-        }
-    }
-}
-
-impl TryFrom<&Packet> for Message {
-    type Error = Error;
-
-    fn try_from(value: &Packet) -> Result<Self> {
-        match value.state_type {
-            StateType::Syn => Ok(Message::Connect(value.connection_id)),
-            StateType::State => Ok(Message::State(
-                value.connection_id,
-                value.sequence_number,
-                value.acknowledge_number,
-            )),
-            StateType::Data => Ok(Message::Data(value.connection_id, value.payload.clone())),
-            StateType::Fin => Ok(Message::Close(value.connection_id)),
-            StateType::Reset => Ok(Message::Terminate(value.connection_id)),
-        }
-    }
-}
-
-impl From<&Message> for StateType {
-    fn from(value: &Message) -> Self {
-        match value {
-            Message::Connect(_) => StateType::Syn,
-            Message::State(_, _, _) => StateType::State,
-            Message::Data(_, _) => StateType::Data,
-            Message::Terminate(_) => StateType::Reset,
-            Message::Close(_) => StateType::Fin,
-        }
-    }
-}
-
-impl Debug for Message {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Message::Connect(id) => write!(f, "Connect({})", id),
-            Message::State(id, seq, ack) => write!(f, "State({}, {}, {})", id, seq, ack),
-            Message::Data(id, data) => write!(f, "Data({}, len {})", id, data.len()),
-            Message::Terminate(id) => write!(f, "Terminate({})", id),
-            Message::Close(id) => write!(f, "Close({})", id),
-        }
-    }
-}
-
 /// A uTorrent transport protocol connection stream.
 /// This stream allows to read and write to a specific uTP connection.
-#[derive(Debug, Display)]
-#[display("{}", inner)]
+#[derive(Display)]
+#[display("{} ({})", id, addr)]
 pub struct UtpStream {
-    inner: Arc<UtpStreamContext>,
+    id: UtpSocketId,
+    addr: SocketAddr,
+    read_buffer: ReadBuffer,
+    write_fut: Option<Pin<Box<dyn Future<Output = std::result::Result<usize, io::Error>> + Send>>>,
+    flush_fut: Option<Pin<Box<dyn Future<Output = Result<()>> + Send>>>,
+    sender: ChannelSender<StreamCommand>,
+    cancellation_token: CancellationToken,
 }
 
 impl UtpStream {
@@ -198,23 +77,34 @@ impl UtpStream {
         extensions: Arc<UtpSocketExtensions>,
     ) -> Result<Self> {
         let seq_number = 1;
-        let inner = Self::new(
+        let id = *socket.id();
+        let (sender, receiver) = channel!(16);
+        let mut inner = Self::new(
             key,
             addr,
             socket,
+            ConnectionType::Outgoing,
             UtpStreamState::Initializing,
             seq_number,
             0,
             extensions,
         );
+        let read_buffer = inner.read_buffer.clone();
+        let cancellation_token = inner.cancellation_token.clone();
 
-        let inner_main_loop = inner.clone();
         tokio::spawn(async move {
-            inner_main_loop.start(message_receiver).await;
+            inner.run(message_receiver, receiver).await;
         });
 
-        inner.send_syn().await?;
-        Ok(Self { inner })
+        Ok(Self {
+            id,
+            addr,
+            read_buffer,
+            write_fut: None,
+            flush_fut: None,
+            sender,
+            cancellation_token,
+        })
     }
 
     /// Try to accept a new incoming uTP stream for the given address.
@@ -227,80 +117,135 @@ impl UtpStream {
         message_receiver: UnboundedReceiver<Packet>,
         extensions: Arc<UtpSocketExtensions>,
     ) -> Result<Self> {
-        let inner = Self::new(
+        let id = *socket.id();
+        let (sender, receiver) = channel!(16);
+        let mut inner = Self::new(
             key,
             addr,
             socket,
+            ConnectionType::Incoming,
             UtpStreamState::SynRecv,
             random(),
             ack_number,
             extensions,
         );
+        let read_buffer = inner.read_buffer.clone();
+        let cancellation_token = inner.cancellation_token.clone();
 
-        let inner_main_loop = inner.clone();
         tokio::spawn(async move {
-            inner_main_loop.start(message_receiver).await;
+            inner.run(message_receiver, receiver).await;
         });
 
-        inner.send_state().await?;
-        inner.update_state(UtpStreamState::Connected).await;
-        Ok(Self { inner })
+        Ok(Self {
+            id,
+            addr,
+            read_buffer,
+            write_fut: None,
+            flush_fut: None,
+            sender,
+            cancellation_token,
+        })
     }
 
-    /// Get the remote socket address of the uTP stream.
+    /// Returns the remote socket address of the uTP stream.
     pub fn addr(&self) -> SocketAddr {
-        self.inner.addr
+        self.addr
+    }
+
+    /// Returns the id of the remote peer.
+    pub async fn recv_id(&self) -> u16 {
+        self.sender
+            .send(|tx| StreamCommand::GetRecvId { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Returns the current state if the uTP stream connection.
+    pub async fn state(&self) -> UtpStreamState {
+        self.sender
+            .send(|tx| StreamCommand::GetState { response: tx })
+            .await
+            .await
+            .unwrap_or(UtpStreamState::Closed)
+    }
+
+    /// Returns the current sequence number of the client stream.
+    pub async fn seq_number(&self) -> SequenceNumber {
+        self.sender
+            .send(|tx| StreamCommand::GetSeqNumber { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Returns the last acknowledged number we've sent to the remote peer.
+    pub async fn ack_number(&self) -> SequenceNumber {
+        self.sender
+            .send(|tx| StreamCommand::GetAckNumber { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Returns the last sequence number that has been acknowledged by the remote peer.
+    pub async fn last_ack_number(&self) -> SequenceNumber {
+        self.sender
+            .send(|tx| StreamCommand::GetLastAckNumber { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Returns the total number of pending outgoing packets.
+    pub async fn pending_outgoing_len(&self) -> usize {
+        self.sender
+            .send(|tx| StreamCommand::PendingOutgoingLen { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
     }
 
     /// Check if the uTP stream is closed.
     /// In this state, the stream is no longer able to send or receive any packets.
     pub async fn is_closed(&self) -> bool {
-        *self.inner.state.read().await == UtpStreamState::Closed
-    }
-
-    /// Get the current latency of the stream in microseconds.
-    pub async fn latency(&self) -> u32 {
-        *self.inner.timestamp_difference_microseconds.lock().await
-    }
-
-    /// Get the state if the uTP stream connection.
-    pub async fn state(&self) -> UtpStreamState {
-        *self.inner.state.read().await
+        self.cancellation_token.is_cancelled() || self.state().await == UtpStreamState::Closed
     }
 
     /// Close the uTP stream.
-    pub async fn close(&self) -> Result<()> {
-        self.inner.close().await
+    pub fn close(&self) {
+        self.cancellation_token.cancel()
     }
 
     fn new(
         key: UtpConnId,
         addr: SocketAddr,
         socket: Arc<UtpSocketContext>,
+        connection_type: ConnectionType,
         state: UtpStreamState,
         seq_number: u16,
         ack_number: u16,
         extensions: Arc<UtpSocketExtensions>,
-    ) -> Arc<UtpStreamContext> {
-        Arc::new(UtpStreamContext {
+    ) -> UtpStreamContext {
+        UtpStreamContext {
             key,
             addr,
             socket,
-            state: RwLock::new(state),
-            seq_number: Mutex::new(seq_number),
-            ack_number: Mutex::new(ack_number),
-            last_ack_number: Mutex::new(seq_number - 1),
+            connection_type,
+            state,
+            seq_number,
+            ack_number,
+            last_ack_number: seq_number - 1,
             pending_incoming_packets: Default::default(),
             pending_outgoing_packets: Default::default(),
-            timestamp_difference_microseconds: Default::default(),
             read_buffer: Default::default(),
-            read_buffer_waker: Default::default(),
-            write_buffer: Default::default(),
-            write_buffer_waker: Default::default(),
-            remote_window_size: Mutex::new(MAX_READ_BUFFER as u32),
+            write_buffer: BytesMut::with_capacity(MAX_READ_BUFFER),
+            pending_flush: None,
+            led_bat: Default::default(),
+            remote_window_size: MAX_READ_BUFFER as u32,
             extensions,
             cancellation_token: Default::default(),
-        })
+        }
     }
 }
 
@@ -310,84 +255,88 @@ impl AsyncRead for UtpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let mut data = match pin!(self.inner.read_buffer.lock()).poll(cx) {
-            Poll::Ready(e) => e,
-            Poll::Pending => return Poll::Pending,
+        let mut read_buf = match self.read_buffer.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
         };
+        if !read_buf.has_remaining() {
+            // EOF the read buffer when the stream is being closed
+            if self.cancellation_token.is_cancelled() {
+                return Poll::Ready(Ok(()));
+            }
 
-        if data.is_empty() {
-            return self.inner.register_read_waker(cx);
+            self.read_buffer.register(cx.waker());
+            return Poll::Pending;
         }
 
-        let to_copy = std::cmp::min(data.len(), buf.remaining());
-        buf.put_slice(data.drain(..to_copy).as_slice());
-
+        let to_copy = std::cmp::min(read_buf.remaining(), buf.remaining());
+        buf.put_slice(&read_buf.split_to(to_copy));
         Poll::Ready(Ok(()))
     }
 }
 
 impl AsyncWrite for UtpStream {
     fn poll_write(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::result::Result<usize, io::Error>> {
-        let mut data = match pin!(self.inner.write_buffer.lock()).poll(cx) {
-            Poll::Ready(e) => e,
-            Poll::Pending => return Poll::Pending,
-        };
+        let sender = self.sender.clone();
+        let mut fut = self.write_fut.take().unwrap_or_else(|| {
+            let data = Bytes::copy_from_slice(buf);
+            Box::pin(async move {
+                sender
+                    .send(|tx| StreamCommand::WriteData { data, response: tx })
+                    .await
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            })
+        });
 
-        data.extend_from_slice(buf);
-
-        Poll::Ready(Ok(buf.len()))
+        match fut.as_mut().poll(cx) {
+            Poll::Ready(result) => Poll::Ready(result),
+            Poll::Pending => {
+                self.write_fut = Some(fut);
+                Poll::Pending
+            }
+        }
     }
 
     fn poll_flush(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), io::Error>> {
-        let mut data = match pin!(self.inner.write_buffer.lock()).poll(cx) {
-            Poll::Ready(e) => e,
-            Poll::Pending => return Poll::Pending,
-        };
+        let sender = self.sender.clone();
+        let mut fut = self.flush_fut.take().unwrap_or_else(|| {
+            Box::pin(async move {
+                sender
+                    .send(|tx| StreamCommand::Flush { response: tx })
+                    .await
+                    .await
+            })
+        });
 
-        // if there's no data to flush, return success immediately
-        if data.is_empty() {
-            return Poll::Ready(Ok(()));
-        }
-
-        // check if the current stream state allows writing data to the remote peer
-        let is_writing_allowed = match pin!(self.inner.is_writing_allowed(data.as_slice())).poll(cx)
-        {
-            Poll::Ready(e) => e,
-            Poll::Pending => return Poll::Pending,
-        };
-        if !is_writing_allowed {
-            self.inner.register_write_waker(cx);
-            return Poll::Pending;
-        }
-
-        let result = pin!(self.inner.send_data(data.drain(..).as_slice())).poll(cx);
-        match result {
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => {
-                if let Error::Io(e) = e {
-                    Poll::Ready(Err(e))
-                } else {
-                    Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e.to_string())))
-                }
+        match fut.as_mut().poll(cx) {
+            Poll::Ready(result) => Poll::Ready(result.map_err(|err| match err {
+                Error::Io(e) => e,
+                _ => io::Error::new(io::ErrorKind::Other, err),
+            })),
+            Poll::Pending => {
+                self.flush_fut = Some(fut);
+                Poll::Pending
             }
-            Poll::Pending => Poll::Pending,
         }
     }
 
     fn poll_shutdown(
         self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        _: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), io::Error>> {
-        pin!(self.close())
-            .poll(cx)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        self.close();
+        Poll::Ready(Ok(()))
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -395,11 +344,46 @@ impl AsyncWrite for UtpStream {
     }
 }
 
+impl Debug for UtpStream {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UtpStream")
+            .field("id", &self.id)
+            .field("addr", &self.addr)
+            .field("read_buffer", &self.read_buffer)
+            .field("sender", &self.sender)
+            .field("cancellation_token", &self.cancellation_token)
+            .finish()
+    }
+}
+
 impl Drop for UtpStream {
     fn drop(&mut self) {
         trace!("Utp stream {} is being dropped", self);
-        self.inner.cancellation_token.cancel();
+        self.cancellation_token.cancel();
     }
+}
+
+#[derive(Debug)]
+enum StreamCommand {
+    /// Returns the id of the remote peer.
+    GetRecvId { response: Reply<u16> },
+    /// Returns the current state of the stream.
+    GetState { response: Reply<UtpStreamState> },
+    /// Returns the current sequence number of the stream.
+    GetSeqNumber { response: Reply<SequenceNumber> },
+    /// Returns the current ack number of the stream.
+    GetAckNumber { response: Reply<SequenceNumber> },
+    /// Returns the last acknowledged number by the remote peer.
+    GetLastAckNumber { response: Reply<SequenceNumber> },
+    /// Returns the total number of pending outgoing packets.
+    PendingOutgoingLen { response: Reply<usize> },
+    /// Try to write the given data to the remote peer.
+    WriteData {
+        data: Bytes,
+        response: Reply<Result<usize>>,
+    },
+    /// Flush the current write buffer to the remote peer.
+    Flush { response: Reply<Result<()>> },
 }
 
 #[derive(Debug, Display)]
@@ -411,30 +395,30 @@ pub struct UtpStreamContext {
     addr: SocketAddr,
     /// The uTP socket writer channel
     socket: Arc<UtpSocketContext>,
+    /// The direction type of the connection.
+    connection_type: ConnectionType,
     /// The state of the stream connection
-    state: RwLock<UtpStreamState>,
-    /// The last sent packet sequence number to the remote peer.
-    seq_number: Mutex<SequenceNumber>,
+    state: UtpStreamState,
+    /// The next sequence number that will be used when sending packets. (outgoing)
+    seq_number: SequenceNumber,
     /// The last packet sequence number that has been acknowledged to the remote peer. (outgoing)
-    ack_number: Mutex<SequenceNumber>,
+    ack_number: SequenceNumber,
     /// Our last packet sequence number that was acknowledged by the remote peer. (incoming)
-    last_ack_number: Mutex<SequenceNumber>,
+    last_ack_number: SequenceNumber,
     /// The pending incoming packets which have been received out of order from the remote peer.
-    pending_incoming_packets: Mutex<HashMap<SequenceNumber, Message>>,
+    pending_incoming_packets: HashMap<SequenceNumber, UtpMessage>,
     /// The pending packets which have not been acked by the remote peer.
-    pending_outgoing_packets: RwLock<Vec<PendingPacket>>,
-    /// The delay of packets between the sender and receiver of packets.
-    timestamp_difference_microseconds: Mutex<u32>,
+    pending_outgoing_packets: Vec<PendingPacket>,
+    /// The LedBat algorithm state.
+    led_bat: LedBat,
     /// The uTP stream incoming data buffer of the remote peer.
-    read_buffer: Mutex<Vec<u8>>,
-    /// The waker awaiting data in the incoming data buffer.
-    read_buffer_waker: Mutex<Option<Waker>>,
+    read_buffer: ReadBuffer,
     /// The uTP stream outgoing data buffer to the remote peer.
-    write_buffer: Mutex<Vec<u8>>,
-    /// The waker awaiting certain states to send the outgoing data buffer.
-    write_buffer_waker: Mutex<Option<Waker>>,
+    write_buffer: BytesMut,
+    /// A pending flush waiting for the stream to become Connected.
+    pending_flush: Option<Reply<Result<()>>>,
     /// The currently allowed window size of the remote peer.
-    remote_window_size: Mutex<u32>,
+    remote_window_size: u32,
     /// The immutable extensions of the uTP stream.
     extensions: Arc<UtpSocketExtensions>,
     /// The cancellation token of the stream
@@ -442,50 +426,69 @@ pub struct UtpStreamContext {
 }
 
 impl UtpStreamContext {
-    /// Starts the main loop of the utp stream for processing messages.
-    async fn start(&self, mut message_receiver: UnboundedReceiver<Packet>) {
-        let mut resend_interval = interval(RETRY_INTERVAL);
+    /// Run the main loop of the utp stream for processing messages.
+    async fn run(
+        &mut self,
+        mut message_receiver: UnboundedReceiver<Packet>,
+        mut command_receiver: ChannelReceiver<StreamCommand>,
+    ) {
+        if let Err(e) = self.initialize().await {
+            self.update_state(UtpStreamState::Closed);
+            debug!("Utp stream {} failed to initialize, {}", self, e);
+            return;
+        }
+
+        let mut resend_interval = interval(Duration::from_secs(1));
         loop {
             select! {
                 _ = self.cancellation_token.cancelled() => break,
-                packet = message_receiver.recv() => {
-                    if let Some(packet) = packet {
-                        self.handle_received_packet(packet).await;
-                    } else {
+                packet = message_receiver.recv() => match packet {
+                    Some(packet) => self.on_received_packet(packet).await,
+                    None => {
                         debug!("Utp stream {} socket has been closed", self);
                         break;
                     }
-                }
+                },
+                Some(command) = command_receiver.recv() => self.on_command(command).await,
                 _ = resend_interval.tick() => self.resend_timeout_packets().await,
             }
+
+            self.do_flush().await;
         }
 
-        let _ = self.close().await;
+        let _ = self.close(CloseReason::None).await;
         debug!("Utp stream {} main loop ended", self);
     }
 
+    /// Initialize the connection based on the connection type.
+    async fn initialize(&mut self) -> Result<()> {
+        match self.connection_type {
+            ConnectionType::Incoming => {
+                self.send_state().await?;
+                self.update_state(UtpStreamState::Connected);
+                Ok(())
+            }
+            ConnectionType::Outgoing => self.send_syn().await,
+        }
+    }
+
     /// Get the extensions of the uTP stream.
-    pub fn extensions(&self) -> &[Box<dyn UtpSocketExtension>] {
+    fn extensions(&self) -> &[Box<dyn UtpSocketExtension>] {
         &self.extensions
     }
 
-    /// Check if writing of the given payload to the remote peer is allowed.
-    /// It checks if the stream is in a valid state, and that the remote peer window size allows the writing of the given data.
+    /// Check if the stream may send at least one more byte to the remote peer.
     ///
     /// # Returns
     ///
     /// It returns true when writing to the remote peer is allowed, else false.
-    async fn is_writing_allowed(&self, data: &[u8]) -> bool {
-        let state = *self.state.read().await;
-        let remote_window_size = *self.remote_window_size.lock().await;
-        let data_len = data.len();
-        let is_remote_writing_allowed = remote_window_size >= data_len as u32;
-
-        state == UtpStreamState::Connected && is_remote_writing_allowed
+    fn is_writing_allowed(&self, data_len: usize) -> bool {
+        let is_remote_writing_allowed = self.remote_window_size >= data_len as u32;
+        self.state == UtpStreamState::Connected && is_remote_writing_allowed
     }
 
     /// Try to parse the given received packet of the remote peer.
-    async fn handle_received_packet(&self, mut packet: Packet) {
+    async fn on_received_packet(&mut self, mut packet: Packet) {
         // check if the packet is valid for this stream
         if !self.assert_packet(&packet) {
             return;
@@ -498,25 +501,24 @@ impl UtpStreamContext {
         // update the remote window size info
         self.update_remote_window_size(&packet).await;
 
-        match Message::try_from(&packet) {
-            Ok(message) => self.handle_received_message(message, packet).await,
+        match UtpMessage::try_from(&packet) {
+            Ok(message) => self.on_message_received(message, packet).await,
             Err(e) => debug!("Utp stream {} failed to parse packet, {}", self, e),
         }
     }
 
     /// Try to process the received remote peer message.
-    async fn handle_received_message(&self, message: Message, packet: Packet) {
+    async fn on_message_received(&mut self, message: UtpMessage, packet: Packet) {
         // process the last ack number of the remote peer
-        self.handle_remote_acknowledgment(packet.acknowledge_number)
+        self.on_remote_acknowledgment(packet.acknowledge_number)
             .await;
         // process the syn acknowledgment of the remote peer if applicable
-        self.handle_syn_ack(packet.sequence_number, packet.state_type)
+        self.on_syn_ack(packet.sequence_number, packet.state_type)
             .await;
 
         // check if we've already seen the packet, this can happen due to a resend delay
-        let mut ack_number = self.ack_number.lock().await;
         let remote_sequence_number = packet.sequence_number;
-        let current_ack_number = *ack_number;
+        let current_ack_number = self.ack_number;
         if !is_less_than(current_ack_number, remote_sequence_number) {
             // check if the message is not a state packet, as state packets will always be guaranteed to be duplicates
             if packet.state_type != StateType::State {
@@ -529,34 +531,40 @@ impl UtpStreamContext {
             return;
         }
 
-        let mut send_state_message = false;
+        // calculate the difference between the received sequence and our last inbound ack number
+        let to_be_ack_number_for_remote = remote_sequence_number.wrapping_sub(1);
+        let sequence_diff = current_ack_number.saturating_sub(to_be_ack_number_for_remote);
+        // store the out-of-order ahead packet in the buffer is allowed
+        if sequence_diff <= MAX_UNACKED_PACKETS as u16 {
+            // buffer the incoming out-of-order packet
+            self.pending_incoming_packets
+                .insert(remote_sequence_number, message);
+        }
 
-        {
-            // calculate the difference between the received sequence and our last inbound ack number
-            let sequence_diff = current_ack_number.saturating_sub(remote_sequence_number - 1);
-            let mut pending_incoming_packets = self.pending_incoming_packets.lock().await;
-            // store the out-of-order ahead packet in the buffer is allowed
-            if sequence_diff <= MAX_UNACKED_PACKETS as u16 {
-                // buffer the incoming out-of-order packet
-                pending_incoming_packets.insert(remote_sequence_number, message);
-            }
-            // if the packet is in order, we process it with any other pending incoming packets
-            if sequence_diff == 0 {
-                loop {
-                    let next_seq_number = *ack_number + 1;
-                    if let Some(message) = pending_incoming_packets.remove(&next_seq_number) {
-                        // process the incoming message in-order
-                        let state_type = StateType::from(&message);
-                        self.process_incoming_message(message, next_seq_number)
-                            .await;
-                        // update the processed ack number if the message is everything but a state message
-                        if state_type != StateType::State {
-                            *ack_number = next_seq_number;
-                            send_state_message = true;
-                        }
-                    } else {
-                        // we don't have the next sequence packet available, stop processing messages
-                        break;
+        // if the packet is out-of-order,
+        // do not try to process it
+        if sequence_diff > 0 {
+            trace!(
+                "Utp stream {} received out-of-order packet ({}), skipping",
+                self,
+                remote_sequence_number
+            );
+            return;
+        }
+
+        let mut send_state_message = false;
+        loop {
+            let next_seq_number = self.ack_number.wrapping_add(1);
+            match self.pending_incoming_packets.remove(&next_seq_number) {
+                None => break, // we don't have the next sequence packet available, stop processing messages
+                Some(message) => {
+                    // process the incoming message in-order
+                    let state_type = StateType::from(&message);
+                    self.on_incoming_message(message, next_seq_number).await;
+                    // update the processed ack number if the message is everything but a state message
+                    if state_type != StateType::State {
+                        self.ack_number = next_seq_number;
+                        send_state_message = true;
                     }
                 }
             }
@@ -564,10 +572,33 @@ impl UtpStreamContext {
 
         if send_state_message {
             // confirm the processed packets if we don't have any outgoing data
-            let write_buffer_len = self.write_buffer.lock().await.len();
-            if write_buffer_len == 0 {
-                if let Err(e) = self.send_acknowledgment(*ack_number).await {
+            if self.write_buffer.len() == 0 {
+                if let Err(e) = self.send_acknowledgment(self.ack_number).await {
                     debug!("Utp stream {}, failed to inform remote peer, {}", self, e);
+                }
+            }
+        }
+    }
+
+    /// Process the received command.
+    async fn on_command(&mut self, command: StreamCommand) {
+        match command {
+            StreamCommand::GetRecvId { response } => response.send(self.key.recv_id),
+            StreamCommand::GetState { response } => {
+                response.send(self.state);
+            }
+            StreamCommand::GetSeqNumber { response } => response.send(self.seq_number),
+            StreamCommand::GetAckNumber { response } => response.send(self.ack_number),
+            StreamCommand::GetLastAckNumber { response } => response.send(self.last_ack_number),
+            StreamCommand::PendingOutgoingLen { response } => {
+                response.send(self.pending_outgoing_packets.len())
+            }
+            StreamCommand::WriteData { data, response } => {
+                response.send(self.write(data).await);
+            }
+            StreamCommand::Flush { response } => {
+                if let Some(queued) = self.pending_flush.replace(response) {
+                    queued.send(self.flush().await);
                 }
             }
         }
@@ -582,21 +613,17 @@ impl UtpStreamContext {
 
     /// Handle the last acknowledgement number of a remote peer.
     /// This will process any outgoing pending packets up to the given `ack_number`.
-    async fn handle_remote_acknowledgment(&self, remote_ack_number: SequenceNumber) {
+    async fn on_remote_acknowledgment(&mut self, remote_ack_number: SequenceNumber) {
         // try to find the pending packet belonging to the ack number
-        let mut pending_packets = self.pending_outgoing_packets.write().await;
-        let mut last_ack_number = self.last_ack_number.lock().await;
-        // check if the ack number is not ahead of our current sequence number
-        let seq_number = *self.seq_number.lock().await;
-        if remote_ack_number > seq_number {
+        if remote_ack_number > self.seq_number {
             debug!(
                 "Utp stream {} received invalid ack number {}, current sequence number {}",
-                self, remote_ack_number, seq_number
+                self, remote_ack_number, self.seq_number
             );
             return;
         }
         // check if there is anything to be acked or if we've already caught up
-        let ack_range = Self::calculate_ack_range(remote_ack_number, &mut last_ack_number);
+        let ack_range = Self::calculate_ack_range(remote_ack_number, &mut self.last_ack_number);
         if ack_range.is_empty() {
             return;
         }
@@ -610,13 +637,14 @@ impl UtpStreamContext {
             ack_range
         );
         for ack_number in ack_range {
-            if let Some(packet_index) = pending_packets
+            if let Some(packet_index) = self
+                .pending_outgoing_packets
                 .iter()
                 .position(|e| e.packet.sequence_number == ack_number)
             {
                 // if the packet is found, remove it from the pending state
-                pending_packets.remove(packet_index);
-                *last_ack_number = ack_number;
+                self.pending_outgoing_packets.remove(packet_index);
+                self.last_ack_number = ack_number;
             } else {
                 trace!(
                     "Utp stream {} couldn't find pending packet for ack number {}",
@@ -628,45 +656,46 @@ impl UtpStreamContext {
     }
 
     /// Handle the `SYN_ACK` sequence number sent by the remote peer if applicable.
-    ///
-    /// # Returns
-    ///
-    /// It returns true if the packet is a syn ack, else false.
-    async fn handle_syn_ack(&self, seq_number: SequenceNumber, packet_type: StateType) {
-        let is_state_syn_send = *self.state.read().await == UtpStreamState::SynSent;
+    async fn on_syn_ack(&mut self, seq_number: SequenceNumber, packet_type: StateType) {
+        // Only process SYN_ACKs if we are currently awaiting a connection confirmation
+        let is_state_syn_send = self.state == UtpStreamState::SynSent;
         if !is_state_syn_send || packet_type != StateType::State {
             return;
         }
 
-        let ack_number = seq_number;
-        // set the index of the remote ack number to be inline with the incoming sequence number determined by the remote peer
-        // this prevents us from acknowledging every packet up to the remote sequence number
-        *self.ack_number.lock().await = ack_number;
-        self.update_state(UtpStreamState::Connected).await;
+        // The remote peer's seq_number will be used for their first data/state packet.
+        // To avoid "pre-acknowledging" data we haven't seen, we set our last-received
+        // index to one less than their starting sequence.
+        let ack_number = seq_number.wrapping_sub(1);
+        self.ack_number = ack_number;
+        self.update_state(UtpStreamState::Connected);
 
         debug!(
-            "Utp stream {} connection established, initial ack number set to {}",
-            self, ack_number
+            "Utp stream {} connection established ({:?}), initial ack number set to {}",
+            self, self.key, ack_number
         );
     }
 
     /// Handle a [StateType::Fin] packet from the remote peer.
     /// This will finalize the connection gracefully.
-    async fn handle_close_message(&self) {
+    async fn on_close_message(&mut self) {
         self.cancellation_token.cancel();
-        self.update_state(UtpStreamState::Closed).await;
-        self.notify_read_waker().await;
+        self.update_state(UtpStreamState::Closed);
+        self.read_buffer.wake();
     }
 
     /// Handle a received data payload from the remote peer.
-    async fn handle_received_payload(&self, bytes: Vec<u8>) {
-        let mut data = self.read_buffer.lock().await;
-        data.extend_from_slice(bytes.as_slice());
-        self.notify_read_waker().await;
+    async fn on_received_payload(&self, bytes: Vec<u8>) {
+        {
+            let mut buffer = self.read_buffer.lock().await;
+            buffer.extend_from_slice(bytes.as_slice());
+        }
+        trace!("Utp stream {} received {} data bytes", self, bytes.len());
+        self.read_buffer.wake();
     }
 
     /// Process an in-order incoming uTP message.
-    async fn process_incoming_message(&self, message: Message, seq_number: SequenceNumber) {
+    async fn on_incoming_message(&mut self, message: UtpMessage, seq_number: SequenceNumber) {
         trace!(
             "Utp stream {} is processing incoming message {}, {:?}",
             self,
@@ -674,16 +703,19 @@ impl UtpStreamContext {
             message
         );
         match message {
-            Message::Data(_, payload) => {
-                self.handle_received_payload(payload).await;
+            UtpMessage::Data { payload, .. } => {
+                self.on_received_payload(payload).await;
             }
-            Message::Terminate(_) => {
-                debug!("Utp stream {} received termination message", self);
-                self.handle_close_message().await;
+            UtpMessage::Terminate { reason, .. } => {
+                debug!(
+                    "Utp stream {} received termination message, {:?}",
+                    self, reason
+                );
+                self.on_close_message().await;
             }
-            Message::Close(_) => {
-                debug!("Utp stream {} received close message", self);
-                self.handle_close_message().await;
+            UtpMessage::Close { reason, .. } => {
+                debug!("Utp stream {} received close message, {:?}", self, reason);
+                self.on_close_message().await;
             }
             _ => {}
         }
@@ -703,71 +735,137 @@ impl UtpStreamContext {
         true
     }
 
-    /// Send the initial syn message to the remote peer.
-    async fn send_syn(&self) -> Result<()> {
-        let seq_number = *self.seq_number.lock().await;
-        let ack_number = *self.ack_number.lock().await;
-        let syn_message = Message::Connect(self.key.recv_id);
+    /// Try to write the given data to the write buffer for the remote peer.
+    async fn write(&mut self, data: Bytes) -> Result<usize> {
+        let available = self.write_buffer.capacity() - self.write_buffer.len();
+        if available < data.len() {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "write buffer is full",
+            )));
+        }
 
-        self.send_message(syn_message, seq_number, ack_number)
+        self.write_buffer.extend_from_slice(&data);
+        Ok(data.len())
+    }
+
+    /// Flush as many bytes from the write buffer as the current send window permits.
+    ///
+    /// The number of bytes sent is bounded by
+    /// `min(write_buffer, effective_window − bytes_in_flight)`, so a single call
+    /// may only transmit a fraction of the write buffer when the window is small.
+    /// The caller should retry once the window grows (i.e., on receiving ACKs).
+    async fn flush(&mut self) -> Result<()> {
+        let len = self.write_buffer.remaining();
+        if !self.is_writing_allowed(len) {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                "congestion window is full",
+            )));
+        }
+
+        trace!("Utp stream {} is flushing {} bytes", self, len);
+        let bytes = self.write_buffer.split_to(len);
+        self.send_data(&bytes).await
+    }
+
+    /// Try to execute a queued flush, if one is available.
+    async fn do_flush(&mut self) {
+        let flush = match self.pending_flush.take() {
+            Some(e) => e,
+            None => return,
+        };
+
+        match self.state {
+            UtpStreamState::Connected => {
+                flush.send(self.flush().await);
+            }
+            UtpStreamState::Closed => {
+                flush.send(Err(Error::Io(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "stream is closed",
+                ))));
+            }
+            _ => {
+                self.pending_flush = Some(flush);
+                return;
+            }
+        }
+    }
+
+    /// Send the initial syn message to the remote peer.
+    async fn send_syn(&mut self) -> Result<()> {
+        let syn_message = UtpMessage::Connect {
+            connection: self.key.recv_id,
+        };
+
+        self.send_message(syn_message, self.seq_number, self.ack_number)
             .await?;
-        self.update_state(UtpStreamState::SynSent).await;
+        self.update_state(UtpStreamState::SynSent);
         Ok(())
     }
 
     /// Send the current uTP state info to the remote peer.
-    async fn send_state(&self) -> Result<()> {
-        let ack_number = *self.ack_number.lock().await;
-        self.send_acknowledgment(ack_number).await
+    async fn send_state(&mut self) -> Result<()> {
+        self.send_acknowledgment(self.ack_number).await
     }
 
     /// Send an acknowledgment for a received remote peer packet.
-    async fn send_acknowledgment(&self, ack_number: SequenceNumber) -> Result<()> {
-        let seq_number = *self.seq_number.lock().await;
-        let message = Message::State(self.key.send_id, seq_number, ack_number);
-        self.send_message(message, seq_number, ack_number).await?;
+    async fn send_acknowledgment(&mut self, ack_number: SequenceNumber) -> Result<()> {
+        let message = UtpMessage::State(self.key.send_id, self.seq_number, ack_number);
+        self.send_message(message, self.seq_number, ack_number)
+            .await?;
         Ok(())
     }
 
     /// Send the given data to the remote peer.
     /// It will send one or more packets depending on the given payload size.
-    async fn send_data(&self, bytes: &[u8]) -> Result<()> {
-        let mut seq_number = self.seq_number.lock().await;
-        let ack_number = *self.ack_number.lock().await;
-
+    async fn send_data(&mut self, bytes: &[u8]) -> Result<()> {
         // send the data in chunks to not exceed the maximum uTP packet size
         for chunk in bytes.chunks(MAX_PACKET_PAYLOAD_SIZE) {
-            let message = Message::Data(self.key.send_id, chunk.to_vec());
-            *seq_number += 1;
-            self.send_message(message, *seq_number, ack_number).await?;
+            let message = UtpMessage::Data {
+                connection: self.key.send_id,
+                payload: chunk.to_vec(),
+            };
+            self.send_message(message, self.seq_number, self.ack_number)
+                .await?;
         }
 
         Ok(())
     }
 
     /// Send the close state to the remote peer.
-    async fn send_close(&self) -> Result<()> {
-        let mut seq_number = self.seq_number.lock().await;
-        let ack_number = *self.ack_number.lock().await;
-
-        *seq_number += 1;
-        self.send_message(Message::Close(self.key.send_id), *seq_number, ack_number)
-            .await
+    async fn send_close(&mut self, reason: CloseReason) -> Result<()> {
+        self.send_message(
+            UtpMessage::Close {
+                connection: self.key.send_id,
+                reason,
+            },
+            self.seq_number,
+            self.ack_number,
+        )
+        .await
     }
 
     /// Send the given message to the remote peer.
     async fn send_message(
-        &self,
-        message: Message,
+        &mut self,
+        message: UtpMessage,
         seq_number: SequenceNumber,
         ack_number: SequenceNumber,
     ) -> Result<()> {
         trace!("Utp stream {} is sending {:?}", self, message);
         let addr = self.addr;
-        let timestamp_difference = *self.timestamp_difference_microseconds.lock().await;
         let window_size = self.window_size().await;
-        let mut packet =
-            message.into_packet(seq_number, ack_number, timestamp_difference, window_size);
+        let timestamp_microseconds = self.led_bat.base_time.elapsed().as_micros() as u32;
+        let timestamp_microseconds_delay = self.led_bat.client_last_recorded_delay;
+        let mut packet = message.into_packet(
+            seq_number,
+            ack_number,
+            timestamp_microseconds,
+            timestamp_microseconds_delay,
+            window_size,
+        );
 
         // process the extensions
         for extension in self.extensions().iter() {
@@ -776,7 +874,7 @@ impl UtpStreamContext {
 
         let pending_packet = PendingPacket::new(packet.clone());
         let start_time = Instant::now();
-        self.socket.send(packet.clone(), addr).await?;
+        self.socket.send(packet, addr).await?;
         let elapsed = start_time.elapsed();
         debug!(
             "Utp stream {} sent {:?} in {}.{:03}ms",
@@ -786,46 +884,49 @@ impl UtpStreamContext {
             elapsed.subsec_micros() % 1000
         );
 
+        // increase the next sequence number if we're not sending a state packet
+        if pending_packet.packet.state_type != StateType::State {
+            self.seq_number = self.seq_number.wrapping_add(1);
+        }
+
         // store the pending packet if it's not a state packet (unless it's the initial outgoing Syn state confirmation)
         // this is done as state packets don't have a unique seq number that is confirmed by the remote peer
-        let state = *self.state.read().await;
-        if pending_packet.packet.state_type != StateType::State || state == UtpStreamState::SynRecv
+        if pending_packet.packet.state_type != StateType::State
+            || self.state == UtpStreamState::SynRecv
         {
-            self.pending_outgoing_packets
-                .write()
-                .await
-                .push(pending_packet);
+            self.pending_outgoing_packets.push(pending_packet);
         }
         Ok(())
     }
 
     /// Resend all packets which have not yet been acked and have timed out.
-    async fn resend_timeout_packets(&self) {
-        let timeout_threshold = *self.timestamp_difference_microseconds.lock().await;
-        if timeout_threshold == 0 {
+    async fn resend_timeout_packets(&mut self) {
+        if self.led_bat.is_empty() || self.cancellation_token.is_cancelled() {
+            return;
+        }
+        if self.led_bat.last_received_packet.elapsed() > Duration::from_mins(1) {
+            let _ = self.close(CloseReason::Timeout).await;
             return;
         }
 
-        let timestamp_now = now_as_micros();
         let window_size = self.window_size().await;
-        let timestamp_difference_microseconds =
-            *self.timestamp_difference_microseconds.lock().await;
 
-        let mut pending_packets = self.pending_outgoing_packets.write().await;
-        for pending_packet in pending_packets
-            .iter_mut()
-            .filter(|e| {
-                timestamp_now.saturating_sub(e.packet.timestamp_microseconds)
-                    > timeout_threshold.min(5000)
+        let now = self.led_bat.base_time.elapsed().as_micros() as u32;
+        let timeout_after = self.led_bat.packet_timeout();
+        let mut timed_out_packets = self
+            .pending_outgoing_packets
+            .extract_if(.., |e| {
+                now.saturating_sub(e.packet.timestamp_microseconds)
+                    > timeout_after.as_micros() as u32
             })
-            .take(10)
-        {
+            .collect_vec();
+
+        for pending_packet in timed_out_packets.iter_mut() {
             // update the packet with the latest info
-            pending_packet.packet.timestamp_microseconds = now_as_micros();
+            pending_packet.packet.timestamp_microseconds = now;
             pending_packet.packet.window_size = window_size;
-            pending_packet.packet.acknowledge_number = *self.ack_number.lock().await;
-            pending_packet.packet.timestamp_difference_microseconds =
-                timestamp_difference_microseconds;
+            pending_packet.packet.acknowledge_number = self.ack_number;
+            pending_packet.packet.timestamp_difference_microseconds = self.led_bat.base_delay();
 
             trace!(
                 "Utp stream {} is resending packet {:?}",
@@ -849,141 +950,87 @@ impl UtpStreamContext {
                 }
             }
         }
+        self.pending_outgoing_packets.extend(timed_out_packets);
     }
 
     /// Get the current window size of all in-flight stream messages that have not yet been acked.
     async fn window_size(&self) -> u32 {
-        let read_buffer_size = self.read_buffer.lock().await.len();
         let pending_inbound_packets_size: usize = self
             .pending_incoming_packets
-            .lock()
-            .await
             .iter()
             .map(|(_, message)| {
-                if let Message::Data(_, data) = message {
-                    return data.len();
+                if let UtpMessage::Data { payload, .. } = message {
+                    return payload.len();
                 }
 
                 0
             })
             .sum();
 
-        let remaining_window_size =
-            MAX_READ_BUFFER - read_buffer_size - pending_inbound_packets_size;
+        let read_buffer_len = self.read_buffer.lock().await.len();
+        let remaining_window_size = MAX_READ_BUFFER
+            .saturating_sub(read_buffer_len)
+            .saturating_sub(pending_inbound_packets_size);
         remaining_window_size as u32
     }
 
     /// Update the stream state.
     /// The update is ignored if the stream is already in the given state.
-    async fn update_state(&self, state: UtpStreamState) {
-        {
-            let mut mutex = self.state.write().await;
-            if *mutex == state {
-                return;
-            }
-            *mutex = state;
+    fn update_state(&mut self, state: UtpStreamState) {
+        if self.state == state {
+            return;
         }
 
-        self.notify_write_waker().await;
+        self.state = state;
         debug!("Utp stream {} state changed to {:?}", self, state);
     }
 
     /// Update the timestamp difference information of the stream connection.
-    async fn update_timestamp_difference(&self, packet: &Packet) {
-        let timestamp = now_as_micros();
-        let timestamp_difference = timestamp.saturating_sub(packet.timestamp_microseconds);
-        let delay = Duration::from_micros(timestamp_difference as u64);
-        if delay >= Duration::from_secs(1) {
-            debug!(
-                "Utp stream {} high latency detected, {}.{:03}ms",
-                self,
-                delay.as_millis(),
-                delay.subsec_micros() % 1000
-            );
+    ///
+    /// The `timestamp_difference_microseconds` field in the received packet is the
+    /// forward-path delay as measured by the remote peer (remote_received_time −
+    /// our_sent_timestamp). We feed this into LEDBAT as our one-way delay sample.
+    async fn update_timestamp_difference(&mut self, packet: &Packet) {
+        if packet.timestamp_difference_microseconds == 0 {
+            return;
         }
 
-        *self.timestamp_difference_microseconds.lock().await = timestamp_difference;
+        let now = self.led_bat.base_time.elapsed().as_micros() as u32;
+        self.led_bat.record(
+            packet.timestamp_microseconds.wrapping_sub(now),
+            packet.timestamp_difference_microseconds,
+        );
     }
 
     /// Update the currently allowed window size of the remote peer.
     /// This might wake any pending writes if the window size was modified.
-    async fn update_remote_window_size(&self, packet: &Packet) {
-        let mut mutex = self.remote_window_size.lock().await;
-        let remote_window_size = packet.window_size;
-
-        *mutex = remote_window_size;
-        self.notify_write_waker().await;
+    async fn update_remote_window_size(&mut self, packet: &Packet) {
+        self.remote_window_size = packet.window_size;
     }
 
     /// Try to gracefully close the connection with the remote peer.
-    async fn close(&self) -> Result<()> {
-        let state = *self.state.read().await;
-        if state == UtpStreamState::Closed {
+    async fn close(&mut self, reason: CloseReason) -> Result<()> {
+        if self.state == UtpStreamState::Closed {
             return Ok(());
         }
 
-        let result = self.send_close().await;
+        let result = self.send_close(reason).await;
         // update the state to close before cancelling the context
         // as the main loop might otherwise execute the close twice
-        self.update_state(UtpStreamState::Closed).await;
+        self.update_state(UtpStreamState::Closed);
         self.cancellation_token.cancel();
         self.socket.close_connection(self.key).await;
-        self.notify_write_waker().await;
-        self.notify_read_waker().await;
+        self.read_buffer.wake();
         result
-    }
-
-    /// Notify the write waker, if present, that the state changed and the writer might be able to write data.
-    async fn notify_write_waker(&self) {
-        if let Some(waker) = self.write_buffer_waker.lock().await.take() {
-            waker.wake();
-        }
-    }
-
-    /// Notify the read waker, if present, that the state changed and the reader might be able to fetch some data.
-    async fn notify_read_waker(&self) {
-        if let Some(waker) = self.read_buffer_waker.lock().await.take() {
-            waker.wake();
-        }
-    }
-
-    /// Register a new write waker for the given context.
-    fn register_write_waker(&self, cx: &mut Context) {
-        if let Poll::Ready(mut mutex) = pin!(self.write_buffer_waker.lock()).poll(cx) {
-            *mutex = Some(cx.waker().clone());
-        }
-    }
-
-    /// Register a new waker which will be notified when more read data is available.
-    ///
-    /// # Returns
-    ///
-    /// It returns [Poll::Pending] unless the stream is being closed, else [Poll::Ready].
-    fn register_read_waker(&self, cx: &mut Context) -> Poll<std::result::Result<(), io::Error>> {
-        let state = match pin!(self.state.read()).poll(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(state) => state,
-        };
-
-        // if the stream is being closed, we don't register a waker anymore
-        if *state == UtpStreamState::Closed {
-            return Poll::Ready(Ok(()));
-        }
-
-        if let Poll::Ready(mut mutex) = pin!(self.read_buffer_waker.lock()).poll(cx) {
-            *mutex = Some(cx.waker().clone());
-        }
-
-        Poll::Pending
     }
 
     /// Calculate the range of outgoing packets that need to be acknowledged.
     /// It might return an empty range if the outgoing packets have already been acknowledged before.
     fn calculate_ack_range(
         remote_ack_number: SequenceNumber,
-        last_ack_number: &MutexGuard<SequenceNumber>,
+        last_ack_number: &SequenceNumber,
     ) -> std::ops::Range<SequenceNumber> {
-        let start_index = **last_ack_number + 1;
+        let start_index = *last_ack_number + 1;
         let end_index = remote_ack_number + 1;
 
         // check if the ack range has already been processed
@@ -996,6 +1043,57 @@ impl UtpStreamContext {
     }
 }
 
+#[derive(Debug)]
+enum ConnectionType {
+    Incoming,
+    Outgoing,
+}
+
+#[derive(Debug, Clone)]
+struct ReadBuffer {
+    inner: Arc<InnerReadBuffer>,
+}
+
+impl ReadBuffer {
+    /// Locks the underlying buffer.
+    async fn lock(&self) -> MutexGuard<'_, BytesMut> {
+        self.inner.buffer.lock().await
+    }
+
+    /// Attempts to acquire the lock,
+    /// and returns TryLockError if the lock is currently held somewhere else.
+    fn try_lock(&self) -> std::result::Result<MutexGuard<'_, BytesMut>, TryLockError> {
+        self.inner.buffer.try_lock()
+    }
+
+    /// Registers the waker to be notified on calls to wake.
+    fn register(&self, waker: &Waker) {
+        self.inner.waker.register(waker)
+    }
+
+    /// Calls wake on the last Waker passed to register.
+    fn wake(&self) {
+        self.inner.waker.wake();
+    }
+}
+
+impl Default for ReadBuffer {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(InnerReadBuffer {
+                buffer: Mutex::new(BytesMut::with_capacity(MAX_READ_BUFFER)),
+                waker: AtomicWaker::new(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct InnerReadBuffer {
+    buffer: Mutex<BytesMut>,
+    waker: AtomicWaker,
+}
+
 /// The selective acks extension for the uTP socket connection.
 /// This allows non-sequentially ack packets.
 #[derive(Debug)]
@@ -1005,7 +1103,7 @@ pub struct UtpSelectiveAckExtension;
 impl UtpSocketExtension for UtpSelectiveAckExtension {
     async fn incoming(&self, packet: &mut Packet, stream: &UtpStreamContext) {
         match packet.extension {
-            Extension::SelectiveAck => {
+            Extension::SelectiveAck { .. } => {
                 // TODO
                 warn!(
                     "Utp stream {} selective acks extensions not yet implemented",
@@ -1044,7 +1142,6 @@ impl PendingPacket {
 
     /// Increase the resend counter of the pending packet.
     fn increase_resend(&mut self) {
-        self.packet.timestamp_microseconds = now_as_micros();
         self.total_resends += 1;
     }
 
@@ -1052,6 +1149,74 @@ impl PendingPacket {
     /// This indicates that the packet resend failed.
     fn increase_failures(&mut self) {
         self.total_failures += 1;
+    }
+}
+
+#[derive(Debug)]
+struct LedBat {
+    /// The start base time of the LEDBAT algorithm.
+    base_time: Instant,
+    /// The current bucket cursor.
+    cursor: usize,
+    /// The observed one-way delays in microseconds.
+    delay_buckets: [u32; LED_BAT_BUCKET_SIZE],
+    /// The last delay that has been recorded by our client.
+    client_last_recorded_delay: u32,
+    /// The last time a packet has been received from the remote peer.
+    last_received_packet: Instant,
+}
+
+impl LedBat {
+    /// Returns `true` if the LedBat delay sliding window is empty (no delays have been recorded yet).
+    fn is_empty(&self) -> bool {
+        self.delay_buckets.iter().all(|e| *e == 0)
+    }
+
+    /// Returns the base delay for the LedBat algorithm.
+    fn base_delay(&self) -> u32 {
+        let mut lowest_delay = u32::MAX;
+        let mut lowest_diff = u32::MAX;
+
+        for delay in self.delay_buckets.iter().filter(|e| **e != 0) {
+            lowest_diff = lowest_diff.min(delay.abs_diff(lowest_delay));
+            lowest_delay = lowest_delay.min(*delay);
+        }
+
+        lowest_diff
+    }
+
+    /// Returns the duration a packet would have before being timed-out based
+    /// on the current LedBat state.
+    fn packet_timeout(&self) -> Duration {
+        // check if we're currently awaiting the initial SYN packet
+        // in this case, we haven't recorded any delays yet
+        if self.is_empty() {
+            return Duration::from_secs(3);
+        }
+
+        Duration::from_micros(self.base_delay() as u64).min(LED_BAT_MIN_RTT) * 2
+    }
+
+    /// Record a new delay measurement in the LedBat algorithm.
+    /// The `client_delay` is our own-measured delay,
+    /// while `remote_delay` is the delay measured by the remote peer.
+    fn record(&mut self, client_delay: u32, remote_delay: u32) {
+        self.client_last_recorded_delay = client_delay;
+        self.delay_buckets[self.cursor] = remote_delay;
+        self.cursor = (self.cursor + 1) % LED_BAT_BUCKET_SIZE;
+        self.last_received_packet = Instant::now();
+    }
+}
+
+impl Default for LedBat {
+    fn default() -> Self {
+        Self {
+            base_time: Instant::now(),
+            cursor: 0,
+            delay_buckets: [0u32; LED_BAT_BUCKET_SIZE],
+            client_last_recorded_delay: 0,
+            last_received_packet: Instant::now(),
+        }
     }
 }
 
@@ -1078,31 +1243,6 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc::unbounded_channel;
 
-    #[test]
-    fn test_state_type_from_message() {
-        let connection_id = 0;
-
-        let message = Message::Connect(connection_id);
-        let result = StateType::from(&message);
-        assert_eq!(StateType::Syn, result);
-
-        let message = Message::State(connection_id, 0, 0);
-        let result = StateType::from(&message);
-        assert_eq!(StateType::State, result);
-
-        let message = Message::Data(connection_id, Vec::with_capacity(0));
-        let result = StateType::from(&message);
-        assert_eq!(StateType::Data, result);
-
-        let message = Message::Terminate(connection_id);
-        let result = StateType::from(&message);
-        assert_eq!(StateType::Reset, result);
-
-        let message = Message::Close(connection_id);
-        let result = StateType::from(&message);
-        assert_eq!(StateType::Fin, result);
-    }
-
     #[tokio::test]
     async fn test_utp_stream_new_incoming() {
         init_logger!();
@@ -1112,7 +1252,7 @@ mod tests {
         let context = socket.context();
         let capture = UtpPacketCaptureExtension::new();
 
-        let result = UtpStream::new_incoming(
+        let stream = UtpStream::new_incoming(
             UtpConnId::new(),
             SocketAddr::from(socket.addr()),
             context.clone(),
@@ -1122,6 +1262,11 @@ mod tests {
         )
         .await
         .expect("expected an uTP stream to have been created");
+        assert_timeout!(
+            Duration::from_millis(500),
+            stream.state().await == UtpStreamState::Connected,
+            "expected the stream to accept the connection"
+        );
 
         // check the initial sequence number
         let outgoing_packet = capture
@@ -1130,7 +1275,7 @@ mod tests {
             .get(0)
             .cloned()
             .expect("expected an outgoing packet to have been sent");
-        let seq_number_result = *result.inner.seq_number.lock().await;
+        let seq_number_result = stream.seq_number().await;
         assert_ne!(
             1u16, seq_number_result,
             "expected our own seq_number to be random picked"
@@ -1141,7 +1286,7 @@ mod tests {
         );
 
         // check the initial remote ack number
-        let ack_number_result = *result.inner.ack_number.lock().await;
+        let ack_number_result = stream.ack_number().await;
         assert_eq!(
             1u16, ack_number_result,
             "expected the initial remote ack_number to match"
@@ -1153,7 +1298,7 @@ mod tests {
 
         // check the initial last_ack_number which should be one less than the initial state seq_number
         let expected_last_ack = seq_number_result - 1;
-        let last_ack_result = *result.inner.last_ack_number.lock().await;
+        let last_ack_result = stream.last_ack_number().await;
         assert_eq!(
             expected_last_ack, last_ack_result,
             "expected the remote last acknowledged number to match"
@@ -1164,7 +1309,8 @@ mod tests {
     async fn test_utp_stream_handle_received_packet_ack_syn_sent() {
         init_logger!();
         let sequence_number = 64;
-        let (_sender, receiver) = unbounded_channel();
+        let now = Instant::now();
+        let (sender, receiver) = unbounded_channel();
         let socket = create_utp_socket!();
         let context = socket.context();
         let capture = UtpPacketCaptureExtension::new();
@@ -1178,19 +1324,31 @@ mod tests {
         )
         .await
         .expect("expected an uTP stream to have been created");
+        assert_timeout!(
+            Duration::from_millis(500),
+            stream.state().await == UtpStreamState::SynSent,
+            "expected the stream to initiate the connection"
+        );
 
+        // sent the syn ack packet to the stream
+        let recv_id = stream.recv_id().await;
         let packet = Packet {
             state_type: StateType::State,
             extension: Extension::None,
-            connection_id: stream.inner.key.recv_id,
-            timestamp_microseconds: now_as_micros(),
+            connection_id: recv_id,
+            timestamp_microseconds: now.elapsed().as_micros() as u32,
             timestamp_difference_microseconds: 1500,
             window_size: MAX_READ_BUFFER as u32,
             sequence_number,
             acknowledge_number: 1,
             payload: vec![],
         };
-        stream.inner.handle_received_packet(packet).await;
+        sender.send(packet).expect("expected the packet to be sent");
+        assert_timeout!(
+            Duration::from_millis(500),
+            stream.state().await == UtpStreamState::Connected,
+            "expected the stream to be in the connected state"
+        );
 
         // check the current ack number
         let incoming_packet = capture
@@ -1199,20 +1357,23 @@ mod tests {
             .get(0)
             .cloned()
             .expect("expected to have received an incoming syn ack packet");
-        let result = *stream.inner.ack_number.lock().await;
-        assert_eq!(sequence_number, result, "expected the ack number of the remote peer to have been set to the incoming sequence number");
+        let result = stream.ack_number().await;
+        let expected_initial_ack_number = sequence_number - 1;
         assert_eq!(
-            incoming_packet.sequence_number, result,
-            "expected the ack seq_number to have been the same as the initial ack packet"
+            expected_initial_ack_number, result,
+            "expected the ack number of the remote peer to have been set to the incoming sequence number minus one"
+        );
+        assert_eq!(
+            sequence_number, incoming_packet.sequence_number,
+            "expected the seq_number of the incoming syn ack packet to match"
         );
 
         // check the pending outgoing packets
-        let result = stream.inner.pending_outgoing_packets.read().await;
+        let result = stream.pending_outgoing_len().await;
         assert_eq!(
-            0,
-            result.len(),
-            "expected the syn packet to have been confirmed, got {:?} instead",
-            &*result
+            0, result,
+            "expected the syn packet to have been confirmed, got {} instead",
+            result
         );
     }
 
@@ -1220,7 +1381,7 @@ mod tests {
     async fn test_utp_stream_handle_received_message_state_update() {
         init_logger!();
         let expected_sequence_number = 13;
-        let (_sender, receiver) = unbounded_channel();
+        let (sender, receiver) = unbounded_channel();
         let socket = create_utp_socket!();
         let context = socket.context();
 
@@ -1235,10 +1396,11 @@ mod tests {
         .await
         .expect("expected an uTP stream to have been created");
 
+        let recv_id = stream.recv_id().await;
         let packet = Packet {
             state_type: StateType::State,
             extension: Extension::None,
-            connection_id: stream.inner.key.recv_id,
+            connection_id: recv_id,
             timestamp_microseconds: 0,
             timestamp_difference_microseconds: 0,
             window_size: 0,
@@ -1246,11 +1408,9 @@ mod tests {
             acknowledge_number: 1,
             payload: vec![],
         };
-        let message = Message::try_from(&packet).unwrap();
-        stream.inner.update_state(UtpStreamState::Connected).await;
-        stream.inner.handle_received_message(message, packet).await;
+        sender.send(packet).expect("expected the packet to be sent");
 
-        let ack_number = *stream.inner.ack_number.lock().await;
+        let ack_number = stream.ack_number().await;
         assert_eq!(
             expected_sequence_number, ack_number,
             "expected the ack number to not have been updated"
@@ -1271,12 +1431,12 @@ mod tests {
 
         assert_timeout!(
             Duration::from_millis(500),
-            UtpStreamState::Connected == *incoming_stream.inner.state.read().await,
+            UtpStreamState::Connected == incoming_stream.state().await,
             "expected the incoming stream to be connected"
         );
         assert_timeout!(
             Duration::from_millis(500),
-            UtpStreamState::Connected == *outgoing_stream.inner.state.read().await,
+            UtpStreamState::Connected == outgoing_stream.state().await,
             "expected the outgoing stream to be connected"
         );
 
@@ -1334,7 +1494,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[tokio::test]
     async fn test_utp_stream_outgoing_write_incoming_read() {
         init_logger!();
         let expected_result = "Nullam varius felis in massa eleifend consectetur.";
@@ -1348,9 +1508,10 @@ mod tests {
             create_utp_stream_pair!(&incoming, &outgoing);
         let (tx, mut rx) = unbounded_channel();
 
+        // wait for the connection to be established
         assert_timeout!(
             Duration::from_millis(500),
-            UtpStreamState::Connected == *outgoing_stream.inner.state.read().await,
+            UtpStreamState::Connected == outgoing_stream.state().await,
             "expected the stream to be connected"
         );
 
@@ -1430,7 +1591,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[tokio::test]
     async fn test_utp_stream_outgoing_read_incoming_write() {
         init_logger!();
         let expected_result = "Lorem ipsum dolor sit amet, consectetur adipiscing elit.";
@@ -1441,7 +1602,7 @@ mod tests {
 
         assert_timeout!(
             Duration::from_millis(500),
-            UtpStreamState::Connected == *outgoing_stream.inner.state.read().await,
+            UtpStreamState::Connected == outgoing_stream.state().await,
             "expected the stream to be connected"
         );
 
@@ -1459,7 +1620,9 @@ mod tests {
         incoming_stream.write(bytes).await.unwrap();
         incoming_stream.flush().await.unwrap();
 
-        let (result_buffer_len, buffer) = timeout!(rx.recv(), Duration::from_millis(500)).unwrap();
+        // wait for the data to be received in the outgoing stream
+        let (result_buffer_len, buffer) = timeout!(rx.recv(), Duration::from_millis(500))
+            .expect("expected the data to have been received");
         let result = String::from_utf8(buffer).unwrap();
         assert_eq!(
             bytes_len, result_buffer_len,
@@ -1468,67 +1631,64 @@ mod tests {
         assert_eq!(expected_result, result);
     }
 
-    // FIXME: unstable in Github actions
-    #[ignore]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_utp_stream_close() {
-        init_logger!();
-        let (incoming, outgoing) = create_utp_socket_pair!();
-        let (incoming_stream, outgoing_stream) = create_utp_stream_pair!(&incoming, &outgoing);
-
-        // close the outgoing stream
-        outgoing_stream
-            .close()
-            .await
-            .expect("expected the stream to close");
-
-        // check if the incoming stream has also been closed
-        assert_timeout!(
-            Duration::from_secs(1),
-            UtpStreamState::Closed == *incoming_stream.inner.state.read().await,
-            "expected the stream to be closed"
-        );
-    }
-
-    // FIXME: unstable in Github actions
-    #[ignore]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn test_utp_stream_shutdown() {
-        init_logger!();
-        let (incoming, outgoing) = create_utp_socket_pair!();
-        let (incoming_stream, mut outgoing_stream) = create_utp_stream_pair!(&incoming, &outgoing);
-
-        // close the stream through the shutdown fn
-        outgoing_stream
-            .shutdown()
-            .await
-            .expect("expected the stream to close");
-
-        // check if the incoming stream has also been closed
-        assert_timeout!(
-            Duration::from_millis(500),
-            UtpStreamState::Closed == *incoming_stream.inner.state.read().await,
-            "expected the stream to be closed"
-        );
-    }
-
     #[tokio::test]
     async fn test_calculate_ack_range() {
-        let mutex = Mutex::new(0);
-        let mut last_ack = mutex.lock().await;
+        let mut last_ack = 0;
 
         let result = UtpStreamContext::calculate_ack_range(1, &last_ack);
         assert_eq!(1..2, result);
         assert_eq!(1, result.len(), "expected a total of 1 packet to be acked");
 
-        *last_ack = 10;
+        last_ack = 10;
         let result = UtpStreamContext::calculate_ack_range(8, &last_ack);
         assert_eq!(0..0, result, "expected an empty range to be acked");
 
-        *last_ack = 9;
+        last_ack = 9;
         let result = UtpStreamContext::calculate_ack_range(15, &last_ack);
         assert_eq!(10..16, result);
         assert_eq!(6, result.len(), "expected a total of 6 packets to be acked");
+    }
+
+    mod close {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_close() {
+            init_logger!();
+            let (incoming, outgoing) = create_utp_socket_pair!();
+            let (incoming_stream, outgoing_stream) = create_utp_stream_pair!(&incoming, &outgoing);
+
+            // close the outgoing stream
+            outgoing_stream.close();
+
+            // check if the incoming stream has also been closed
+            assert_timeout!(
+                Duration::from_secs(1),
+                UtpStreamState::Closed == incoming_stream.state().await,
+                "expected the stream to be closed"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_shutdown() {
+            init_logger!();
+            let (incoming, outgoing) = create_utp_socket_pair!();
+            let (incoming_stream, mut outgoing_stream) =
+                create_utp_stream_pair!(&incoming, &outgoing);
+
+            // close the stream through the shutdown fn
+            outgoing_stream
+                .shutdown()
+                .await
+                .expect("expected the stream to close");
+
+            // check if the incoming stream has also been closed
+            assert_timeout!(
+                Duration::from_millis(500),
+                UtpStreamState::Closed == incoming_stream.state().await,
+                "expected the stream to be closed"
+            );
+        }
     }
 
     #[test]

@@ -147,11 +147,11 @@ impl PeerPool {
             reason
         );
         match reason {
-            CloseReason::ConnectionFailed => {
-                info.failure_count += 1;
+            CloseReason::Timeout | CloseReason::TimedOutHandshake => {
+                info.failed();
             }
-            CloseReason::FastProtocol => {
-                info.failure_count += 1;
+            CloseReason::InvalidAllowFastMessage => {
+                info.failed();
                 info.last_connected = Some(Instant::now());
             }
             _ => {
@@ -192,8 +192,9 @@ impl PeerPool {
     ///
     /// * `len` - The total number of peer list address to retrieve.
     pub fn new_connection_candidates(&mut self, len: usize) -> Vec<SocketAddr> {
-        let remaining_slots = self.limit - self.peers.len();
-        let len = len.min(remaining_slots).min(self.peers.len());
+        let peers_len = self.peers.len();
+        let remaining_slots = self.limit.saturating_sub(peers_len);
+        let len = len.min(remaining_slots).min(peers_len);
 
         self.peers
             .iter_mut()
@@ -243,8 +244,8 @@ impl PeerPool {
 
         for (addr, state) in futures::future::join_all(futures).await {
             let reason = match state {
-                PeerState::Closed => CloseReason::Remote,
-                PeerState::Error => CloseReason::Error,
+                PeerState::Closed => CloseReason::None,
+                PeerState::Error => CloseReason::InvalidMessage,
                 _ => continue,
             };
             let peer = match self.peer_closed(&addr, reason).await {
@@ -369,6 +370,11 @@ impl PeerInfo {
     pub fn is_connect_candidate(&self) -> bool {
         !self.is_in_use && !self.is_banned && self.failure_count < CONNECTION_FAILURE_THRESHOLD
     }
+
+    /// Increase the failure count for this peer.
+    fn failed(&mut self) {
+        self.failure_count += 1;
+    }
 }
 
 impl PartialEq for PeerInfo {
@@ -481,7 +487,7 @@ mod tests {
 
                 // close the peer connection
                 let result = pool
-                    .peer_closed(&peer_addr.clone().into(), CloseReason::ConnectionFailed)
+                    .peer_closed(&peer_addr.clone().into(), CloseReason::Timeout)
                     .await;
                 assert!(
                     result.is_none(),
@@ -516,7 +522,10 @@ mod tests {
 
                 // close the peer connection
                 let result = pool
-                    .peer_closed(&peer_addr.clone().into(), CloseReason::FastProtocol)
+                    .peer_closed(
+                        &peer_addr.clone().into(),
+                        CloseReason::InvalidAllowFastMessage,
+                    )
                     .await;
                 assert!(result.is_some(), "expected the peer to have been removed");
 

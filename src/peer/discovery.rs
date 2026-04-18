@@ -21,6 +21,7 @@ impl PartialEq for PeerStream {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (PeerStream::Tcp(_), PeerStream::Tcp(_)) => true,
+            (PeerStream::Utp(_), PeerStream::Utp(_)) => true,
             _ => false,
         }
     }
