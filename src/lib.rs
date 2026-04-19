@@ -27,6 +27,7 @@ async fn main() -> Result<(), io::Error> {
                 .client_name("MyClient")
                 .build(),
         )
+        .default_extensions()
         .build()?;
 
     // 1. Add a torrent via Magnet URI
@@ -170,28 +171,10 @@ mod torrent_peer;
 mod torrent_tracker;
 pub mod tracker;
 
-#[cfg(feature = "extension-donthave")]
-use crate::peer::extension::donthave::DontHaveExtension;
-#[cfg(feature = "extension-metadata")]
-use crate::peer::extension::metadata::MetadataExtension;
-#[cfg(feature = "extension-pex")]
-use crate::peer::extension::pex::PexExtension;
 use crate::peer::ProtocolExtensionFlags;
 
 const DEFAULT_TORRENT_PROTOCOL_EXTENSIONS: fn() -> ProtocolExtensionFlags = || {
     ProtocolExtensionFlags::LTEP | ProtocolExtensionFlags::Fast | ProtocolExtensionFlags::SupportV2
-};
-const DEFAULT_TORRENT_EXTENSIONS: fn() -> ExtensionFactories = || {
-    let mut extensions: ExtensionFactories = Vec::new();
-
-    #[cfg(feature = "extension-metadata")]
-    extensions.push(|| Box::new(MetadataExtension::new()));
-    #[cfg(feature = "extension-pex")]
-    extensions.push(|| Box::new(PexExtension::new()));
-    #[cfg(feature = "extension-donthave")]
-    extensions.push(|| Box::new(DontHaveExtension::new()));
-
-    extensions
 };
 
 /// Formats the given number of bytes into a human-readable format with appropriate units.
@@ -296,124 +279,6 @@ pub mod tests {
     use std::{env, fs};
     use tokio::net::TcpStream;
     use tokio::sync::mpsc::unbounded_channel;
-
-    #[macro_export]
-    macro_rules! create_torrent {
-        ($uri:expr, $temp_dir:expr, $options:expr) => {{
-            create_torrent!(
-                $uri,
-                $temp_dir,
-                $options,
-                crate::TorrentConfig::builder().path($temp_dir).build()
-            )
-        }};
-        ($uri:expr, $temp_dir:expr, $options:expr, $config:expr) => {{
-            create_torrent!(
-                $uri,
-                $temp_dir,
-                $options,
-                $config,
-                crate::operation::DEFAULT_OPERATIONS()
-            )
-        }};
-        ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr) => {{
-            use crate::peer::{PeerDiscovery, TcpPeerDiscovery, UtpPeerDiscovery};
-
-            let tcp_discovery = TcpPeerDiscovery::new()
-                .await
-                .expect("expected a new tcp peer discovery");
-            let utp_discovery = UtpPeerDiscovery::with_port(tcp_discovery.port())
-                .await
-                .expect("expected a new utp peer discovery");
-            let discoveries: Vec<Box<dyn PeerDiscovery>> =
-                vec![Box::new(tcp_discovery), Box::new(utp_discovery)];
-
-            create_torrent!($uri, $temp_dir, $options, $config, $operations, discoveries)
-        }};
-        ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr) => {{
-            create_torrent!(
-                $uri,
-                $temp_dir,
-                $options,
-                $config,
-                $operations,
-                $discoveries,
-                |params| {
-                    Box::new(crate::storage::DiskStorage::new(
-                        params.info_hash,
-                        params.path,
-                        params.data_pool,
-                    ))
-                }
-            )
-        }};
-        ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr) => {{
-            create_torrent!(
-                $uri,
-                $temp_dir,
-                $options,
-                $config,
-                $operations,
-                $discoveries,
-                $storage,
-                Some(crate::dht::DhtTracker::builder().build().await.unwrap())
-            )
-        }};
-        ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr, $dht:expr) => {{
-            use crate::tracker::TrackerClient;
-            use std::time::Duration;
-
-            create_torrent!(
-                $uri,
-                $temp_dir,
-                $options,
-                $config,
-                $operations,
-                $discoveries,
-                $storage,
-                $dht,
-                TrackerClient::new(Duration::from_secs(2))
-            )
-        }};
-        ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr, $dht:expr, $tracker_manager:expr) => {{
-            use crate::dht::DhtTracker;
-            use crate::operation::TorrentOperation;
-            use crate::peer::PeerDiscovery;
-            use crate::{Torrent, TorrentConfig, TorrentFlags};
-
-            let uri: &str = $uri;
-            let options: TorrentFlags = $options;
-            let config: TorrentConfig = $config;
-            let operations: Vec<Box<dyn TorrentOperation>> = $operations;
-            let discoveries: Vec<Box<dyn PeerDiscovery>> = $discoveries;
-            let dht: Option<DhtTracker> = $dht;
-            let torrent_info = metadata!(uri);
-            let tracker_manager = $tracker_manager;
-            let config = TorrentConfig::builder()
-                .path($temp_dir)
-                .peer_connection_timeout(config.peer_connection_timeout)
-                .max_in_flight_pieces(config.max_in_flight_pieces)
-                .peers_upper_limit(config.peers_upper_limit)
-                .peers_lower_limit(config.peers_lower_limit)
-                .build();
-            let mut trackers = vec![tracker_manager.into()];
-
-            if let Some(dht) = dht {
-                trackers.push(dht.into());
-            }
-
-            Torrent::request()
-                .metadata(torrent_info)
-                .peer_discoveries(discoveries)
-                .options(options)
-                .config(config)
-                .operations(operations)
-                .storage($storage)
-                .trackers(trackers)
-                .build()
-                .unwrap()
-        }};
-    }
 
     #[macro_export]
     macro_rules! create_peer_pair {

@@ -14,6 +14,14 @@ use crate::operation::{
 };
 #[cfg(feature = "dht")]
 use crate::operation::{TorrentDhtNodesOperation, TorrentDhtPeersOperation};
+#[cfg(feature = "extension-donthave")]
+use crate::peer::extension::DontHaveExtension;
+#[cfg(feature = "extension-holepunch")]
+use crate::peer::extension::HolepunchExtension;
+#[cfg(feature = "extension-metadata")]
+use crate::peer::extension::MetadataExtension;
+#[cfg(feature = "extension-pex")]
+use crate::peer::extension::PexExtension;
 use crate::peer::{PeerDiscovery, ProtocolExtensionFlags, TcpPeerDiscovery, UtpPeerDiscovery};
 use crate::session_cache::{FxSessionCache, SessionCache};
 use crate::storage::{DiskStorage, MemoryStorage, Storage, StorageParams};
@@ -21,9 +29,9 @@ use crate::torrent::Torrent;
 use crate::tracker::TrackerClient;
 use crate::TorrentTracker;
 use crate::{
-    ExtensionFactories, ExtensionFactory, InfoHash, Magnet, NoSessionCache, TorrentConfig,
-    TorrentError, TorrentEvent, TorrentFlags, TorrentHandle, TorrentHealth, TorrentMetadata,
-    DEFAULT_TORRENT_EXTENSIONS, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
+    ExtensionFactory, InfoHash, Magnet, NoSessionCache, TorrentConfig, TorrentError, TorrentEvent,
+    TorrentFlags, TorrentHandle, TorrentHealth, TorrentMetadata,
+    DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
 };
 use async_trait::async_trait;
 use derive_more::Display;
@@ -298,7 +306,7 @@ impl FxTorrentSession {
     pub fn new(
         config: SessionConfig,
         protocol_extensions: ProtocolExtensionFlags,
-        extensions: ExtensionFactories,
+        extensions: Vec<ExtensionFactory>,
         operations: Vec<TorrentOperationFactory>,
         storage: Arc<SessionStorageFactory>,
         session_cache: Box<dyn SessionCache>,
@@ -657,7 +665,7 @@ impl Drop for FxTorrentSession {
 pub struct FxTorrentSessionBuilder {
     config: Option<SessionConfig>,
     protocol_extensions: Option<ProtocolExtensionFlags>,
-    extension_factories: Option<ExtensionFactories>,
+    extension_factories: Vec<ExtensionFactory>,
     operation_factories: Option<Vec<TorrentOperationFactory>>,
     storage: Option<Arc<SessionStorageFactory>>,
     session_cache: Option<Box<dyn SessionCache>>,
@@ -688,19 +696,32 @@ impl FxTorrentSessionBuilder {
         self
     }
 
+    /// Enable the default peer extensions to use within the session.
+    pub fn default_extensions(&mut self) -> &mut Self {
+        #[cfg(feature = "extension-metadata")]
+        self.extension_factories
+            .push(|| MetadataExtension::new().into());
+        #[cfg(feature = "extension-pex")]
+        self.extension_factories.push(|| PexExtension::new().into());
+        #[cfg(feature = "extension-donthave")]
+        self.extension_factories
+            .push(|| DontHaveExtension::new().into());
+        #[cfg(feature = "extension-holepunch")]
+        self.extension_factories
+            .push(|| HolepunchExtension::new().into());
+        self
+    }
+
     /// Add an extension to the session.
     pub fn extension(&mut self, extension: ExtensionFactory) -> &mut Self {
-        self.extension_factories
-            .get_or_insert(Vec::new())
-            .push(extension);
+        self.extension_factories.push(extension);
         self
     }
 
     /// Set the extensions for the session.
-    pub fn extensions(&mut self, extensions: ExtensionFactories) -> &mut Self {
-        self.extension_factories
-            .get_or_insert(Vec::new())
-            .extend(extensions);
+    /// This overrides any previously configured extensions.
+    pub fn extensions(&mut self, extensions: Vec<ExtensionFactory>) -> &mut Self {
+        self.extension_factories = extensions;
         self
     }
 
@@ -776,10 +797,7 @@ impl FxTorrentSessionBuilder {
         let protocol_extensions = self
             .protocol_extensions
             .unwrap_or_else(DEFAULT_TORRENT_PROTOCOL_EXTENSIONS);
-        let extensions = self
-            .extension_factories
-            .take()
-            .unwrap_or_else(DEFAULT_TORRENT_EXTENSIONS);
+        let extensions = std::mem::take(&mut self.extension_factories);
         let torrent_operations = self.operation_factories.take().unwrap_or_else(|| {
             // FIXME: this is currently a duplicate list, consolidate with the torrent request operations
             vec![
@@ -875,7 +893,7 @@ struct InnerSession {
     /// The enabled protocol extensions of the session
     protocol_extensions: ProtocolExtensionFlags,
     /// The factories which initializes extensions for a new torrent
-    extension_factories: ExtensionFactories,
+    extension_factories: Vec<ExtensionFactory>,
     /// The factories which initialize operations for a new torrent
     torrent_operations: Vec<TorrentOperationFactory>,
     /// The factory which initialize a storage for a new torrent
@@ -908,7 +926,7 @@ impl InnerSession {
     }
 
     /// Get the enabled peer extensions of the session.
-    fn extensions(&self) -> ExtensionFactories {
+    fn extensions(&self) -> Vec<ExtensionFactory> {
         self.extension_factories.clone()
     }
 
@@ -1046,7 +1064,6 @@ impl Debug for InnerSession {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::create_torrent;
     use crate::tests::{read_test_file_to_bytes, test_resource_filepath};
     use crate::TorrentHealthState;
     use log::info;
@@ -1096,7 +1113,7 @@ pub mod tests {
                     .enable_utp_peer(false)
                     .build(),
             )
-            .extensions(DEFAULT_TORRENT_EXTENSIONS())
+            .default_extensions()
             .operations(vec![
                 TorrentOperationFactory::new(|| Box::new(TorrentConnectPeersOperation::new(false))),
                 TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new(None))),
@@ -1284,7 +1301,7 @@ pub mod tests {
                         .build(),
                 )
                 .dht(dht)
-                .extensions(DEFAULT_TORRENT_EXTENSIONS())
+                .default_extensions()
                 .build()
                 .unwrap();
 
@@ -1307,7 +1324,7 @@ pub mod tests {
                         .build(),
                 )
                 .dht_option(Some(dht))
-                .extensions(DEFAULT_TORRENT_EXTENSIONS())
+                .default_extensions()
                 .build()
                 .unwrap();
 
@@ -1337,7 +1354,7 @@ pub mod tests {
                         .await
                         .unwrap(),
                 )
-                .extensions(DEFAULT_TORRENT_EXTENSIONS())
+                .default_extensions()
                 .build()
                 .unwrap();
 
@@ -1362,7 +1379,7 @@ pub mod tests {
                         .path(temp_path)
                         .build(),
                 )
-                .extensions(DEFAULT_TORRENT_EXTENSIONS())
+                .default_extensions()
                 .build()
                 .unwrap();
 
@@ -1380,7 +1397,7 @@ pub mod tests {
                     .path(temp_path)
                     .build(),
             )
-            .extensions(DEFAULT_TORRENT_EXTENSIONS())
+            .default_extensions()
             .build()
             .expect("expected a session to have been created")
     }

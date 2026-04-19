@@ -1,8 +1,7 @@
-use crate::peer::extension::{Extension, ExtensionNumber};
+use crate::peer::extension::ExtensionNumber;
 use crate::peer::protocol::Message;
 use crate::peer::{extension, PeerContext, PeerEvent};
 use crate::{PieceIndex, TorrentMetadataInfo};
-use async_trait::async_trait;
 use log::{debug, error, trace, warn};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Debug, Formatter};
@@ -11,7 +10,6 @@ use std::io::Cursor;
 use tokio::sync::RwLock;
 use tokio_util::bytes::Buf;
 
-pub const EXTENSION_NAME_METADATA: &str = "ut_metadata";
 // The expected metadata piece size is 16 KiB, see BEP9
 const METADATA_PIECE_SIZE: usize = 1024 * 16;
 
@@ -62,10 +60,41 @@ pub struct MetadataExtension {
 }
 
 impl MetadataExtension {
+    pub const NAME: &'static str = "ut_metadata";
+
+    /// Create a new extension instance.
     pub fn new() -> Self {
         Self {
             total_pieces: RwLock::new(None),
             metadata_buffer: RwLock::new(None),
+        }
+    }
+
+    /// Handle the given extension message payload which has been received from the remote peer.
+    pub async fn handle<'a>(
+        &'a self,
+        payload: &'a [u8],
+        peer: &'a PeerContext,
+    ) -> extension::Result<()> {
+        let message: MetadataExtensionMessage = Self::deserialize(payload)?;
+        trace!("Received metadata message {:?}", message);
+
+        match message.msg_type {
+            MetadataMessageType::Request => self.send_metadata(message.piece, peer).await?,
+            MetadataMessageType::Data => self.process_metadata(message, peer).await?,
+            MetadataMessageType::Reject => debug!(
+                "Peer {} rejected the metadata request of piece {}",
+                peer, message.piece
+            ),
+        }
+
+        Ok(())
+    }
+
+    pub async fn on<'a>(&'a self, event: &'a PeerEvent, peer: &'a PeerContext) {
+        match event {
+            PeerEvent::ExtendedHandshakeCompleted => self.on_extended_handshake(peer).await,
+            _ => {}
         }
     }
 
@@ -211,7 +240,7 @@ impl MetadataExtension {
     ) -> Option<ExtensionNumber> {
         peer.remote_extension_registry()
             .await
-            .and_then(|e| e.get(EXTENSION_NAME_METADATA).cloned())
+            .and_then(|e| e.get(MetadataExtension::NAME).cloned())
     }
 
     /// Check if the metadata extension is supported by the remote peer.
@@ -299,40 +328,6 @@ impl MetadataExtension {
         message.data = cursor.chunk().to_vec();
 
         Ok(message)
-    }
-}
-
-#[async_trait]
-impl Extension for MetadataExtension {
-    fn name(&self) -> &str {
-        EXTENSION_NAME_METADATA
-    }
-
-    async fn handle<'a>(
-        &'a self,
-        payload: &'a [u8],
-        peer: &'a PeerContext,
-    ) -> extension::Result<()> {
-        let message: MetadataExtensionMessage = Self::deserialize(payload)?;
-        trace!("Received metadata message {:?}", message);
-
-        match message.msg_type {
-            MetadataMessageType::Request => self.send_metadata(message.piece, peer).await?,
-            MetadataMessageType::Data => self.process_metadata(message, peer).await?,
-            MetadataMessageType::Reject => debug!(
-                "Peer {} rejected the metadata request of piece {}",
-                peer, message.piece
-            ),
-        }
-
-        Ok(())
-    }
-
-    async fn on<'a>(&'a self, event: &'a PeerEvent, peer: &'a PeerContext) {
-        match event {
-            PeerEvent::ExtendedHandshakeCompleted => self.on_extended_handshake(peer).await,
-            _ => {}
-        }
     }
 }
 

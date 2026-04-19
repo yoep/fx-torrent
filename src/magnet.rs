@@ -456,7 +456,7 @@ impl MagnetBuilder {
             exact_length: self.exact_length.take(),
             tracker_addresses,
             web_seeds,
-            acceptable_source: self.acceptable_source.drain(..).collect(),
+            acceptable_source: std::mem::take(&mut self.acceptable_source),
             exact_source: self.exact_source.take(),
             keyword_topic: self.keyword_topic.take(),
             manifest_topic: self.manifest_topic.take(),

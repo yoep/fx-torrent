@@ -233,7 +233,6 @@ impl InnerUtpPeerDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent;
     use tempfile::tempdir;
 
     #[tokio::test]

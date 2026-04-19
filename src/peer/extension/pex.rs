@@ -1,8 +1,7 @@
-use crate::peer::extension::{Error, Extension, ExtensionNumber, Result};
+use crate::peer::extension::{Error, ExtensionNumber, Result};
 use crate::peer::protocol::Message;
 use crate::peer::{ConnectionDirection, PeerClientInfo, PeerCommandEvent, PeerContext, PeerEvent};
 use crate::{CompactIpv4Addrs, CompactIpv6Addrs, TorrentEvent};
-use async_trait::async_trait;
 use bitmask_enum::bitmask;
 use fx_callback::Callback;
 use log::{debug, warn};
@@ -13,8 +12,6 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-
-const EXTENSION_NAME_PEX: &str = "ut_pex";
 
 /// The Peer Exchange message.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -106,16 +103,44 @@ pub struct PexExtension {
 }
 
 impl PexExtension {
+    pub const NAME: &'static str = "ut_pex";
+
+    /// Create a new extension instance.
     pub fn new() -> Self {
         Self {
             pool: PexPool::new(),
         }
     }
 
+    /// Handle the given extension message payload which has been received from the remote peer.
+    pub async fn handle<'a>(&'a self, payload: &'a [u8], peer: &'a PeerContext) -> Result<()> {
+        let message: PexMessage = serde_bencode::from_bytes(payload)?;
+        debug!("Received PEX message {:?} from peer {}", message, peer);
+
+        let discovered_peers = message.discovered_peers();
+        if discovered_peers.len() > 0 {
+            peer.torrent().add_peers(discovered_peers).await;
+        }
+
+        let dropped_peers = message.dropped_peers();
+        if dropped_peers.len() > 0 {
+            peer.torrent().decrease_peer_priority(dropped_peers).await;
+        }
+
+        Ok(())
+    }
+
+    /// Invoked when an event is raised by a peer and this extension is supported.
+    pub async fn on<'a>(&'a self, event: &'a PeerEvent, peer: &'a PeerContext) {
+        if let PeerEvent::ExtendedHandshakeCompleted = event {
+            self.subscribe_to_torrent(peer).await
+        }
+    }
+
     async fn subscribe_to_torrent(&self, peer: &PeerContext) {
         let pool = self.pool.clone();
 
-        if let Some(extension_number) = peer.find_client_extension_number(EXTENSION_NAME_PEX) {
+        if let Some(extension_number) = peer.find_client_extension_number(PexExtension::NAME) {
             let mut receiver = peer.torrent().subscribe();
             let event_sender = peer.event_sender().clone();
             tokio::spawn(async move {
@@ -143,38 +168,8 @@ impl PexExtension {
         } else {
             debug!(
                 "Unable to subscribe to peer torrent, client extension {} not found",
-                EXTENSION_NAME_PEX
+                PexExtension::NAME
             );
-        }
-    }
-}
-
-#[async_trait]
-impl Extension for PexExtension {
-    fn name(&self) -> &str {
-        EXTENSION_NAME_PEX
-    }
-
-    async fn handle<'a>(&'a self, payload: &'a [u8], peer: &'a PeerContext) -> Result<()> {
-        let message: PexMessage = serde_bencode::from_bytes(payload)?;
-        debug!("Received PEX message {:?} from peer {}", message, peer);
-
-        let discovered_peers = message.discovered_peers();
-        if discovered_peers.len() > 0 {
-            peer.torrent().add_peers(discovered_peers).await;
-        }
-
-        let dropped_peers = message.dropped_peers();
-        if dropped_peers.len() > 0 {
-            peer.torrent().decrease_peer_priority(dropped_peers).await;
-        }
-
-        Ok(())
-    }
-
-    async fn on<'a>(&'a self, event: &'a PeerEvent, peer: &'a PeerContext) {
-        if let PeerEvent::ExtendedHandshakeCompleted = event {
-            self.subscribe_to_torrent(peer).await
         }
     }
 }
@@ -302,8 +297,8 @@ impl InnerPexPool {
             let mut added_lock = self.added_peers.write().await;
             let mut dropped_lock = self.dropped_peers.write().await;
             (
-                added_lock.drain(..).collect::<Vec<_>>(),
-                dropped_lock.drain(..).collect::<Vec<_>>(),
+                std::mem::take(&mut *added_lock),
+                std::mem::take(&mut *dropped_lock),
             )
         };
         let mut added = vec![];

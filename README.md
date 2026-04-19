@@ -31,6 +31,7 @@ async fn main() -> Result<(), io::Error> {
                 .client_name("MyClient")
                 .build(),
         )
+        .default_extensions()
         .build()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
@@ -88,6 +89,7 @@ It uses [Ratatui](https://ratatui.rs/) as the terminal UI library.
 - [x] [BEP19](https://www.bittorrent.org/beps/bep_0019.html) - WebSeed - HTTP/FTP Seeding (GetRight style)
 - [x] [BEP20](https://www.bittorrent.org/beps/bep_0020.html) - Peer ID Conventions
 - [x] [BEP21](https://www.bittorrent.org/beps/bep_0021.html) - Extension for partial seeds
+- [ ] [BEP24](https://www.bittorrent.org/beps/bep_0024.html) - Tracker Returns External IP
 - [x] [BEP29](https://www.bittorrent.org/beps/bep_0029.html) - uTorrent transport protocol
 - [x] [BEP32](https://www.bittorrent.org/beps/bep_0032.html) - BitTorrent DHT Extensions for IPv6
 - [x] [BEP33](https://www.bittorrent.org/beps/bep_0033.html) - DHT scrape

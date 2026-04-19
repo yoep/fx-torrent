@@ -5,7 +5,7 @@ use crate::dht::DhtTracker;
 use crate::errors::Result;
 use crate::file::File;
 use crate::operation::{TorrentOperation, TorrentOperationResult, DEFAULT_OPERATIONS};
-use crate::peer::extension::{Extension, Extensions};
+use crate::peer::extension::{Extensions, PeerExtension};
 use crate::peer::{
     BitTorrentPeer, CloseReason, Peer, PeerClientInfo, PeerDiscovery, PeerEntry, PeerHandle,
     PeerId, ProtocolExtensionFlags,
@@ -20,8 +20,7 @@ use crate::TorrentTracker;
 use crate::{
     FileAttributeFlags, FileIndex, InfoHash, Metrics, Piece, PieceChunkPool, PieceIndex, PiecePart,
     PiecePriority, Sha1Hash, Sha256Hash, TorrentError, TorrentFlags, TorrentMetadata,
-    TorrentMetadataInfo, TorrentPeer, DEFAULT_TORRENT_EXTENSIONS,
-    DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
+    TorrentMetadataInfo, TorrentPeer, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
 };
 use bit_vec::BitVec;
 use derive_more::Display;
@@ -62,10 +61,7 @@ pub type TorrentOperations = Vec<Box<dyn TorrentOperation>>;
 
 /// A [Torrent] extension factory.
 /// This factory will create a new instance of an [Extension] for each new torrent.
-pub type ExtensionFactory = fn() -> Box<dyn Extension>;
-
-/// A list of [Torrent] extension factories.
-pub type ExtensionFactories = Vec<ExtensionFactory>;
+pub type ExtensionFactory = fn() -> PeerExtension;
 
 /// Creates a new torrent [Storage] instance.
 pub type StorageFactory = dyn FnOnce(StorageParams) -> Box<dyn Storage> + Send + Sync;
@@ -164,7 +160,7 @@ pub struct TorrentRequest {
     /// The protocol extensions that should be enabled
     protocol_extensions: Option<ProtocolExtensionFlags>,
     /// The factories for creating the peer extensions that should be enabled for this torrent
-    extensions: Option<ExtensionFactories>,
+    extensions: Vec<ExtensionFactory>,
     /// The storage strategy to use for the torrent data
     storage: Option<Box<StorageFactory>>,
     /// The operations used by the torrent for processing data
@@ -220,13 +216,14 @@ impl TorrentRequest {
 
     /// Add the given extension factory that should be activated.
     pub fn extension(&mut self, extension: ExtensionFactory) -> &mut Self {
-        self.extensions.get_or_insert(Vec::new()).push(extension);
+        self.extensions.push(extension);
         self
     }
 
-    /// Set the extension factories that should be activated for this torrent
-    pub fn extensions(&mut self, extensions: ExtensionFactories) -> &mut Self {
-        self.extensions = Some(extensions);
+    /// Set the extension factories that should be activated for this torrent.
+    /// This overrides any previously set extensions.
+    pub fn extensions(&mut self, extensions: Vec<ExtensionFactory>) -> &mut Self {
+        self.extensions = extensions;
         self
     }
 
@@ -304,10 +301,7 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
         let protocol_extensions = request
             .protocol_extensions
             .unwrap_or_else(DEFAULT_TORRENT_PROTOCOL_EXTENSIONS);
-        let extensions = request
-            .extensions
-            .take()
-            .unwrap_or_else(DEFAULT_TORRENT_EXTENSIONS);
+        let extensions = std::mem::take(&mut request.extensions);
         let options = request.options.unwrap_or(TorrentFlags::default());
         let config = request
             .config
@@ -326,7 +320,7 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
             .operations
             .take()
             .unwrap_or_else(TorrentRequest::default_operations);
-        let trackers = request.trackers.drain(..).collect_vec();
+        let trackers = std::mem::take(&mut request.trackers);
         if trackers.is_empty() {
             return Err(TorrentError::InvalidRequest(
                 "at least 1 tracker is required".to_string(),
@@ -434,7 +428,7 @@ impl Torrent {
         metadata: TorrentMetadata,
         peer_discoveries: Vec<Arc<dyn PeerDiscovery>>,
         protocol_extensions: ProtocolExtensionFlags,
-        extensions: ExtensionFactories,
+        extensions: Vec<ExtensionFactory>,
         options: TorrentFlags,
         config: TorrentConfig,
         data_pool: DataPool,
@@ -1686,7 +1680,7 @@ pub struct TorrentContext {
     protocol_extensions: ProtocolExtensionFlags,
     /// The immutable peer extension factories for this torrent.
     /// These factories create the extensions for each established peer connection.
-    extensions: ExtensionFactories,
+    extensions: Vec<ExtensionFactory>,
 
     /// The state of the torrent
     state: TorrentState,
@@ -1710,7 +1704,7 @@ impl TorrentContext {
         config: TorrentConfig,
         peer_port: Option<u16>,
         protocol_extensions: ProtocolExtensionFlags,
-        extensions: ExtensionFactories,
+        extensions: Vec<ExtensionFactory>,
         options: TorrentFlags,
         data_pool: DataPool,
         trackers: Vec<TorrentTracker>,
@@ -1868,7 +1862,7 @@ impl TorrentContext {
 
     /// Returns the active peer extensions of the torrent.
     /// These extensions should be activated for each established peer connection of the torrent.
-    pub fn extensions(&self) -> Vec<Box<dyn Extension>> {
+    pub fn extensions(&self) -> Vec<PeerExtension> {
         self.extensions.iter().map(|e| e()).collect()
     }
 
@@ -3408,7 +3402,6 @@ impl PartialEq for TorrentContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent;
     use crate::operation::{
         TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation,
         TorrentFileValidationOperation, TorrentStatsOperation,

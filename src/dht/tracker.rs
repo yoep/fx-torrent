@@ -1096,7 +1096,7 @@ pub struct DhtTrackerBuilder {
     id: Option<NodeId>,
     mode: Option<Mode>,
     public_ip: Option<IpAddr>,
-    routing_nodes: Vec<SocketAddr>,
+    routing_nodes: HashSet<SocketAddr>,
     routing_node_urls: Vec<String>,
     max_torrents: Option<usize>,
     enable_indexing: Option<bool>,
@@ -1147,14 +1147,14 @@ impl DhtTrackerBuilder {
 
     /// Add the given address to the routing nodes used for searching new nodes.
     pub fn routing_node(&mut self, addr: SocketAddr) -> &mut Self {
-        self.routing_nodes.push(addr);
+        self.routing_nodes.insert(addr);
         self
     }
 
     /// Set the routing nodes to use for searching new nodes.
     /// This replaces any already existing configured routing nodes.
     pub fn routing_nodes(&mut self, nodes: Vec<SocketAddr>) -> &mut Self {
-        self.routing_nodes = nodes;
+        self.routing_nodes = HashSet::from_iter(nodes);
         self
     }
 
@@ -1211,7 +1211,7 @@ impl DhtTrackerBuilder {
             .indexing_interval
             .unwrap_or(defaults.info_hash_indexing_interval);
         let item_signature = self.verifier.take();
-        let mut routing_nodes: HashSet<SocketAddr> = self.routing_nodes.drain(..).collect();
+        let mut routing_nodes = std::mem::take(&mut self.routing_nodes);
 
         for node_url in self.routing_node_urls.drain(..).filter_map(Self::host) {
             match lookup_host(node_url.as_str()).await {

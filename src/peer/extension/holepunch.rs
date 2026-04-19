@@ -1,9 +1,6 @@
-use crate::peer::extension::{Extension, Result};
-use crate::peer::{ConnectionProtocol, PeerContext, PeerEvent};
-use async_trait::async_trait;
+use crate::peer::extension::Result;
+use crate::peer::{ConnectionProtocol, PeerContext};
 use serde::{Deserialize, Serialize};
-
-const HOLEPUNCH_EXTENSION_NAME: &str = "ut_holepunch";
 
 /// The BEP55 holepunch extension message.
 #[derive(Debug, Serialize, Deserialize)]
@@ -109,9 +106,18 @@ impl TryFrom<u32> for ErrorCode {
 pub struct HolepunchExtension {}
 
 impl HolepunchExtension {
-    /// Creates a new holepunch extension
+    pub const NAME: &'static str = "ut_holepunch";
+
+    /// Create a new extension instance.
     pub fn new() -> Self {
         Self {}
+    }
+
+    /// Handle the given extension message payload which has been received from the remote peer.
+    pub async fn handle<'a>(&'a self, payload: &'a [u8], _peer: &'a PeerContext) -> Result<()> {
+        let _msg = serde_bencode::from_bytes::<HolepunchMessage>(payload)?;
+        // TODO
+        Ok(())
     }
 
     /// Returns `true` if the peer is using the uTP connection protocol.
@@ -120,34 +126,12 @@ impl HolepunchExtension {
     }
 }
 
-#[async_trait]
-impl Extension for HolepunchExtension {
-    fn name(&self) -> &str {
-        HOLEPUNCH_EXTENSION_NAME
-    }
-
-    async fn handle<'a>(&'a self, payload: &'a [u8], _peer: &'a PeerContext) -> Result<()> {
-        let _msg = serde_bencode::from_bytes::<HolepunchMessage>(payload)?;
-        // TODO
-        Ok(())
-    }
-
-    async fn on<'a>(&'a self, _event: &'a PeerEvent, peer: &'a PeerContext) {
-        if !self.is_utp_connection(peer) {
-            return;
-        }
-
-        // TODO
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_name() {
+    #[tokio::test]
+    async fn test_on_handle() {
         let extension = HolepunchExtension::new();
-        assert_eq!(extension.name(), HOLEPUNCH_EXTENSION_NAME);
     }
 }

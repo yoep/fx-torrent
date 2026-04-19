@@ -812,7 +812,11 @@ impl UtpStreamContext {
 
     /// Send an acknowledgment for a received remote peer packet.
     async fn send_acknowledgment(&mut self, ack_number: SequenceNumber) -> Result<()> {
-        let message = UtpMessage::State(self.key.send_id, self.seq_number, ack_number);
+        let message = UtpMessage::State {
+            connection: self.key.send_id,
+            seq_number: self.seq_number,
+            ack_number,
+        };
         self.send_message(message, self.seq_number, ack_number)
             .await?;
         Ok(())

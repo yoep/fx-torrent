@@ -1,7 +1,7 @@
 use crate::merkle::LEAF_BLOCK_SIZE;
 use crate::metrics::Metric;
 use crate::peer::extension::{
-    Extension, ExtensionName, ExtensionNumber, ExtensionRegistry, Extensions,
+    ExtensionName, ExtensionNumber, ExtensionRegistry, Extensions, PeerExtension,
 };
 use crate::peer::peer_connection::PeerConnection;
 use crate::peer::protocol::{CloseReason, UtpStream};
@@ -2665,7 +2665,7 @@ impl PeerContext {
     pub async fn find_extension_by_number(
         &self,
         extension_number: ExtensionNumber,
-    ) -> Option<&Box<dyn Extension>> {
+    ) -> Option<&PeerExtension> {
         // search for the given extension, by extensions number, in our own supported extensions
         let extension_registry = self.client_extension_registry();
         if let Some(extension_name) = extension_registry
@@ -2695,7 +2695,7 @@ impl PeerContext {
     /// # Returns
     ///
     /// Returns a reference to the found client extension.
-    pub fn find_extension_by_name(&self, extension_name: &str) -> Option<&Box<dyn Extension>> {
+    pub fn find_extension_by_name(&self, extension_name: &str) -> Option<&PeerExtension> {
         let extension_registry = self.client_extension_registry();
         if let Some(extension) = self.extensions.iter().find(|e| e.name() == extension_name) {
             return Some(extension);
@@ -2787,6 +2787,7 @@ mod tests {
     use super::*;
 
     use crate::channel::{ChannelReceiver, Reply};
+    use crate::create_peer_pair;
     use crate::operation::{
         TorrentCreatePiecesAndFilesOperation, TorrentOperation, TorrentOperationResult,
     };
@@ -2797,7 +2798,6 @@ mod tests {
     use crate::tests::helpers::wait_for_torrent_pieces;
     use crate::tests::read_test_file_to_bytes;
     use crate::torrent::TorrentContext;
-    use crate::{create_peer_pair, create_torrent};
     use crate::{TorrentState, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS};
     use tempfile::tempdir;
     use tokio::sync::mpsc::channel;

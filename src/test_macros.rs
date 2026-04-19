@@ -1,57 +1,5 @@
 use std::sync::Once;
 
-pub(crate) static INIT: Once = Once::new();
-
-/// Initializes the logger with the specified log level.
-macro_rules! init_logger {
-    () => {{
-        init_logger!(log::LevelFilter::Trace)
-    }};
-    ($level:expr) => {{
-        use log4rs::config::runtime::{Appender, Config, Logger, Root};
-        use log4rs::append::console::ConsoleAppender;
-        use log4rs::encode::pattern::PatternEncoder;
-        use log::LevelFilter;
-
-        let level: LevelFilter = $level;
-
-        crate::test_macros::INIT.call_once(|| {
-            log4rs::init_config(Config::builder()
-                .appender(Appender::builder().build("stdout", Box::new(ConsoleAppender::builder()
-                    .encoder(Box::new(PatternEncoder::new("\x1B[37m{d(%Y-%m-%d %H:%M:%S%.3f)}\x1B[0m {h({l:>5.5})} \x1B[35m{I:>6.6}\x1B[0m \x1B[37m---\x1B[0m \x1B[37m[{T:>15.15}]\x1B[0m \x1B[36m{t:<60.60}\x1B[0m \x1B[37m:\x1B[0m {m}{n}")))
-                    .build())))
-                .logger(Logger::builder().build("axum", LevelFilter::Info))
-                .logger(Logger::builder().build("fx_callback", LevelFilter::Info))
-                .logger(Logger::builder().build("hyper_util", LevelFilter::Info))
-                .logger(Logger::builder().build("mio", LevelFilter::Info))
-                .logger(Logger::builder().build("reqwest", LevelFilter::Info))
-                .build(Root::builder().appender("stdout").build(level))
-                .unwrap())
-                .unwrap();
-        })
-    }};
-}
-
-/// Create the torrent metadata from the given uri.
-/// The uri can either point to a `.torrent` file or a magnet link.
-macro_rules! metadata {
-    ($uri:expr) => {{
-        use crate::tests::read_test_file_to_bytes;
-        use crate::{Magnet, TorrentMetadata};
-        use std::str::FromStr;
-
-        let uri: &str = $uri;
-
-        if uri.starts_with("magnet:") {
-            let magnet = Magnet::from_str(uri).unwrap();
-            TorrentMetadata::try_from(magnet).unwrap()
-        } else {
-            let torrent_info_data = read_test_file_to_bytes(uri);
-            TorrentMetadata::try_from(torrent_info_data.as_slice()).unwrap()
-        }
-    }};
-}
-
 /// Create a [TorrentContext] instance for the given uri and options.
 #[macro_export]
 macro_rules! create_torrent_context {
@@ -117,13 +65,17 @@ macro_rules! create_torrent_context {
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr, $lsd:expr, $storage:expr) => {{
         use crate::dht::DhtTracker;
+        use crate::peer::extension::DontHaveExtension;
+        use crate::peer::extension::HolepunchExtension;
+        use crate::peer::extension::MetadataExtension;
+        use crate::peer::extension::PexExtension;
         use crate::peer::PeerDiscovery;
         use crate::torrent_data::DataPool;
         use crate::tracker::TrackerClient;
         use crate::LocalServiceDiscovery;
         use crate::{
             TorrentConfig, TorrentContext, TorrentFlags, TorrentMetadata,
-            DEFAULT_TORRENT_EXTENSIONS, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
+            DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
         };
         use std::time::Duration;
 
@@ -160,7 +112,12 @@ macro_rules! create_torrent_context {
                 config,
                 discoveries.first().map(|e| e.port()),
                 DEFAULT_TORRENT_PROTOCOL_EXTENSIONS(),
-                DEFAULT_TORRENT_EXTENSIONS(),
+                vec![
+                    || MetadataExtension::new().into(),
+                    || PexExtension::new().into(),
+                    || DontHaveExtension::new().into(),
+                    || HolepunchExtension::new().into(),
+                ],
                 options,
                 data_pool.clone(),
                 trackers,
@@ -169,6 +126,185 @@ macro_rules! create_torrent_context {
             ),
             receiver,
         )
+    }};
+}
+
+/// Create a new [Torrent] instance.
+macro_rules! create_torrent {
+    ($uri:expr, $temp_dir:expr, $options:expr) => {{
+        create_torrent!(
+            $uri,
+            $temp_dir,
+            $options,
+            crate::TorrentConfig::builder().path($temp_dir).build()
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr) => {{
+        create_torrent!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            crate::operation::DEFAULT_OPERATIONS()
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr) => {{
+        use crate::peer::{PeerDiscovery, TcpPeerDiscovery, UtpPeerDiscovery};
+
+        let tcp_discovery = TcpPeerDiscovery::new()
+            .await
+            .expect("expected a new tcp peer discovery");
+        let utp_discovery = UtpPeerDiscovery::with_port(tcp_discovery.port())
+            .await
+            .expect("expected a new utp peer discovery");
+        let discoveries: Vec<Box<dyn PeerDiscovery>> =
+            vec![Box::new(tcp_discovery), Box::new(utp_discovery)];
+
+        create_torrent!($uri, $temp_dir, $options, $config, $operations, discoveries)
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr) => {{
+        create_torrent!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $operations,
+            $discoveries,
+            |params| {
+                Box::new(crate::storage::DiskStorage::new(
+                    params.info_hash,
+                    params.path,
+                    params.data_pool,
+                ))
+            }
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr) => {{
+        create_torrent!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $operations,
+            $discoveries,
+            $storage,
+            Some(crate::dht::DhtTracker::builder().build().await.unwrap())
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr, $dht:expr) => {{
+        use crate::tracker::TrackerClient;
+        use std::time::Duration;
+
+        create_torrent!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $operations,
+            $discoveries,
+            $storage,
+            $dht,
+            TrackerClient::new(Duration::from_secs(2))
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr, $dht:expr, $tracker_manager:expr) => {{
+        use crate::dht::DhtTracker;
+        use crate::operation::TorrentOperation;
+        use crate::peer::extension::{
+            DontHaveExtension, HolepunchExtension, MetadataExtension, PexExtension,
+        };
+        use crate::peer::PeerDiscovery;
+        use crate::{Torrent, TorrentConfig, TorrentFlags};
+
+        let uri: &str = $uri;
+        let options: TorrentFlags = $options;
+        let config: TorrentConfig = $config;
+        let operations: Vec<Box<dyn TorrentOperation>> = $operations;
+        let discoveries: Vec<Box<dyn PeerDiscovery>> = $discoveries;
+        let dht: Option<DhtTracker> = $dht;
+        let torrent_info = metadata!(uri);
+        let tracker_manager = $tracker_manager;
+        let config = TorrentConfig::builder()
+            .path($temp_dir)
+            .peer_connection_timeout(config.peer_connection_timeout)
+            .max_in_flight_pieces(config.max_in_flight_pieces)
+            .peers_upper_limit(config.peers_upper_limit)
+            .peers_lower_limit(config.peers_lower_limit)
+            .build();
+        let mut trackers = vec![tracker_manager.into()];
+
+        if let Some(dht) = dht {
+            trackers.push(dht.into());
+        }
+
+        Torrent::request()
+            .metadata(torrent_info)
+            .peer_discoveries(discoveries)
+            .options(options)
+            .config(config)
+            .operations(operations)
+            .storage($storage)
+            .trackers(trackers)
+            .extensions(vec![
+                || MetadataExtension::new().into(),
+                || DontHaveExtension::new().into(),
+                || PexExtension::new().into(),
+                || HolepunchExtension::new().into(),
+            ])
+            .build()
+            .unwrap()
+    }};
+}
+
+pub(crate) static INIT: Once = Once::new();
+
+/// Initializes the logger with the specified log level.
+macro_rules! init_logger {
+    () => {{
+        init_logger!(log::LevelFilter::Trace)
+    }};
+    ($level:expr) => {{
+        use log4rs::config::runtime::{Appender, Config, Logger, Root};
+        use log4rs::append::console::ConsoleAppender;
+        use log4rs::encode::pattern::PatternEncoder;
+        use log::LevelFilter;
+
+        let level: LevelFilter = $level;
+
+        crate::test_macros::INIT.call_once(|| {
+            log4rs::init_config(Config::builder()
+                .appender(Appender::builder().build("stdout", Box::new(ConsoleAppender::builder()
+                    .encoder(Box::new(PatternEncoder::new("\x1B[37m{d(%Y-%m-%d %H:%M:%S%.3f)}\x1B[0m {h({l:>5.5})} \x1B[35m{I:>6.6}\x1B[0m \x1B[37m---\x1B[0m \x1B[37m[{T:>15.15}]\x1B[0m \x1B[36m{t:<60.60}\x1B[0m \x1B[37m:\x1B[0m {m}{n}")))
+                    .build())))
+                .logger(Logger::builder().build("axum", LevelFilter::Info))
+                .logger(Logger::builder().build("fx_callback", LevelFilter::Info))
+                .logger(Logger::builder().build("hyper_util", LevelFilter::Info))
+                .logger(Logger::builder().build("mio", LevelFilter::Info))
+                .logger(Logger::builder().build("reqwest", LevelFilter::Info))
+                .build(Root::builder().appender("stdout").build(level))
+                .unwrap())
+                .unwrap();
+        })
+    }};
+}
+
+/// Create the torrent metadata from the given uri.
+/// The uri can either point to a `.torrent` file or a magnet link.
+macro_rules! metadata {
+    ($uri:expr) => {{
+        use crate::tests::read_test_file_to_bytes;
+        use crate::{Magnet, TorrentMetadata};
+        use std::str::FromStr;
+
+        let uri: &str = $uri;
+
+        if uri.starts_with("magnet:") {
+            let magnet = Magnet::from_str(uri).unwrap();
+            TorrentMetadata::try_from(magnet).unwrap()
+        } else {
+            let torrent_info_data = read_test_file_to_bytes(uri);
+            TorrentMetadata::try_from(torrent_info_data.as_slice()).unwrap()
+        }
     }};
 }
 

@@ -244,7 +244,6 @@ impl InnerTcpPeerDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent;
     use crate::peer::tests::new_tcp_peer_discovery;
     use crate::peer::PeerState;
     use tempfile::tempdir;
