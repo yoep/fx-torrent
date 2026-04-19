@@ -70,7 +70,7 @@ impl UtpPeerDiscovery {
 
         let inner_main_loop = inner.clone();
         tokio::spawn(async move {
-            inner_main_loop.start(sender).await;
+            inner_main_loop.run(sender).await;
         });
 
         Ok(Self { inner })
@@ -159,8 +159,8 @@ struct InnerUtpPeerDiscovery {
 }
 
 impl InnerUtpPeerDiscovery {
-    /// Start the main loop of the utp peer discovery.
-    async fn start(&self, sender: UnboundedSender<UtpStream>) {
+    /// Run the main loop of the utp peer discovery.
+    async fn run(&self, sender: UnboundedSender<UtpStream>) {
         debug!(
             "UTP peer discovery {} started on port {}",
             self,

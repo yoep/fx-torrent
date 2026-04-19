@@ -2708,21 +2708,30 @@ impl PeerContext {
         None
     }
 
-    /// Find the extensions number from our own client extensions through the unique extension's name.
-    ///
-    /// # Arguments
-    ///
-    /// * `extension_name` - The name of the extension.
+    /// Returns the extension number of our client extensions through the unique extension's name.
     pub fn find_client_extension_number(&self, extension_name: &str) -> Option<ExtensionNumber> {
-        let extension_registry = self.client_extension_registry();
-        if let Some((_, number)) = extension_registry
+        self.client_extension_registry()
             .iter()
             .find(|(name, _)| name.as_str() == extension_name)
-        {
-            return Some(number.clone());
-        }
+            .map(|(_, number)| *number)
+    }
 
-        None
+    /// Returns the extension number of the remote peer for the given extension name.
+    pub async fn find_remote_extension_number(
+        &self,
+        extension_name: &str,
+    ) -> Option<ExtensionNumber> {
+        let mutex = self.remote.read().await;
+        let remote = match &*mutex {
+            None => return None,
+            Some(e) => e,
+        };
+
+        remote
+            .extensions
+            .iter()
+            .find(|(name, _)| name.as_str() == extension_name)
+            .map(|(_, number)| *number)
     }
 
     /// Invoke an event on the peer instance.

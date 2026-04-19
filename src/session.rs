@@ -333,7 +333,7 @@ impl FxTorrentSession {
 
         let main_inner = inner.clone();
         tokio::spawn(async move {
-            main_inner.start(command_receiver).await;
+            main_inner.run(command_receiver).await;
         });
 
         debug!("Created new torrent session {}", inner.handle);
@@ -907,8 +907,8 @@ struct InnerSession {
 }
 
 impl InnerSession {
-    /// Start the main loop of the session.
-    async fn start(&self, mut command_receiver: UnboundedReceiver<SessionCommand>) {
+    /// Run the main loop of the session.
+    async fn run(&self, mut command_receiver: UnboundedReceiver<SessionCommand>) {
         loop {
             select! {
                 _ = self.cancellation_token.cancelled() => break,

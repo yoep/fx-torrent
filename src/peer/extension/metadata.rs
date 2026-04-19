@@ -109,6 +109,10 @@ impl MetadataExtension {
             .await
             .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))?
             .info;
+        let extension_number = match peer.find_remote_extension_number(Self::NAME).await {
+            None => return Err(extension::Error::Unsupported),
+            Some(e) => e,
+        };
 
         if let Some(metadata) = metadata {
             Self::send_metadata_piece(&metadata, piece, peer).await?;
@@ -133,7 +137,7 @@ impl MetadataExtension {
                 peer,
                 message
             );
-            peer.send(Message::ExtendedPayload(1, payload))
+            peer.send(Message::ExtendedPayload(extension_number, payload))
                 .await
                 .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
         }
@@ -210,12 +214,9 @@ impl MetadataExtension {
         piece_index: PieceIndex,
         peer: &'a PeerContext,
     ) -> extension::Result<()> {
-        let extension_number =
-            self.find_metadata_extension_number(&peer)
-                .await
-                .ok_or(extension::Error::Operation(
-                    "failed to find metadata extension".to_string(),
-                ))?;
+        let extension_number = peer.find_remote_extension_number(Self::NAME).await.ok_or(
+            extension::Error::Operation("failed to find metadata extension".to_string()),
+        )?;
         let message = MetadataExtensionMessage {
             piece: piece_index,
             total_size: None,
@@ -233,19 +234,11 @@ impl MetadataExtension {
             .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))
     }
 
-    /// Try to find the metadata extensions number of the remote peer.
-    async fn find_metadata_extension_number<'a>(
-        &'a self,
-        peer: &'a PeerContext,
-    ) -> Option<ExtensionNumber> {
-        peer.remote_extension_registry()
-            .await
-            .and_then(|e| e.get(MetadataExtension::NAME).cloned())
-    }
-
     /// Check if the metadata extension is supported by the remote peer.
     async fn is_metadata_extension_supported<'a>(&'a self, peer: &'a PeerContext) -> bool {
-        self.find_metadata_extension_number(&peer).await.is_some()
+        peer.find_remote_extension_number(Self::NAME)
+            .await
+            .is_some()
     }
 
     /// Check if the metadata should be requested for the torrent.
@@ -289,6 +282,10 @@ impl MetadataExtension {
             msg_type: MetadataMessageType::Data,
             data: vec![],
         };
+        let extension_number = match peer.find_remote_extension_number(Self::NAME).await {
+            None => return Err(extension::Error::Unsupported),
+            Some(e) => e,
+        };
         let mut payload = serde_bencode::to_bytes(&message)?;
 
         // calculate the payload size that should be sent
@@ -306,7 +303,7 @@ impl MetadataExtension {
 
         // send the payload to the peer
         trace!("Sending torrent metadata to peer {}, {:?}", peer, message);
-        peer.send(Message::ExtendedPayload(1, payload))
+        peer.send(Message::ExtendedPayload(extension_number, payload))
             .await
             .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
         Ok(())

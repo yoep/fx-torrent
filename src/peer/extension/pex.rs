@@ -139,38 +139,35 @@ impl PexExtension {
 
     async fn subscribe_to_torrent(&self, peer: &PeerContext) {
         let pool = self.pool.clone();
+        let extension_number = match peer.find_remote_extension_number(Self::NAME).await {
+            None => return,
+            Some(e) => e,
+        };
 
-        if let Some(extension_number) = peer.find_client_extension_number(PexExtension::NAME) {
-            let mut receiver = peer.torrent().subscribe();
-            let event_sender = peer.event_sender().clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(90));
+        let mut receiver = peer.torrent().subscribe();
+        let event_sender = peer.event_sender().clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(90));
 
-                loop {
-                    tokio::select! {
-                        _ = pool.inner.cancellation_token.cancelled() => break,
-                        event = receiver.recv() => {
-                            match event {
-                                Ok(event) => pool.handle_event(&*event).await,
-                                Err(_) => break,
-                            }
+            loop {
+                tokio::select! {
+                    _ = pool.inner.cancellation_token.cancelled() => break,
+                    event = receiver.recv() => {
+                        match event {
+                            Ok(event) => pool.handle_event(&*event).await,
+                            Err(_) => break,
                         }
-                        _ = interval.tick() => {
-                            // if the event sender is closed
-                            // it means that the peer is closed, so we stop this task
-                            if !pool.inform_peer(&event_sender, &extension_number).await {
-                                break;
-                            }
-                        },
                     }
+                    _ = interval.tick() => {
+                        // if the event sender is closed
+                        // it means that the peer is closed, so we stop this task
+                        if !pool.inform_peer(&event_sender, &extension_number).await {
+                            break;
+                        }
+                    },
                 }
-            });
-        } else {
-            debug!(
-                "Unable to subscribe to peer torrent, client extension {} not found",
-                PexExtension::NAME
-            );
-        }
+            }
+        });
     }
 }
 

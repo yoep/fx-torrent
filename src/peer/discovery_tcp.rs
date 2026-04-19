@@ -68,7 +68,7 @@ impl TcpPeerDiscovery {
 
         let inner_loop = inner.clone();
         tokio::spawn(async move {
-            inner_loop.start(sender, sockets).await;
+            inner_loop.run(sender, sockets).await;
         });
 
         Ok(Self { inner })
@@ -157,8 +157,8 @@ struct InnerTcpPeerDiscovery {
 }
 
 impl InnerTcpPeerDiscovery {
-    /// Start the main loop of the tcp peer listener.
-    async fn start(&self, sender: UnboundedSender<PeerEntry>, sockets: Vec<TcpListener>) {
+    /// Run the main loop of the tcp peer listener.
+    async fn run(&self, sender: UnboundedSender<PeerEntry>, sockets: Vec<TcpListener>) {
         debug!(
             "TCP peer discovery {} started on port {}",
             self,

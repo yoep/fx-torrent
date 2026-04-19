@@ -1085,6 +1085,15 @@ impl InnerTorrent {
             .await;
     }
 
+    /// Returns the peer discoveries of the torrent.
+    pub async fn peer_discoveries(&self) -> Vec<PeerDiscovery> {
+        self.sender
+            .send(|tx| TorrentCommand::GetPeerDiscoveries { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
     /// Decrease the priority of the given peer addresses in the torrent pool.
     pub async fn decrease_peer_priority(&self, addrs: Vec<SocketAddr>) {
         self.sender
@@ -1436,10 +1445,16 @@ pub enum TorrentCommand {
     AddPeers {
         addrs: Vec<SocketAddr>,
     },
+    /// Returns the peer within the torrent based on the given handle.
     GetPeer {
         handle: PeerHandle,
         response: Reply<Option<TorrentPeer>>,
     },
+    /// Returns the peer discoveries of the torrent.
+    GetPeerDiscoveries {
+        response: Reply<Vec<PeerDiscovery>>,
+    },
+    /// Inform that a new peer connection has been established.
     PeerConnected {
         peer: Box<dyn Peer>,
     },
@@ -1762,7 +1777,7 @@ impl TorrentContext {
             select! {
                 _ = self.cancellation_token.cancelled() => break,
                 command = command_receiver.recv() => match command {
-                    Some(command) => self.on_command(command).await,
+                    Some(command) => self.on_command(command, peer_discoveries.as_slice()).await,
                     None => break,
                 },
                 Some((idx, entry)) = peer_connections.next() => {
@@ -2688,7 +2703,11 @@ impl TorrentContext {
     /// Process the given command for the torrent context.
     /// It returns `true` when the main loop of the context needs to be stopped, else `false`.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    pub(crate) async fn on_command(&mut self, command: TorrentCommand) {
+    pub(crate) async fn on_command(
+        &mut self,
+        command: TorrentCommand,
+        peer_discoveries: &[PeerDiscovery],
+    ) {
         match command {
             TorrentCommand::PeerPort { response } => {
                 response.send(self.peer_port);
@@ -2701,6 +2720,9 @@ impl TorrentContext {
             }
             TorrentCommand::GetPeer { handle, response } => {
                 response.send(self.peer_pool.get(&handle));
+            }
+            TorrentCommand::GetPeerDiscoveries { response } => {
+                response.send(peer_discoveries.iter().cloned().collect_vec());
             }
             TorrentCommand::PeerConnected { peer } => self.add_peer(peer),
             TorrentCommand::DecreasePeerPriority { addrs } => {
