@@ -30,7 +30,6 @@ use crate::peer::PeerDiscovery;
 use crate::torrent::TorrentContext;
 use async_trait::async_trait;
 use std::fmt::Debug;
-use std::sync::Arc;
 
 /// The default list of operations which are executed in a chain during the lifetime of the torrent.
 /// The operations are executed in the order they are defined in this constant.
@@ -67,7 +66,7 @@ pub trait TorrentOperation: Debug + Send {
     async fn execute(
         &mut self,
         context: &mut TorrentContext,
-        peer_discoveries: &[Arc<dyn PeerDiscovery>],
+        peer_discoveries: &[PeerDiscovery],
     ) -> TorrentOperationResult;
 }
 

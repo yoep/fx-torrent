@@ -12,7 +12,7 @@ macro_rules! create_torrent_context {
         )
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr) => {{
-        use crate::peer::{PeerDiscovery, TcpPeerDiscovery, UtpPeerDiscovery};
+        use crate::peer::{TcpPeerDiscovery, UtpPeerDiscovery};
 
         let tcp_discovery = TcpPeerDiscovery::new()
             .await
@@ -20,10 +20,14 @@ macro_rules! create_torrent_context {
         let utp_discovery = UtpPeerDiscovery::new()
             .await
             .expect("expected a new utp peer discovery");
-        let discoveries: Vec<Box<dyn PeerDiscovery>> =
-            vec![Box::new(tcp_discovery), Box::new(utp_discovery)];
 
-        create_torrent_context!($uri, $temp_dir, $options, $config, discoveries)
+        create_torrent_context!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            vec![tcp_discovery.into(), utp_discovery.into(),]
+        )
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr) => {{
         create_torrent_context!(
@@ -82,7 +86,7 @@ macro_rules! create_torrent_context {
         let uri: &str = $uri;
         let options: TorrentFlags = $options;
         let config: TorrentConfig = $config;
-        let discoveries: Vec<Box<dyn PeerDiscovery>> = $discoveries;
+        let discoveries: Vec<PeerDiscovery> = $discoveries;
         let dht: Option<DhtTracker> = $dht;
         let lsd: Option<LocalServiceDiscovery> = $lsd;
         let metadata: TorrentMetadata = metadata!(uri);
@@ -106,11 +110,12 @@ macro_rules! create_torrent_context {
             trackers.push(lsd.into());
         }
 
+        let peer_port = discoveries.first().map(|e| e.addr().port());
         (
             TorrentContext::new(
                 metadata,
                 config,
-                discoveries.first().map(|e| e.port()),
+                peer_port,
                 DEFAULT_TORRENT_PROTOCOL_EXTENSIONS(),
                 vec![
                     || MetadataExtension::new().into(),
@@ -149,18 +154,24 @@ macro_rules! create_torrent {
         )
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr) => {{
-        use crate::peer::{PeerDiscovery, TcpPeerDiscovery, UtpPeerDiscovery};
+        use crate::peer::{TcpPeerDiscovery, UtpPeerDiscovery};
 
         let tcp_discovery = TcpPeerDiscovery::new()
             .await
             .expect("expected a new tcp peer discovery");
-        let utp_discovery = UtpPeerDiscovery::with_port(tcp_discovery.port())
+        let peer_port = tcp_discovery.addr().port();
+        let utp_discovery = UtpPeerDiscovery::with_port(peer_port)
             .await
             .expect("expected a new utp peer discovery");
-        let discoveries: Vec<Box<dyn PeerDiscovery>> =
-            vec![Box::new(tcp_discovery), Box::new(utp_discovery)];
 
-        create_torrent!($uri, $temp_dir, $options, $config, $operations, discoveries)
+        create_torrent!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $operations,
+            vec![tcp_discovery.into(), utp_discovery.into(),]
+        )
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr) => {{
         create_torrent!(
@@ -220,7 +231,7 @@ macro_rules! create_torrent {
         let options: TorrentFlags = $options;
         let config: TorrentConfig = $config;
         let operations: Vec<Box<dyn TorrentOperation>> = $operations;
-        let discoveries: Vec<Box<dyn PeerDiscovery>> = $discoveries;
+        let discoveries: Vec<PeerDiscovery> = $discoveries;
         let dht: Option<DhtTracker> = $dht;
         let torrent_info = metadata!(uri);
         let tracker_manager = $tracker_manager;

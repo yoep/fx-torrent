@@ -6,7 +6,6 @@ use futures::future::BoxFuture;
 use futures::FutureExt;
 use log::{debug, trace};
 use std::fmt::Debug;
-use std::sync::Arc;
 use tokio::net::lookup_host;
 
 /// Connect to the DHT nodes defined within the torrent metadata.
@@ -108,7 +107,7 @@ impl TorrentOperation for TorrentDhtNodesOperation {
     async fn execute(
         &mut self,
         context: &mut TorrentContext,
-        _: &[Arc<dyn PeerDiscovery>],
+        _: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         self.poll_in_flight();
 

@@ -3,7 +3,6 @@ use crate::peer::PeerDiscovery;
 use crate::{LocalServiceDiscoveryEvent, TorrentContext};
 use async_trait::async_trait;
 use fx_callback::{Callback, Subscription};
-use std::sync::Arc;
 
 /// Retrieve torrent peers from the local service discovery.
 #[derive(Debug)]
@@ -63,7 +62,7 @@ impl TorrentOperation for TorrentLsdPeersOperation {
     async fn execute(
         &mut self,
         context: &mut TorrentContext,
-        _: &[Arc<dyn PeerDiscovery>],
+        _: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         if !self.initialized {
             self.initialize(context);

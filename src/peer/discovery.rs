@@ -1,4 +1,6 @@
-use crate::peer::{Peer, PeerId, PeerStream, ProtocolExtensionFlags, Result};
+use crate::peer::{
+    Peer, PeerId, PeerStream, ProtocolExtensionFlags, Result, TcpPeerDiscovery, UtpPeerDiscovery,
+};
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
 use async_trait::async_trait;
@@ -6,6 +8,7 @@ use async_trait::async_trait;
 pub use mock::*;
 use std::fmt::Debug;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// A received peer entry incoming connection.
@@ -27,14 +30,117 @@ impl PartialEq for PeerStream {
     }
 }
 
+/// The discovery strategy for creating outgoing and receiving incoming peer connections.
+#[derive(Debug, Clone)]
+pub enum PeerDiscovery {
+    Tcp(TcpPeerDiscovery),
+    Utp(UtpPeerDiscovery),
+    Other(Arc<dyn Discovery>),
+}
+
+impl PeerDiscovery {
+    /// Returns the address on which this peer discovery is listening on.
+    pub fn addr(&self) -> &SocketAddr {
+        match self {
+            PeerDiscovery::Tcp(discovery) => discovery.addr(),
+            PeerDiscovery::Utp(discovery) => discovery.addr(),
+            PeerDiscovery::Other(discovery) => discovery.addr(),
+        }
+    }
+
+    /// Try to dial (_create outgoing connection with_) to the target peer address.
+    pub async fn dial(
+        &self,
+        peer_id: PeerId,
+        peer_addr: SocketAddr,
+        torrent: InnerTorrent,
+        data_pool: DataPool,
+        protocol_extensions: ProtocolExtensionFlags,
+        connection_timeout: Duration,
+    ) -> Result<Box<dyn Peer>> {
+        match self {
+            PeerDiscovery::Tcp(discovery) => {
+                discovery
+                    .dial(
+                        peer_id,
+                        peer_addr,
+                        torrent,
+                        data_pool,
+                        protocol_extensions,
+                        connection_timeout,
+                    )
+                    .await
+            }
+            PeerDiscovery::Utp(discovery) => {
+                discovery
+                    .dial(
+                        peer_id,
+                        peer_addr,
+                        torrent,
+                        data_pool,
+                        protocol_extensions,
+                        connection_timeout,
+                    )
+                    .await
+            }
+            PeerDiscovery::Other(discovery) => {
+                discovery
+                    .dial(
+                        peer_id,
+                        peer_addr,
+                        torrent,
+                        data_pool,
+                        protocol_extensions,
+                        connection_timeout,
+                    )
+                    .await
+            }
+        }
+    }
+
+    /// Try to receive an incoming peer connection from the peer discovery.
+    /// Returns [None] if the peer discovery connection has been closed.
+    pub async fn recv(&self) -> Option<PeerEntry> {
+        match self {
+            PeerDiscovery::Tcp(discovery) => discovery.recv().await,
+            PeerDiscovery::Utp(discovery) => discovery.recv().await,
+            PeerDiscovery::Other(discovery) => discovery.recv().await,
+        }
+    }
+
+    /// Close the peer discovery connection.
+    pub fn close(&self) {
+        match self {
+            PeerDiscovery::Tcp(discovery) => discovery.close(),
+            PeerDiscovery::Utp(discovery) => discovery.close(),
+            PeerDiscovery::Other(discovery) => discovery.close(),
+        }
+    }
+}
+
+impl From<TcpPeerDiscovery> for PeerDiscovery {
+    fn from(discovery: TcpPeerDiscovery) -> Self {
+        Self::Tcp(discovery)
+    }
+}
+
+impl From<UtpPeerDiscovery> for PeerDiscovery {
+    fn from(discovery: UtpPeerDiscovery) -> Self {
+        Self::Utp(discovery)
+    }
+}
+
+impl From<Box<dyn Discovery>> for PeerDiscovery {
+    fn from(discovery: Box<dyn Discovery>) -> Self {
+        Self::Other(Arc::from(discovery))
+    }
+}
+
 /// A peer discovery is responsible for discovering outgoing and incoming peer connections.
 #[async_trait]
-pub trait PeerDiscovery: Debug + Send + Sync {
+pub trait Discovery: Debug + Send + Sync {
     /// Get the address on which this peer listener is listening on.
     fn addr(&self) -> &SocketAddr;
-
-    /// Get the port this peer listener is listening on.
-    fn port(&self) -> u16;
 
     /// Tries to dial (_create outgoing connection with_) the given peer address.
     ///
@@ -80,12 +186,11 @@ pub mod mock {
 
     mock! {
         #[derive(Debug)]
-        pub PeerDiscovery {}
+        pub Discovery {}
 
         #[async_trait]
-        impl PeerDiscovery for PeerDiscovery {
+        impl Discovery for Discovery {
             fn addr(&self) -> &SocketAddr;
-            fn port(&self) -> u16;
             async fn dial(
                 &self,
                 peer_id: PeerId,

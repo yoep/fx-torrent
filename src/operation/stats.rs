@@ -4,7 +4,6 @@ use crate::peer::{PeerDiscovery, PeerEvent};
 use crate::{TorrentContext, TorrentEvent};
 use async_trait::async_trait;
 use fx_callback::{Callback, Subscription};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The torrent stats operation collects metrics from the torrent peers and publishes them via the [TorrentEvent::Stats] event.
@@ -109,7 +108,7 @@ impl TorrentOperation for TorrentStatsOperation {
     async fn execute(
         &mut self,
         context: &mut TorrentContext,
-        _: &[Arc<dyn PeerDiscovery>],
+        _: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         self.initialize(context);
 

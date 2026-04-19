@@ -5,7 +5,6 @@ use crate::TorrentContext;
 use async_trait::async_trait;
 use fx_callback::{Callback, Subscription};
 use log::{debug, warn};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
@@ -116,7 +115,7 @@ impl TorrentOperation for TorrentTrackerPeersOperation {
     async fn execute(
         &mut self,
         context: &mut TorrentContext,
-        _: &[Arc<dyn PeerDiscovery>],
+        _: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         if !self.initialized {
             self.initialize(context).await;

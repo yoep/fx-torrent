@@ -7,7 +7,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use log::{debug, trace, warn};
-use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct TorrentCreatePiecesAndFilesOperation;
@@ -191,7 +190,7 @@ impl TorrentOperation for TorrentCreatePiecesAndFilesOperation {
     async fn execute(
         &mut self,
         torrent: &mut TorrentContext,
-        _: &[Arc<dyn PeerDiscovery>],
+        _: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         // check if the pieces have already been created
         // if so, continue the chain

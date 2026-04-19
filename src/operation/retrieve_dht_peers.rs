@@ -4,7 +4,6 @@ use crate::peer::PeerDiscovery;
 use crate::{InnerTorrent, TorrentContext};
 use async_trait::async_trait;
 use log::debug;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
@@ -128,7 +127,7 @@ impl TorrentOperation for TorrentDhtPeersOperation {
     async fn execute(
         &mut self,
         context: &mut TorrentContext,
-        _: &[Arc<dyn PeerDiscovery>],
+        _: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         self.initialize(context).await;
         self.cleanup_finished_tasks();

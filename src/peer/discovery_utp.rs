@@ -1,11 +1,9 @@
 use crate::peer::protocol::{UtpSocket, UtpStream};
 use crate::peer::{
-    BitTorrentPeer, Error, Peer, PeerDiscovery, PeerEntry, PeerId, PeerStream,
-    ProtocolExtensionFlags, Result,
+    BitTorrentPeer, Error, Peer, PeerEntry, PeerId, PeerStream, ProtocolExtensionFlags, Result,
 };
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
-use async_trait::async_trait;
 use derive_more::Display;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -77,19 +75,14 @@ impl UtpPeerDiscovery {
 
         Ok(Self { inner })
     }
-}
 
-#[async_trait]
-impl PeerDiscovery for UtpPeerDiscovery {
-    fn addr(&self) -> &SocketAddr {
+    /// Returns the address on which the discovery is listening on.
+    pub fn addr(&self) -> &SocketAddr {
         &self.inner.addr
     }
 
-    fn port(&self) -> u16 {
-        self.inner.addr.port()
-    }
-
-    async fn dial(
+    /// Try to dial the peer target address.
+    pub async fn dial(
         &self,
         peer_id: PeerId,
         peer_addr: SocketAddr,
@@ -130,7 +123,8 @@ impl PeerDiscovery for UtpPeerDiscovery {
         )))
     }
 
-    async fn recv(&self) -> Option<PeerEntry> {
+    /// Try to receive a new incoming peer entry from the discovery.
+    pub async fn recv(&self) -> Option<PeerEntry> {
         let mut receiver = self.inner.receiver.lock().await;
         match receiver.recv().await {
             None => None,
@@ -141,7 +135,8 @@ impl PeerDiscovery for UtpPeerDiscovery {
         }
     }
 
-    fn close(&self) {
+    /// Close the peer discovery and stop accepting new connections.
+    pub fn close(&self) {
         self.inner.cancellation_token.cancel();
     }
 }
@@ -250,7 +245,7 @@ mod tests {
         let result = utp_discovery.unwrap();
         assert_ne!(
             0,
-            result.port(),
+            result.addr().port(),
             "expected a port number to have been assigned"
         );
     }
@@ -263,14 +258,14 @@ mod tests {
         let listener = UtpPeerDiscovery::new()
             .await
             .expect("expected a new utp peer listener");
-        let port = listener.port();
+        let port = listener.addr().port();
         let torrent = create_torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
-            vec![Box::new(listener.clone())]
+            vec![listener.clone().into()]
         );
         let protocol_extensions = torrent.protocol_extensions().await.unwrap();
 

@@ -212,7 +212,7 @@ impl TorrentOperation for TorrentFileValidationOperation {
     async fn execute(
         &mut self,
         torrent: &mut TorrentContext,
-        _: &[Arc<dyn PeerDiscovery>],
+        _: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         // early exit if the torrent is paused or in an error state
         if !self.should_check_files(torrent) {

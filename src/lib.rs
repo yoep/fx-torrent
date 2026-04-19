@@ -271,7 +271,7 @@ where
 pub mod tests {
     use super::*;
     use crate::peer::tests::new_tcp_peer_discovery;
-    use crate::peer::{BitTorrentPeer, PeerDiscovery, PeerId, PeerStream};
+    use crate::peer::{BitTorrentPeer, PeerId, PeerStream};
     use log::trace;
     use std::net::SocketAddr;
     use std::path::PathBuf;
@@ -310,7 +310,7 @@ pub mod tests {
         let incoming_context = incoming_torrent.inner.clone();
         let incoming_data_pool = incoming_context.data_pool().await.unwrap();
         let listener = new_tcp_peer_discovery().await.unwrap();
-        let listener_port = listener.port();
+        let listener_port = listener.addr().port();
         tokio::spawn(async move {
             if let Some(peer) = listener.recv().await {
                 if let PeerStream::Tcp(stream) = peer.stream {

@@ -3010,7 +3010,7 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
-            vec![Box::new(TcpPeerDiscovery::new().await.unwrap())],
+            vec![TcpPeerDiscovery::new().await.unwrap().into()],
             |_| Box::new(MemoryStorage::new()),
             None
         );
@@ -3020,7 +3020,7 @@ mod tests {
             TorrentFlags::Metadata,
             TorrentConfig::builder().build(),
             vec![],
-            vec![Box::new(TcpPeerDiscovery::new().await.unwrap())],
+            vec![TcpPeerDiscovery::new().await.unwrap().into()],
             |_| Box::new(MemoryStorage::new()),
             None
         );
@@ -3122,7 +3122,7 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())],
-            vec![Box::new(TcpPeerDiscovery::new().await.unwrap())],
+            vec![TcpPeerDiscovery::new().await.unwrap().into()],
             |_| Box::new(MemoryStorage::new())
         );
         let incoming_storage = MemoryStorage::new();
@@ -3133,7 +3133,7 @@ mod tests {
             TorrentFlags::UploadMode,
             TorrentConfig::builder().build(),
             vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())],
-            vec![Box::new(TcpPeerDiscovery::new().await.unwrap())],
+            vec![TcpPeerDiscovery::new().await.unwrap().into()],
             |_| Box::new(incoming_storage)
         );
         let (outgoing, incoming) = create_peer_pair!(
@@ -3221,7 +3221,7 @@ mod tests {
             TorrentFlags::UploadMode,
             TorrentConfig::builder().build(),
             vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())],
-            vec![Box::new(TcpPeerDiscovery::new().await.unwrap())],
+            vec![TcpPeerDiscovery::new().await.unwrap().into()],
             |_| Box::new(MemoryStorage::new()),
             None
         );
@@ -3235,7 +3235,7 @@ mod tests {
                 Box::new(TorrentCreatePiecesAndFilesOperation::new()),
                 Box::new(TorrentStateOperation { receiver: rx }),
             ],
-            vec![Box::new(TcpPeerDiscovery::new().await.unwrap())],
+            vec![TcpPeerDiscovery::new().await.unwrap().into()],
             |_| Box::new(MemoryStorage::new()),
             None
         );
@@ -3378,7 +3378,7 @@ mod tests {
         async fn execute(
             &mut self,
             context: &mut TorrentContext,
-            _: &[Arc<dyn PeerDiscovery>],
+            _: &[PeerDiscovery],
         ) -> TorrentOperationResult {
             if let Some(change) = self.receiver.try_recv() {
                 context.update_state(change.state).await;

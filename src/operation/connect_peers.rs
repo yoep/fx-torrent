@@ -12,7 +12,6 @@ use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use url::Url;
@@ -122,7 +121,7 @@ impl TorrentConnectPeersOperation {
         &mut self,
         mut wanted_connections: usize,
         context: &mut TorrentContext,
-        dialers: &[Arc<dyn PeerDiscovery>],
+        dialers: &[PeerDiscovery],
     ) {
         // try to create webseed peers
         if self.webseeds_enabled {
@@ -194,7 +193,7 @@ impl TorrentConnectPeersOperation {
         &mut self,
         context: &TorrentContext,
         peer_addr: SocketAddr,
-        dialers: &[Arc<dyn PeerDiscovery>],
+        dialers: &[PeerDiscovery],
     ) -> Result<()> {
         // early exit when no dialers are available
         if dialers.is_empty() {
@@ -323,7 +322,7 @@ impl TorrentOperation for TorrentConnectPeersOperation {
     async fn execute(
         &mut self,
         context: &mut TorrentContext,
-        peer_discoveries: &[Arc<dyn PeerDiscovery>],
+        peer_discoveries: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         self.poll_in_flight(context);
         let wanted_connections = context.remaining_peer_connections_needed().await;
@@ -363,7 +362,7 @@ impl Drop for TorrentConnectPeersOperation {
 mod tests {
     use super::*;
     use crate::peer;
-    use crate::peer::MockPeerDiscovery;
+    use crate::peer::{Discovery, MockDiscovery, PeerDiscovery};
     use std::net::Ipv4Addr;
     use tempfile::tempdir;
     use tokio::time;
@@ -452,14 +451,14 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let mut dialer = MockPeerDiscovery::new();
+        let mut dialer = MockDiscovery::new();
         dialer.expect_dial().returning(|_, _, _, _, _, _| {
             Err(peer::Error::Io(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "timeout",
             )))
         });
-        let dialers: Vec<Arc<dyn PeerDiscovery>> = vec![Arc::new(dialer)];
+        let dialers: Vec<PeerDiscovery> = vec![(Box::new(dialer) as Box<dyn Discovery>).into()];
         let (mut context, mut receiver) = create_torrent_context!(
             "debian.torrent",
             temp_path,

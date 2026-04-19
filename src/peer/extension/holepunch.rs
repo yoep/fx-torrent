@@ -1,6 +1,7 @@
-use crate::peer::extension::Result;
-use crate::peer::{ConnectionProtocol, PeerContext};
+use crate::peer::extension::{Error, Result};
+use crate::peer::PeerContext;
 use serde::{Deserialize, Serialize};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// The BEP55 holepunch extension message.
 #[derive(Debug, Serialize, Deserialize)]
@@ -15,6 +16,32 @@ struct HolepunchMessage {
     port: u16,
     #[serde(default, rename = "err_code", skip_serializing_if = "Option::is_none")]
     err_code: Option<ErrorCode>,
+}
+
+impl HolepunchMessage {
+    /// Try to parse the target address given in the message.
+    fn addr(&self) -> Result<SocketAddr> {
+        match self.addr_type {
+            AddrType::Ipv4 => {
+                let octets: [u8; 4] = self.addr.as_slice().try_into().map_err(|_| {
+                    Error::Parsing(format!("invalid Ipv4Addr, got {} bytes", self.addr.len()))
+                })?;
+                Ok(SocketAddr::new(
+                    Ipv4Addr::from_octets(octets).into(),
+                    self.port,
+                ))
+            }
+            AddrType::Ipv6 => {
+                let octets: [u8; 16] = self.addr.as_slice().try_into().map_err(|_| {
+                    Error::Parsing(format!("invalid Ipv6Addr, got {} bytes", self.addr.len()))
+                })?;
+                Ok(SocketAddr::new(
+                    Ipv6Addr::from_octets(octets).into(),
+                    self.port,
+                ))
+            }
+        }
+    }
 }
 
 #[repr(u8)]
@@ -114,15 +141,21 @@ impl HolepunchExtension {
     }
 
     /// Handle the given extension message payload which has been received from the remote peer.
-    pub async fn handle<'a>(&'a self, payload: &'a [u8], _peer: &'a PeerContext) -> Result<()> {
-        let _msg = serde_bencode::from_bytes::<HolepunchMessage>(payload)?;
-        // TODO
+    pub async fn handle<'a>(&'a self, payload: &'a [u8], peer: &'a PeerContext) -> Result<()> {
+        let message = serde_bencode::from_bytes::<HolepunchMessage>(payload)?;
+        match message.message_type {
+            MessageType::Rendezvous => {
+                let target_addr = message.addr()?;
+                self.on_rendezvous(target_addr, peer).await;
+            }
+            _ => {}
+        }
         Ok(())
     }
 
-    /// Returns `true` if the peer is using the uTP connection protocol.
-    fn is_utp_connection(&self, peer: &PeerContext) -> bool {
-        peer.connection_protocol() == ConnectionProtocol::Utp
+    /// Try to connect to both the initiating peer and target peer.
+    async fn on_rendezvous(&self, target_addr: SocketAddr, peer: &PeerContext) {
+        // TODO
     }
 }
 
@@ -130,8 +163,23 @@ impl HolepunchExtension {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_on_handle() {
-        let extension = HolepunchExtension::new();
+    mod handle {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_on_rendezvous() {
+            let message = HolepunchMessage {
+                message_type: MessageType::Rendezvous,
+                addr_type: AddrType::Ipv4,
+                addr: vec![],
+                port: 0,
+                err_code: None,
+            };
+            let extension = HolepunchExtension::new();
+
+            let payload =
+                serde_bencode::to_bytes(&message).expect("expected a valid bencoded payload");
+            // extension.handle(payload.as_slice()).await.expect("expected the message to have been handled");
+        }
     }
 }

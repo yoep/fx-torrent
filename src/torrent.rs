@@ -156,7 +156,7 @@ pub struct TorrentRequest {
     /// The torrent configuration
     config: Option<TorrentConfig>,
     /// The discovery strategies for peer connections.
-    peer_discoveries: Option<Vec<Box<dyn PeerDiscovery>>>,
+    peer_discoveries: Vec<PeerDiscovery>,
     /// The protocol extensions that should be enabled
     protocol_extensions: Option<ProtocolExtensionFlags>,
     /// The factories for creating the peer extensions that should be enabled for this torrent
@@ -193,18 +193,19 @@ impl TorrentRequest {
     /// ## Remark
     ///
     /// The order in which the dialers are added are important for outgoing connections.
-    pub fn peer_discovery(&mut self, dialer: Box<dyn PeerDiscovery>) -> &mut Self {
-        self.peer_discoveries.get_or_insert(Vec::new()).push(dialer);
+    pub fn peer_discovery(&mut self, dialer: PeerDiscovery) -> &mut Self {
+        self.peer_discoveries.push(dialer);
         self
     }
 
     /// Set the given peer dialers of the torrent.
+    /// This overrides any existing configured peer dialers.
     ///
     /// ## Remark
     ///
     /// The order of the dialers are important for outgoing connections.
-    pub fn peer_discoveries(&mut self, dialers: Vec<Box<dyn PeerDiscovery>>) -> &mut Self {
-        self.peer_discoveries = Some(dialers);
+    pub fn peer_discoveries(&mut self, discoveries: Vec<PeerDiscovery>) -> &mut Self {
+        self.peer_discoveries = discoveries;
         self
     }
 
@@ -281,6 +282,7 @@ impl Debug for TorrentRequest {
             .field("config", &self.config)
             .field("peer_discoveries", &self.peer_discoveries)
             .field("protocol_extensions", &self.protocol_extensions)
+            .field("extensions", &self.extensions)
             .field("operations", &self.operations)
             .field("trackers", &self.trackers)
             .finish()
@@ -294,10 +296,7 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
         let metadata = request.metadata.take().ok_or(TorrentError::InvalidRequest(
             "metadata is missing".to_string(),
         ))?;
-        let peer_discoveries = request
-            .peer_discoveries
-            .take()
-            .unwrap_or(Vec::with_capacity(0));
+        let peer_discoveries = std::mem::take(&mut request.peer_discoveries);
         let protocol_extensions = request
             .protocol_extensions
             .unwrap_or_else(DEFAULT_TORRENT_PROTOCOL_EXTENSIONS);
@@ -329,7 +328,7 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
 
         Ok(Self::new(
             metadata,
-            peer_discoveries.into_iter().map(Arc::from).collect(),
+            peer_discoveries,
             protocol_extensions,
             extensions,
             options,
@@ -426,7 +425,7 @@ impl Torrent {
 
     fn new(
         metadata: TorrentMetadata,
-        peer_discoveries: Vec<Arc<dyn PeerDiscovery>>,
+        peer_discoveries: Vec<PeerDiscovery>,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<ExtensionFactory>,
         options: TorrentFlags,
@@ -442,7 +441,7 @@ impl Torrent {
         let mut context = TorrentContext::new(
             metadata,
             config,
-            peer_discoveries.first().map(|e| e.port()),
+            peer_discoveries.first().map(|e| e.addr().port()),
             protocol_extensions,
             extensions,
             options,
@@ -466,7 +465,7 @@ impl Torrent {
 
         tokio::spawn(async move {
             context
-                .run(operations, peer_discoveries, command_receiver)
+                .run(operations, command_receiver, peer_discoveries)
                 .await;
         });
 
@@ -1744,8 +1743,8 @@ impl TorrentContext {
     pub(crate) async fn run(
         &mut self,
         mut operations: Vec<Box<dyn TorrentOperation>>,
-        peer_discoveries: Vec<Arc<dyn PeerDiscovery>>,
         mut command_receiver: ChannelReceiver<TorrentCommand>,
+        peer_discoveries: Vec<PeerDiscovery>,
     ) {
         let mut operations_tick = time::interval(OPERATIONS_INTERVAL);
         let mut cleanup_interval = time::interval(Duration::from_secs(30));
@@ -3370,7 +3369,7 @@ impl TorrentContext {
     async fn execute_operations_chain(
         &mut self,
         operations: &mut Vec<Box<dyn TorrentOperation>>,
-        peer_discoveries: &[Arc<dyn PeerDiscovery>],
+        peer_discoveries: &[PeerDiscovery],
     ) {
         for operation in operations.iter_mut() {
             let execution_result = operation.execute(self, peer_discoveries).await;
@@ -3598,7 +3597,7 @@ mod tests {
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
                 vec![],
-                vec![Box::new(TcpPeerDiscovery::new().await.unwrap())]
+                vec![TcpPeerDiscovery::new().await.unwrap().into()]
             );
             let torrent = create_torrent!(
                 magnet_uri.as_str(),
@@ -3610,7 +3609,7 @@ mod tests {
                     Box::new(TorrentConnectPeersOperation::new(false)),
                     Box::new(TorrentMetadataOperation::new(None))
                 ],
-                vec![Box::new(TcpPeerDiscovery::new().await.unwrap())],
+                vec![TcpPeerDiscovery::new().await.unwrap().into()],
                 |_| { Box::new(MemoryStorage::new()) },
                 None
             );
@@ -3903,7 +3902,7 @@ mod tests {
                 Box::new(TorrentCreatePiecesAndFilesOperation::new()),
                 Box::new(TorrentFileValidationOperation::new())
             ],
-            vec![Box::new(TcpPeerDiscovery::new().await.unwrap())]
+            vec![TcpPeerDiscovery::new().await.unwrap().into()]
         );
         let target_torrent = create_torrent!(
             "debian-udp.torrent",
@@ -3915,7 +3914,7 @@ mod tests {
                 Box::new(TorrentConnectPeersOperation::new(false)),
                 Box::new(TorrentCreatePiecesAndFilesOperation::new()),
             ],
-            vec![Box::new(TcpPeerDiscovery::new().await.unwrap())]
+            vec![TcpPeerDiscovery::new().await.unwrap().into()]
         );
 
         // initialize the source torrent
