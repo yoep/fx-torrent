@@ -267,6 +267,65 @@ macro_rules! create_torrent {
     }};
 }
 
+/// Create a new pair of TCP peers.
+macro_rules! create_tcp_peer_pair {
+    ($torrent:expr) => {{
+        create_tcp_peer_pair!($torrent, $torrent, crate::peer::ProtocolExtensionFlags::none())
+    }};
+    ($torrent:expr, $protocol_extensions:expr) => {{
+        create_tcp_peer_pair!($torrent, $torrent, $protocol_extensions)
+    }};
+    ($incoming_torrent:expr, $outgoing_torrent:expr, $protocol_extensions:expr) => {{
+        use crate::peer::BitTorrentPeer;
+        use crate::Torrent;
+        use crate::peer::PeerId;
+        use crate::peer::ProtocolExtensionFlags;
+        use std::net::{Ipv4Addr};
+        use std::time::Duration;
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::sync::oneshot;
+
+        let incoming_torrent: &Torrent = $incoming_torrent;
+        let outgoing_torrent: &Torrent = $outgoing_torrent;
+        let protocol_extensions: ProtocolExtensionFlags = $protocol_extensions;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let outgoing_addr = listener.local_addr().unwrap();
+        let outgoing_stream = TcpStream::connect(outgoing_addr).await.unwrap();
+        let (incoming_stream, incoming_addr) = listener.accept().await.unwrap();
+
+        // offload the incoming peer to a separate task
+        // this is required, as the `new_inbound` wait for the handshake to be completed before returning
+        let incoming_peer = BitTorrentPeer::new_inbound(
+            PeerId::new(),
+            incoming_addr,
+            incoming_stream.into(),
+            incoming_torrent.inner.clone(),
+            incoming_torrent.inner.data_pool().await.unwrap(),
+            protocol_extensions,
+            Duration::from_secs(2),
+        );
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let result = incoming_peer.await.expect("expected the incoming peer to have been created");
+            let _ = tx.send(result);
+        });
+
+        let outgoing_peer = BitTorrentPeer::new_outbound(
+            PeerId::new(),
+            outgoing_addr,
+            outgoing_stream.into(),
+            outgoing_torrent.inner.clone(),
+            outgoing_torrent.inner.data_pool().await.unwrap(),
+            protocol_extensions,
+            Duration::from_secs(2),
+        ).await.expect("expected the outgoing peer to have been created");
+
+        let incoming_peer = rx.await.expect("expected the incoming peer to have been received");
+        (incoming_peer, outgoing_peer)
+    }}
+}
+
 pub(crate) static INIT: Once = Once::new();
 
 /// Initializes the logger with the specified log level.
@@ -354,10 +413,10 @@ macro_rules! assert_timeout {
 
 /// A macro wrapper for [`tokio::time::timeout`] that awaits a future with a timeout duration.
 macro_rules! timeout {
-    ($future:expr, $duration:expr) => {{
-        timeout!($future, $duration, "operation timed-out")
+    ($duration:expr, $future:expr) => {{
+        timeout!($duration, $future, "operation timed-out")
     }};
-    ($future:expr, $duration:expr, $message:expr) => {{
+    ($duration:expr, $future:expr, $message:expr) => {{
         use std::io;
         use std::time::Duration;
         use tokio::time::timeout;

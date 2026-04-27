@@ -90,7 +90,7 @@ impl UtpPeerDiscovery {
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         connection_timeout: Duration,
-    ) -> Result<Box<dyn Peer>> {
+    ) -> Result<Peer> {
         let socket = self
             .inner
             .sockets
@@ -100,18 +100,17 @@ impl UtpPeerDiscovery {
         if let Some(socket) = socket {
             let stream = socket.connect(peer_addr).await?;
 
-            return Ok(Box::new(
-                BitTorrentPeer::new_outbound(
-                    peer_id,
-                    peer_addr,
-                    PeerStream::Utp(stream),
-                    torrent,
-                    data_pool,
-                    protocol_extensions,
-                    connection_timeout,
-                )
-                .await?,
-            ));
+            return Ok(BitTorrentPeer::new_outbound(
+                peer_id,
+                peer_addr,
+                stream.into(),
+                torrent,
+                data_pool,
+                protocol_extensions,
+                connection_timeout,
+            )
+            .await?
+            .into());
         }
 
         Err(Error::Io(io::Error::new(

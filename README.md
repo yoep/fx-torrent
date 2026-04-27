@@ -55,6 +55,16 @@ async fn main() -> Result<(), io::Error> {
 
 For more examples, see the [examples](./examples).
 
+#### CLI example
+
+The CLI example makes use of most of the functionality provided by the library and 
+can be used to download torrents from magnet links or torrent files.
+The CLI also allows the introspection of the DHT network and Trackers.
+
+The example is built on top of the [Ratatui](https://ratatui.rs/) as terminal UI library.
+
+![CLI torrent example](./docs/cli-torrent-example.png)
+
 ## DHT
 
 When using the `dht` feature, enabled by default, one of the following additional features should be enabled:
@@ -63,15 +73,6 @@ When using the `dht` feature, enabled by default, one of the following additiona
 
 These crypto providers are used within the DHT network to verify mutable items within the network.
 When both features are missing, a `Error::MissingCryptoProvider` error will be returned.
-
-### CLI example
-
-The CLI example can be used to download torrents from a magnet link or torrent file.
-It uses [Ratatui](https://ratatui.rs/) as the terminal UI library.
-
-![CLI torrent example](./docs/cli-torrent-example.png)
-
-![CLI DHT info](./docs/cli-dht-info.png)
 
 ## Features
 

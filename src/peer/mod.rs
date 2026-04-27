@@ -1,3 +1,4 @@
+pub use bt_peer::*;
 pub use discovery::*;
 pub use discovery_tcp::*;
 pub use discovery_utp::*;
@@ -11,6 +12,7 @@ pub use protocol::CloseReason;
 #[macro_use]
 mod test_macros;
 
+mod bt_peer;
 mod discovery;
 mod discovery_tcp;
 mod discovery_utp;
@@ -27,8 +29,8 @@ pub mod webseed;
 pub mod tests {
     use super::*;
     use crate::peer::protocol::UtpSocket;
-    use crate::peer::Peer;
-    use crate::{PieceIndex, Torrent};
+    use crate::peer::TorrentPeer;
+    use crate::Torrent;
     use async_trait::async_trait;
     use bit_vec::BitVec;
     use fx_callback::{Callback, Subscription};
@@ -43,17 +45,14 @@ pub mod tests {
         pub Peer {}
 
         #[async_trait]
-        impl Peer for Peer {
-            fn handle(&self) -> PeerHandle;
-            fn handle_as_ref(&self) -> &PeerHandle;
-            fn client(&self) -> PeerClientInfo;
-            fn addr(&self) -> SocketAddr;
-            fn addr_as_ref(&self) -> &SocketAddr;
+        impl TorrentPeer for Peer {
+            fn handle(&self) -> &PeerHandle;
+            fn addr(&self) -> &SocketAddr;
+            fn client_info(&self) -> &PeerClientInfo;
             fn metrics(&self) -> &Metrics;
             async fn state(&self) -> PeerState;
             async fn is_seed(&self) -> bool;
             async fn remote_piece_bitfield(&self) -> BitVec;
-            fn notify_piece_availability(&self, pieces: Vec<PieceIndex>);
             async fn close(&self);
         }
 
@@ -120,7 +119,7 @@ pub mod tests {
         .await
         .expect("expected an outgoing uTP peer");
 
-        let incoming_peer = timeout!(rx.recv(), Duration::from_secs(1)).unwrap();
+        let incoming_peer = timeout!(Duration::from_secs(1), rx.recv()).unwrap();
 
         (incoming_peer, outgoing_peer)
     }

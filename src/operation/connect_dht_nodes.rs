@@ -167,14 +167,11 @@ mod tests {
         );
 
         // keep polling till the operation is completed
-        timeout!(
-            async {
-                while !operation.initialized {
-                    let _ = operation.execute(&mut context, vec![].as_slice()).await;
-                }
-            },
-            Duration::from_secs(5)
-        );
+        timeout!(Duration::from_secs(5), async {
+            while !operation.initialized {
+                let _ = operation.execute(&mut context, vec![].as_slice()).await;
+            }
+        });
         let result = operation.initialized;
         assert_eq!(true, result, "expected the operation to be completed");
     }

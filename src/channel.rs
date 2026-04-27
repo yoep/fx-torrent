@@ -388,7 +388,7 @@ mod tests {
 
             reply.send(expected_result);
 
-            let result = timeout!(&mut rx, Duration::from_millis(100)).expect("expected a reply");
+            let result = timeout!(Duration::from_millis(100), &mut rx).expect("expected a reply");
             assert_eq!(expected_result, result);
         }
 

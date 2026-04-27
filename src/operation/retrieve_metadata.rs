@@ -279,6 +279,7 @@ mod tests {
 
         // run till completion
         timeout!(
+            Duration::from_millis(200),
             async {
                 loop {
                     let _ = operation.execute(&mut context, vec![].as_slice()).await;
@@ -288,7 +289,6 @@ mod tests {
                     time::sleep(Duration::from_millis(10)).await;
                 }
             },
-            Duration::from_millis(200),
             "expected the DHT operation to have been completed"
         );
         assert_eq!(

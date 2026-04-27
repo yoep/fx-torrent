@@ -129,7 +129,6 @@ pub use torrent_flags::*;
 pub use torrent_health::*;
 pub use torrent_metadata::*;
 pub use torrent_metrics::*;
-pub use torrent_peer::*;
 pub use torrent_tracker::*;
 
 use std::ops::Range;
@@ -167,7 +166,6 @@ mod torrent_flags;
 mod torrent_health;
 mod torrent_metadata;
 mod torrent_metrics;
-mod torrent_peer;
 mod torrent_tracker;
 pub mod tracker;
 
@@ -270,92 +268,10 @@ where
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::peer::tests::new_tcp_peer_discovery;
-    use crate::peer::{BitTorrentPeer, PeerId, PeerStream};
     use log::trace;
-    use std::net::SocketAddr;
     use std::path::PathBuf;
     use std::time::Duration;
     use std::{env, fs};
-    use tokio::net::TcpStream;
-    use tokio::sync::mpsc::unbounded_channel;
-
-    #[macro_export]
-    macro_rules! create_peer_pair {
-        ($torrent:expr) => {
-            crate::tests::create_tcp_peer_pair(
-                $torrent,
-                $torrent,
-                $torrent.inner.protocol_extensions().await.unwrap(),
-            )
-            .await
-        };
-        ($torrent:expr, $protocols:expr) => {
-            crate::tests::create_tcp_peer_pair($torrent, $torrent, $protocols).await
-        };
-        ($incoming_torrent:expr, $outgoing_torrent:expr, $protocols:expr) => {
-            crate::tests::create_tcp_peer_pair($incoming_torrent, $outgoing_torrent, $protocols)
-                .await
-        };
-    }
-
-    pub async fn create_tcp_peer_pair(
-        incoming_torrent: &Torrent,
-        outgoing_torrent: &Torrent,
-        protocols: ProtocolExtensionFlags,
-    ) -> (BitTorrentPeer, BitTorrentPeer) {
-        let outgoing_context = &outgoing_torrent.inner;
-        let (tx, mut rx) = unbounded_channel();
-
-        let incoming_context = incoming_torrent.inner.clone();
-        let incoming_data_pool = incoming_context.data_pool().await.unwrap();
-        let listener = new_tcp_peer_discovery().await.unwrap();
-        let listener_port = listener.addr().port();
-        tokio::spawn(async move {
-            if let Some(peer) = listener.recv().await {
-                if let PeerStream::Tcp(stream) = peer.stream {
-                    tx.send(
-                        BitTorrentPeer::new_inbound(
-                            PeerId::new(),
-                            peer.socket_addr,
-                            PeerStream::Tcp(stream),
-                            incoming_context,
-                            incoming_data_pool,
-                            protocols.clone(),
-                            Duration::from_secs(5),
-                        )
-                        .await,
-                    )
-                    .unwrap()
-                }
-            }
-        });
-
-        let outgoing_context = outgoing_context.clone();
-        let outgoing_data_pool = outgoing_context.data_pool().await.unwrap();
-        let addr = SocketAddr::new([127, 0, 0, 1].into(), listener_port);
-        let stream = TcpStream::connect(addr).await.unwrap();
-        let outgoing_peer = BitTorrentPeer::new_outbound(
-            PeerId::new(),
-            addr,
-            PeerStream::Tcp(stream),
-            outgoing_context,
-            outgoing_data_pool,
-            protocols,
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("expected the outgoing connection to succeed");
-
-        let incoming_peer = timeout!(
-            rx.recv(),
-            Duration::from_secs(1),
-            "expected an incoming peer"
-        )
-        .unwrap()
-        .expect("expected an incoming peer");
-        (incoming_peer, outgoing_peer)
-    }
 
     /// Retrieve the path to the testing resource directory.
     ///

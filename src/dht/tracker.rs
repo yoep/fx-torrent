@@ -3263,8 +3263,8 @@ mod tests {
             let source_addr = (Ipv4Addr::LOCALHOST, source.port()).into();
 
             let result = timeout!(
-                target.ping(source_addr),
                 Duration::from_millis(750),
+                target.ping(source_addr),
                 "failed to ping node"
             );
             assert!(
@@ -3304,8 +3304,8 @@ mod tests {
                 .unwrap();
 
             let result = timeout!(
-                tracker.ping(addr),
                 Duration::from_millis(750),
+                tracker.ping(addr),
                 "failed to ping node"
             );
 
@@ -3358,8 +3358,8 @@ mod tests {
 
             // verify the result of the add_node operation
             let (result, outgoing) = timeout!(
-                rx,
                 Duration::from_millis(750),
+                rx,
                 "timed out while adding the node"
             )
             .unwrap();
@@ -3706,7 +3706,7 @@ mod tests {
                     .await;
             });
 
-            let result = timeout!(rx, Duration::from_millis(500)).expect("expected an event");
+            let result = timeout!(Duration::from_millis(500), rx).expect("expected an event");
             match &*result {
                 DhtEvent::InfoHashAdded(result) => {
                     assert_eq!(&info_hash, result, "expected the info hash to match");

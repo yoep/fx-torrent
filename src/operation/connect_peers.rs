@@ -97,7 +97,7 @@ impl TorrentConnectPeersOperation {
     }
 
     /// Execute a burst of initial peer connections, when needed.
-    async fn burst(&mut self, context: &TorrentContext) {
+    fn burst(&mut self, context: &TorrentContext) {
         if let Some(since) = self.bursting_since {
             if since.elapsed() < BURST_DURATION {
                 return;
@@ -109,7 +109,7 @@ impl TorrentConnectPeersOperation {
         }
 
         // only allow bursting when we have no active peer connections
-        if context.active_peer_connections().await == 0 {
+        if context.active_peer_connections() == 0 {
             trace!("Torrent {} is bursting it's initial connections", context);
             self.max_in_flight = context.config().peers_upper_limit;
             self.bursting_since = Some(Instant::now());
@@ -286,9 +286,7 @@ impl TorrentConnectPeersOperation {
             match HttpPeer::new(url, torrent) {
                 Ok(peer) => {
                     sender
-                        .fire_and_forget(TorrentCommand::PeerConnected {
-                            peer: Box::new(peer),
-                        })
+                        .fire_and_forget(TorrentCommand::PeerConnected { peer: peer.into() })
                         .await;
                 }
                 Err(e) => {
@@ -331,7 +329,7 @@ impl TorrentOperation for TorrentConnectPeersOperation {
             self.update_max_in_flight(context);
 
             // burst the initial connections if needed
-            self.burst(context).await;
+            self.burst(context);
 
             self.create_additional_peer_connections(wanted_connections, context, peer_discoveries)
                 .await;
@@ -362,7 +360,7 @@ impl Drop for TorrentConnectPeersOperation {
 mod tests {
     use super::*;
     use crate::peer;
-    use crate::peer::{Discovery, MockDiscovery, PeerDiscovery};
+    use crate::peer::{MockDiscovery, PeerDiscovery};
     use std::net::Ipv4Addr;
     use tempfile::tempdir;
     use tokio::time;
@@ -435,7 +433,7 @@ mod tests {
         assert_eq!(20, result);
 
         // invoke the burst fn
-        operation.burst(&context).await;
+        operation.burst(&context);
         assert_eq!(
             200, operation.max_in_flight,
             "expected the max in flight to have been temporary bursted"
@@ -458,7 +456,7 @@ mod tests {
                 "timeout",
             )))
         });
-        let dialers: Vec<PeerDiscovery> = vec![(Box::new(dialer) as Box<dyn Discovery>).into()];
+        let dialers: Vec<PeerDiscovery> = vec![dialer.into()];
         let (mut context, mut receiver) = create_torrent_context!(
             "debian.torrent",
             temp_path,
@@ -479,6 +477,7 @@ mod tests {
 
         // wait for the in_flight operation to complete
         timeout!(
+            Duration::from_secs(1),
             async {
                 loop {
                     operation.poll_in_flight(&context);
@@ -488,11 +487,10 @@ mod tests {
                     time::sleep(Duration::from_millis(5)).await;
                 }
             },
-            Duration::from_secs(1),
             "expected the in flight operation to complete"
         );
 
-        let command = timeout!(receiver.recv(), Duration::from_millis(250))
+        let command = timeout!(Duration::from_millis(250), receiver.recv())
             .expect("expected a command to have been sent");
         match command {
             TorrentCommand::PeerClosed { reason, .. } => {

@@ -124,8 +124,7 @@ impl TorrentOperation for TorrentStatsOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer::Peer;
-    use crate::{create_peer_pair, TorrentEvent, TorrentFlags};
+    use crate::{TorrentEvent, TorrentFlags};
     use fx_callback::Callback;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -181,7 +180,7 @@ mod tests {
             vec![],
             None
         );
-        let (source, _target) = create_peer_pair!(&torrent);
+        let (source, _target) = create_tcp_peer_pair!(&torrent);
         let mut operation = TorrentStatsOperation::new();
 
         // initialize the operation
@@ -194,8 +193,8 @@ mod tests {
         );
 
         // add the peer to the peer pool
-        let source_client = source.client();
-        let result = context.peer_pool_mut().add_peer(Box::new(source));
+        let source_client = source.client_info().clone();
+        let result = context.peer_pool_mut().add_peer(source.into());
         assert!(
             result.is_ok(),
             "expected the peer to be added, but got {:?}",

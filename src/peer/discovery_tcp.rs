@@ -88,7 +88,7 @@ impl TcpPeerDiscovery {
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         connection_timeout: Duration,
-    ) -> Result<Box<dyn Peer>> {
+    ) -> Result<Peer> {
         select! {
             _ = time::sleep(connection_timeout) => {
                 Err(Error::Io(io::Error::new(io::ErrorKind::TimedOut, format!("connection with {} timed out", peer_addr))))
@@ -125,19 +125,18 @@ impl TcpPeerDiscovery {
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         connection_timeout: Duration,
-    ) -> Result<Box<dyn Peer>> {
-        Ok(Box::new(
-            BitTorrentPeer::new_outbound(
-                peer_id,
-                peer_addr,
-                PeerStream::Tcp(stream),
-                torrent,
-                data_pool,
-                protocol_extensions,
-                connection_timeout,
-            )
-            .await?,
-        ))
+    ) -> Result<Peer> {
+        Ok(BitTorrentPeer::new_outbound(
+            peer_id,
+            peer_addr,
+            stream.into(),
+            torrent,
+            data_pool,
+            protocol_extensions,
+            connection_timeout,
+        )
+        .await?
+        .into())
     }
 }
 
@@ -241,6 +240,7 @@ mod tests {
     use super::*;
     use crate::peer::tests::new_tcp_peer_discovery;
     use crate::peer::PeerState;
+    use crate::storage::MemoryStorage;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -248,7 +248,7 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let listener = new_tcp_peer_discovery()
+        let listener = TcpPeerDiscovery::new()
             .await
             .expect("expected a new tcp peer listener");
         let torrent = create_torrent!(
@@ -257,32 +257,55 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
-            vec![listener.into()]
+            vec![listener.into()],
+            |_| Box::new(MemoryStorage::new()),
+            None
         );
         let listener_port = torrent
             .peer_port()
             .await
             .expect("expected a torrent peer listener port");
-        let protocol_extensions = torrent.protocol_extensions().await.unwrap();
-        let dialer = new_tcp_peer_discovery()
+        let protocol_extensions =
+            timeout!(Duration::from_millis(100), torrent.protocol_extensions())
+                .expect("expected the torrent protocol extensions");
+        let dialer = TcpPeerDiscovery::new()
             .await
             .expect("expected a new tcp peer dialer");
 
-        let result = dialer
-            .dial(
+        // try to create an outgoing peer connection through the dialer
+        let data_pool = timeout!(
+            Duration::from_millis(100),
+            torrent.inner.data_pool(),
+            "expected the torrent data pool"
+        )
+        .unwrap();
+        let result = timeout!(
+            Duration::from_millis(250),
+            dialer.dial(
                 PeerId::new(),
                 SocketAddr::from((Ipv4Addr::LOCALHOST, listener_port)),
                 torrent.inner.clone(),
-                torrent.inner.data_pool().await.unwrap(),
+                data_pool,
                 protocol_extensions,
                 Duration::from_secs(1),
             )
-            .await
-            .expect("expected a tcp peer connection to have been established");
-        let state = result.state().await;
+        )
+        .expect("expected a tcp peer connection to have been established");
+
+        // validate the state of the created outgoing peer connection
+        let state = timeout!(
+            Duration::from_millis(100),
+            result.state(),
+            "expected the peer state"
+        );
         assert_ne!(PeerState::Error, state);
 
-        let total_peers = torrent.active_peer_connections().await;
+        // validate that the peer has been added to the torrent peer pool
+        let total_peers = timeout!(
+            Duration::from_millis(1500),
+            torrent.active_peer_connections(),
+            "expected the active peer connections"
+        );
         assert_eq!(
             1, total_peers,
             "expected the connection to have been established with the torrent listener"
@@ -318,8 +341,8 @@ mod tests {
             .expect("expected the connection to succeed");
 
         let result = timeout!(
-            rx.recv(),
             Duration::from_millis(200),
+            rx.recv(),
             "expected to receive an incoming connection"
         )
         .unwrap();

@@ -24,13 +24,14 @@ impl DontHaveExtension {
     }
 
     /// Handle the given extension message payload which has been received from the remote peer.
-    pub async fn handle<'a>(&'a self, payload: &'a [u8], peer: &'a PeerContext) -> Result<()> {
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn on_message(&self, payload: &[u8], peer: &mut PeerContext) -> Result<()> {
         trace!("Peer {} is parsing donthave message", peer);
         let piece = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
         let message = DontHaveMessage { piece };
         debug!("Peer {} parsed \"don't have\" message {:?}", peer, message);
 
-        peer.remote_has_piece(message.piece as PieceIndex, false)
+        peer.set_remote_has_piece(message.piece as PieceIndex, false)
             .await;
         Ok(())
     }

@@ -261,7 +261,7 @@ mod tests {
 
         // wait for a node to be discovered
         let _ =
-            timeout!(rx, Duration::from_millis(500)).expect("expected a node to have been added");
+            timeout!(Duration::from_millis(500), rx).expect("expected a node to have been added");
 
         // try to add the node again for traversing
         traversal.add_node(None, target_addr);

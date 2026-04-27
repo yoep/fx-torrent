@@ -253,8 +253,8 @@ mod tests {
 
         // wait for a tracker connection to be established
         timeout!(
-            rx.recv(),
             Duration::from_secs(2),
+            rx.recv(),
             "expected a tracker connection to have been established"
         )
         .unwrap();

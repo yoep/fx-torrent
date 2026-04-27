@@ -1,13 +1,12 @@
-use crate::peer::extension::ExtensionNumber;
+use crate::peer::extension::{Error, Result};
 use crate::peer::protocol::Message;
-use crate::peer::{extension, PeerContext, PeerEvent};
+use crate::peer::{extension, PeerContext, ProtocolExtensionFlags};
 use crate::{PieceIndex, TorrentMetadataInfo};
 use log::{debug, error, trace, warn};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Debug, Formatter};
-use std::io;
 use std::io::Cursor;
-use tokio::sync::RwLock;
+use std::{io, result};
 use tokio_util::bytes::Buf;
 
 // The expected metadata piece size is 16 KiB, see BEP9
@@ -54,9 +53,10 @@ pub enum MetadataMessageType {
 
 pub struct MetadataExtension {
     /// The number of expected pieces
-    total_pieces: RwLock<Option<usize>>,
+    total_pieces: Option<usize>,
     /// The received metadata pieces
-    metadata_buffer: RwLock<Option<Vec<u8>>>,
+    metadata_buffer: Option<Vec<u8>>,
+    initialized: bool,
 }
 
 impl MetadataExtension {
@@ -65,17 +65,15 @@ impl MetadataExtension {
     /// Create a new extension instance.
     pub fn new() -> Self {
         Self {
-            total_pieces: RwLock::new(None),
-            metadata_buffer: RwLock::new(None),
+            total_pieces: None,
+            metadata_buffer: None,
+            initialized: false,
         }
     }
 
-    /// Handle the given extension message payload which has been received from the remote peer.
-    pub async fn handle<'a>(
-        &'a self,
-        payload: &'a [u8],
-        peer: &'a PeerContext,
-    ) -> extension::Result<()> {
+    /// Process an incoming extension message payload which has been received from the remote peer.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn on_message(&mut self, payload: &[u8], peer: &PeerContext) -> Result<()> {
         let message: MetadataExtensionMessage = Self::deserialize(payload)?;
         trace!("Received metadata message {:?}", message);
 
@@ -91,26 +89,40 @@ impl MetadataExtension {
         Ok(())
     }
 
-    pub async fn on<'a>(&'a self, event: &'a PeerEvent, peer: &'a PeerContext) {
-        match event {
-            PeerEvent::ExtendedHandshakeCompleted => self.on_extended_handshake(peer).await,
-            _ => {}
+    /// Invoked once per tick (typically once per second), providing a tick interval for the extension
+    /// to process data.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn tick(&mut self, peer: &PeerContext) {
+        // early exit if the metadata extension is already initialized
+        if self.initialized {
+            return;
         }
+
+        let remote = match peer.remote_peer() {
+            None => return,
+            Some(e) => e,
+        };
+        if !remote
+            .protocol_extensions
+            .contains(ProtocolExtensionFlags::LTEP)
+            || !remote.extended_handshake
+        {
+            return;
+        }
+
+        self.initialize(peer).await;
+        self.initialized = true;
     }
 
-    async fn send_metadata<'a>(
-        &'a self,
-        piece: PieceIndex,
-        peer: &'a PeerContext,
-    ) -> extension::Result<()> {
+    async fn send_metadata<'a>(&'a self, piece: PieceIndex, peer: &'a PeerContext) -> Result<()> {
         // retrieve the current known metadata
         let metadata = peer
             .metadata()
             .await
-            .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))?
+            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?
             .info;
-        let extension_number = match peer.find_remote_extension_number(Self::NAME).await {
-            None => return Err(extension::Error::Unsupported),
+        let extension_number = match peer.find_remote_extension_number(Self::NAME) {
+            None => return Err(Error::Unsupported),
             Some(e) => e,
         };
 
@@ -130,7 +142,7 @@ impl MetadataExtension {
                 data: vec![],
             };
             let payload = serde_bencode::to_bytes(&message)
-                .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+                .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
 
             trace!(
                 "Peer {} sending torrent metadata reject, {:?}",
@@ -139,18 +151,18 @@ impl MetadataExtension {
             );
             peer.send(Message::ExtendedPayload(extension_number, payload))
                 .await
-                .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+                .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
         }
 
         Ok(())
     }
 
     async fn process_metadata<'a>(
-        &'a self,
+        &mut self,
         message: MetadataExtensionMessage,
-        peer: &'a PeerContext,
-    ) -> extension::Result<()> {
-        let mut total_pieces = self.total_pieces.read().await.as_ref().map(|e| e.clone());
+        peer: &PeerContext,
+    ) -> Result<()> {
+        let mut total_pieces = self.total_pieces.as_ref().map(|e| e.clone());
         let current_piece = message.piece;
 
         // check if the total pieces that should be requested is already known
@@ -162,8 +174,7 @@ impl MetadataExtension {
             let calculated_total_pieces =
                 (metadata_total_size + METADATA_PIECE_SIZE - 1) / METADATA_PIECE_SIZE;
 
-            let mut mutex = self.total_pieces.write().await;
-            *mutex = Some(calculated_total_pieces);
+            self.total_pieces = Some(calculated_total_pieces);
             total_pieces = Some(calculated_total_pieces);
             debug!(
                 "Peer {} requires a total of {} metadata requests",
@@ -173,21 +184,18 @@ impl MetadataExtension {
 
         {
             // append the data to the metadata buffer
-            let mut mutex = self.metadata_buffer.write().await;
-            if let Some(metadata_buffer) = mutex.as_mut() {
+            if let Some(metadata_buffer) = self.metadata_buffer.as_mut() {
                 metadata_buffer.extend_from_slice(&message.data);
             } else {
-                *mutex = Some(message.data);
+                self.metadata_buffer = Some(message.data);
             }
         }
 
         if let Some(total_pieces) = total_pieces {
             if total_pieces - 1 == message.piece as usize {
                 // try to deserialize the metadata
-                let metadata_buffer = self.metadata_buffer.read().await;
                 let metadata: TorrentMetadataInfo =
-                    serde_bencode::from_bytes(metadata_buffer.as_ref().unwrap())?;
-                drop(metadata_buffer);
+                    serde_bencode::from_bytes(self.metadata_buffer.as_ref().unwrap())?;
                 debug!("Peer {} completed metadata requests, {:?}", peer, metadata);
 
                 // update the metadata of the underlying torrent through the peer
@@ -213,10 +221,15 @@ impl MetadataExtension {
         &'a self,
         piece_index: PieceIndex,
         peer: &'a PeerContext,
-    ) -> extension::Result<()> {
-        let extension_number = peer.find_remote_extension_number(Self::NAME).await.ok_or(
-            extension::Error::Operation("failed to find metadata extension".to_string()),
-        )?;
+    ) -> Result<()> {
+        let extension_number = match peer.find_remote_extension_number(Self::NAME) {
+            None => {
+                return Err(Error::Operation(
+                    "failed to find metadata extension".to_string(),
+                ))
+            }
+            Some(e) => e,
+        };
         let message = MetadataExtensionMessage {
             piece: piece_index,
             total_size: None,
@@ -231,14 +244,7 @@ impl MetadataExtension {
         );
         peer.send(Message::ExtendedPayload(extension_number, payload))
             .await
-            .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))
-    }
-
-    /// Check if the metadata extension is supported by the remote peer.
-    async fn is_metadata_extension_supported<'a>(&'a self, peer: &'a PeerContext) -> bool {
-        peer.find_remote_extension_number(Self::NAME)
-            .await
-            .is_some()
+            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))
     }
 
     /// Check if the metadata should be requested for the torrent.
@@ -255,8 +261,8 @@ impl MetadataExtension {
         }
     }
 
-    async fn on_extended_handshake(&self, peer: &PeerContext) {
-        if self.is_metadata_extension_supported(&peer).await
+    async fn initialize(&self, peer: &PeerContext) {
+        if peer.find_remote_extension_number(Self::NAME).is_some()
             && self.should_request_metadata(peer).await
         {
             if let Err(e) = self.request_metadata(0, peer).await {
@@ -272,7 +278,7 @@ impl MetadataExtension {
         metadata: &TorrentMetadataInfo,
         piece: PieceIndex,
         peer: &PeerContext,
-    ) -> extension::Result<()> {
+    ) -> Result<()> {
         // serialize the metadata
         let metadata_bytes = serde_bencode::to_bytes(&metadata)?;
         let metadata_size = metadata_bytes.len();
@@ -282,8 +288,8 @@ impl MetadataExtension {
             msg_type: MetadataMessageType::Data,
             data: vec![],
         };
-        let extension_number = match peer.find_remote_extension_number(Self::NAME).await {
-            None => return Err(extension::Error::Unsupported),
+        let extension_number = match peer.find_remote_extension_number(Self::NAME) {
+            None => return Err(Error::Unsupported),
             Some(e) => e,
         };
         let mut payload = serde_bencode::to_bytes(&message)?;
@@ -305,19 +311,18 @@ impl MetadataExtension {
         trace!("Sending torrent metadata to peer {}, {:?}", peer, message);
         peer.send(Message::ExtendedPayload(extension_number, payload))
             .await
-            .map_err(|e| extension::Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
         Ok(())
     }
 
-    async fn clear_buffer(&self) {
-        let mut mutex = self.metadata_buffer.write().await;
-        let _ = mutex.take();
+    async fn clear_buffer(&mut self) {
+        std::mem::swap(&mut self.metadata_buffer, &mut None);
     }
 
     /// A custom deserializer for the metadata extension message.
     /// This is only used for the [MetadataMessageType::Data] as it contains additional bytes within
     /// the payload which represent the bencoded metadata.
-    fn deserialize(payload: &[u8]) -> extension::Result<MetadataExtensionMessage> {
+    fn deserialize(payload: &[u8]) -> Result<MetadataExtensionMessage> {
         let mut cursor = Cursor::new(payload);
         let mut deserializer = serde_bencode::de::Deserializer::new(&mut cursor);
 
@@ -339,14 +344,16 @@ impl Debug for MetadataExtension {
 fn serialize_metadata_type<S>(
     message_type: &MetadataMessageType,
     serializer: S,
-) -> Result<S::Ok, S::Error>
+) -> result::Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
     serializer.serialize_u8(message_type.clone() as u8)
 }
 
-fn deserialize_metadata_type<'de, D>(deserializer: D) -> Result<MetadataMessageType, D::Error>
+fn deserialize_metadata_type<'de, D>(
+    deserializer: D,
+) -> result::Result<MetadataMessageType, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -365,34 +372,116 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer::PeerState;
+    use crate::storage::MemoryStorage;
+    use crate::TorrentEvent;
+    use fx_callback::Callback;
+    use std::time::Duration;
+    use tempfile::tempdir;
+    use tokio::sync::mpsc::channel;
+    use tokio::{select, time};
 
-    #[test]
-    fn test_serialize() {
-        let extension = MetadataExtensionMessage {
-            piece: 0,
-            total_size: None,
-            msg_type: MetadataMessageType::Request,
-            data: vec![],
-        };
-        let expected_result = "d8:msg_typei0e5:piecei0ee";
+    mod extension_message {
+        use super::*;
 
-        let result = serde_bencode::to_string(&extension).unwrap();
+        #[test]
+        fn test_serialize() {
+            let extension = MetadataExtensionMessage {
+                piece: 0,
+                total_size: None,
+                msg_type: MetadataMessageType::Request,
+                data: vec![],
+            };
+            let expected_result = "d8:msg_typei0e5:piecei0ee";
 
-        assert_eq!(expected_result, result.as_str());
+            let result = serde_bencode::to_string(&extension).unwrap();
+
+            assert_eq!(expected_result, result.as_str());
+        }
+
+        #[test]
+        fn test_deserialize() {
+            let message = "d5:piecei5e8:msg_typei1e10:total_sizei12000ee";
+            let expected_result = MetadataExtensionMessage {
+                piece: 5,
+                total_size: Some(12000),
+                msg_type: MetadataMessageType::Data,
+                data: vec![],
+            };
+
+            let result = serde_bencode::from_bytes(message.as_bytes()).unwrap();
+
+            assert_eq!(expected_result, result);
+        }
     }
 
-    #[test]
-    fn test_deserialize() {
-        let message = "d5:piecei5e8:msg_typei1e10:total_sizei12000ee";
-        let expected_result = MetadataExtensionMessage {
-            piece: 5,
-            total_size: Some(12000),
-            msg_type: MetadataMessageType::Data,
-            data: vec![],
-        };
+    #[tokio::test]
+    async fn test_request_metadata() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
+        let source_torrent = create_torrent!(
+            "debian-udp.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![],
+            vec![],
+            |_| Box::new(MemoryStorage::new()),
+            None
+        );
+        let target_torrent = create_torrent!(
+            uri,
+            temp_path,
+            TorrentFlags::Metadata,
+            TorrentConfig::builder().build(),
+            vec![],
+            vec![],
+            |_| Box::new(MemoryStorage::new()),
+            None
+        );
 
-        let result = serde_bencode::from_bytes(message.as_bytes()).unwrap();
+        // subscribe to the target torrent events
+        let (tx, mut rx) = channel(1);
+        let mut receiver = target_torrent.subscribe();
+        tokio::spawn(async move {
+            while let Ok(event) = receiver.recv().await {
+                if let TorrentEvent::MetadataChanged(_) = *event {
+                    tx.send(()).await.unwrap();
+                }
+            }
+        });
 
-        assert_eq!(expected_result, result);
+        // create a new peer pair connection between the 2 torrents
+        let (source, target) = create_tcp_peer_pair!(
+            &source_torrent,
+            &target_torrent,
+            ProtocolExtensionFlags::LTEP
+        );
+
+        // wait for the peer handshake to complete
+        assert_timeout!(
+            Duration::from_secs(1),
+            PeerState::Handshake != target.state().await,
+            "expected the peer handshake to have been completed"
+        );
+        let result = source.state().await;
+        assert_ne!(
+            PeerState::Error,
+            result,
+            "expected the source peer to be connected"
+        );
+        let result = target.state().await;
+        assert_ne!(
+            PeerState::Error,
+            result,
+            "expected the target peer to be connected"
+        );
+
+        select! {
+            _ = time::sleep(Duration::from_secs(5)) => assert!(false, "expected the metadata to have been retrieved"),
+            result = rx.recv() => assert!(result.is_some(), "expected some metadata to have been retrieved"),
+        }
     }
 }

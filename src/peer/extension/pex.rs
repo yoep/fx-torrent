@@ -1,17 +1,15 @@
 use crate::peer::extension::{Error, ExtensionNumber, Result};
 use crate::peer::protocol::Message;
-use crate::peer::{ConnectionDirection, PeerClientInfo, PeerCommandEvent, PeerContext, PeerEvent};
+use crate::peer::{ConnectionDirection, PeerClientInfo, PeerContext};
 use crate::{CompactIpv4Addrs, CompactIpv6Addrs, TorrentEvent};
 use bitmask_enum::bitmask;
-use fx_callback::Callback;
+use fx_callback::{Callback, Subscription};
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::RwLock;
-use tokio_util::sync::CancellationToken;
+use std::time::{Duration, Instant};
+
+const PEX_INFORM_INTERVAL: Duration = Duration::from_secs(90);
 
 /// The Peer Exchange message.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -100,6 +98,9 @@ impl<'de> Deserialize<'de> for PexFlag {
 pub struct PexExtension {
     /// The pool which is used to manage the pex peer addresses
     pool: PexPool,
+    torrent_event_receiver: Option<Subscription<TorrentEvent>>,
+    last_informed: Instant,
+    initialized: bool,
 }
 
 impl PexExtension {
@@ -109,11 +110,15 @@ impl PexExtension {
     pub fn new() -> Self {
         Self {
             pool: PexPool::new(),
+            torrent_event_receiver: None,
+            last_informed: Instant::now(),
+            initialized: false,
         }
     }
 
-    /// Handle the given extension message payload which has been received from the remote peer.
-    pub async fn handle<'a>(&'a self, payload: &'a [u8], peer: &'a PeerContext) -> Result<()> {
+    /// Process an incoming extension message payload which has been received from the remote peer.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn on_message(&self, payload: &[u8], peer: &PeerContext) -> Result<()> {
         let message: PexMessage = serde_bencode::from_bytes(payload)?;
         debug!("Received PEX message {:?} from peer {}", message, peer);
 
@@ -130,174 +135,138 @@ impl PexExtension {
         Ok(())
     }
 
-    /// Invoked when an event is raised by a peer and this extension is supported.
-    pub async fn on<'a>(&'a self, event: &'a PeerEvent, peer: &'a PeerContext) {
-        if let PeerEvent::ExtendedHandshakeCompleted = event {
-            self.subscribe_to_torrent(peer).await
+    /// Invoked once per tick (typically once per second), providing a tick interval for the extension
+    /// to process data.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn tick(&mut self, peer: &PeerContext) {
+        self.initialize(peer);
+        self.process_torrent_events();
+        self.inform_peer(peer).await;
+    }
+
+    fn initialize(&mut self, peer: &PeerContext) {
+        if self.initialized {
+            return;
+        }
+        if !peer.is_extension_supported(Self::NAME) {
+            return;
+        }
+
+        self.torrent_event_receiver = Some(peer.torrent().subscribe());
+        self.initialized = true;
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn process_torrent_events(&mut self) {
+        let receiver = match self.torrent_event_receiver.as_mut() {
+            None => return,
+            Some(r) => r,
+        };
+
+        while let Ok(event) = receiver.try_recv() {
+            self.pool.on_torrent_event(&*event)
         }
     }
 
-    async fn subscribe_to_torrent(&self, peer: &PeerContext) {
-        let pool = self.pool.clone();
-        let extension_number = match peer.find_remote_extension_number(Self::NAME).await {
+    async fn inform_peer(&mut self, peer: &PeerContext) {
+        if !self.initialized || self.last_informed.elapsed() < PEX_INFORM_INTERVAL {
+            return;
+        }
+        let extension_number = match peer.find_remote_extension_number(Self::NAME) {
             None => return,
             Some(e) => e,
         };
 
-        let mut receiver = peer.torrent().subscribe();
-        let event_sender = peer.event_sender().clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(90));
-
-            loop {
-                tokio::select! {
-                    _ = pool.inner.cancellation_token.cancelled() => break,
-                    event = receiver.recv() => {
-                        match event {
-                            Ok(event) => pool.handle_event(&*event).await,
-                            Err(_) => break,
-                        }
-                    }
-                    _ = interval.tick() => {
-                        // if the event sender is closed
-                        // it means that the peer is closed, so we stop this task
-                        if !pool.inform_peer(&event_sender, &extension_number).await {
-                            break;
-                        }
-                    },
-                }
-            }
-        });
+        self.pool.inform_peer(&extension_number, peer).await;
+        self.last_informed = Instant::now();
     }
 }
 
-impl Drop for PexExtension {
-    fn drop(&mut self) {
-        self.pool.close();
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct PexPool {
-    inner: Arc<InnerPexPool>,
+    added_peers: Vec<PexPeer>,
+    dropped_peers: Vec<PexPeer>,
 }
 
 impl PexPool {
     fn new() -> Self {
         Self {
-            inner: Arc::new(InnerPexPool::new()),
+            added_peers: Default::default(),
+            dropped_peers: Default::default(),
         }
     }
 
-    async fn handle_event(&self, event: &TorrentEvent) {
+    fn on_torrent_event(&mut self, event: &TorrentEvent) {
         match event {
-            TorrentEvent::PeerConnected(peer) => self.inner.peer_added(peer).await,
-            TorrentEvent::PeerDisconnected(peer) => self.inner.peer_removed(peer).await,
+            TorrentEvent::PeerConnected(peer) => self.peer_added(peer),
+            TorrentEvent::PeerDisconnected(peer) => self.peer_removed(peer),
             _ => {}
         }
     }
 
-    async fn inform_peer(
-        &self,
-        sender: &UnboundedSender<PeerCommandEvent>,
-        extension_number: &ExtensionNumber,
-    ) -> bool {
-        let message = self.inner.message().await;
+    fn peer_added(&mut self, peer: &PeerClientInfo) {
+        let mut flags = PexFlag::none();
+
+        if peer.connection_type == ConnectionDirection::Outbound {
+            flags |= PexFlag::OutgoingConnection;
+        }
+
+        self.added_peers.push(PexPeer {
+            addr: peer.addr.clone(),
+            flags,
+        });
+    }
+
+    fn peer_removed(&mut self, peer: &PeerClientInfo) {
+        let mut flags = PexFlag::none();
+
+        if peer.connection_type == ConnectionDirection::Outbound {
+            flags |= PexFlag::OutgoingConnection;
+        }
+
+        self.dropped_peers.push(PexPeer {
+            addr: peer.addr.clone(),
+            flags,
+        });
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    async fn inform_peer(&mut self, extension_number: &ExtensionNumber, peer: &PeerContext) {
+        let message = self.message().await;
 
         if !message.is_empty() {
             let message_info = format!("{:?}", message);
-            return match self
-                .try_inform_peer(sender, message, extension_number.clone())
-                .await
-            {
+            match self.try_inform_peer(message, extension_number, peer).await {
                 Ok(_) => {
                     debug!("Send PEX message {} to peer", message_info);
-                    true
                 }
                 Err(e) => {
                     debug!("Failed to send PEX message {}, {}", message_info, e);
-                    false
                 }
-            };
+            }
         }
-
-        true
     }
 
     async fn try_inform_peer(
         &self,
-        sender: &UnboundedSender<PeerCommandEvent>,
         message: PexMessage,
-        extension_number: ExtensionNumber,
+        extension_number: &ExtensionNumber,
+        peer: &PeerContext,
     ) -> Result<()> {
         let message_bytes = serde_bencode::to_bytes(&message)?;
-        sender
-            .send(PeerCommandEvent::Send(Message::ExtendedPayload(
-                extension_number.clone(),
-                message_bytes,
-            )))
-            .map_err(|e| Error::Operation(e.to_string()))?;
 
-        Ok(())
-    }
-
-    fn close(&self) {
-        self.inner.cancellation_token.cancel();
-    }
-}
-
-#[derive(Debug)]
-struct InnerPexPool {
-    added_peers: RwLock<Vec<PexPeer>>,
-    dropped_peers: RwLock<Vec<PexPeer>>,
-    cancellation_token: CancellationToken,
-}
-
-impl InnerPexPool {
-    fn new() -> Self {
-        Self {
-            added_peers: Default::default(),
-            dropped_peers: Default::default(),
-            cancellation_token: Default::default(),
-        }
-    }
-
-    async fn peer_added(&self, peer: &PeerClientInfo) {
-        let mut flags = PexFlag::none();
-
-        if peer.connection_type == ConnectionDirection::Outbound {
-            flags |= PexFlag::OutgoingConnection;
-        }
-
-        self.added_peers.write().await.push(PexPeer {
-            addr: peer.addr.clone(),
-            flags,
-        });
-    }
-
-    async fn peer_removed(&self, peer: &PeerClientInfo) {
-        let mut flags = PexFlag::none();
-
-        if peer.connection_type == ConnectionDirection::Outbound {
-            flags |= PexFlag::OutgoingConnection;
-        }
-
-        self.dropped_peers.write().await.push(PexPeer {
-            addr: peer.addr.clone(),
-            flags,
-        });
+        peer.send(Message::ExtendedPayload(
+            extension_number.clone(),
+            message_bytes,
+        ))
+        .await
+        .map_err(|e| Error::Operation(e.to_string()))
     }
 
     /// Get the PEX message to send to the peer and reset the pool.
-    async fn message(&self) -> PexMessage {
-        let (added_peers, dropped_peers) = {
-            let mut added_lock = self.added_peers.write().await;
-            let mut dropped_lock = self.dropped_peers.write().await;
-            (
-                std::mem::take(&mut *added_lock),
-                std::mem::take(&mut *dropped_lock),
-            )
-        };
+    async fn message(&mut self) -> PexMessage {
+        let added_peers = std::mem::take(&mut self.added_peers);
+        let dropped_peers = std::mem::take(&mut self.dropped_peers);
         let mut added = vec![];
         let mut added_flags = vec![];
         let mut added6 = vec![];

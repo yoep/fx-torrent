@@ -372,7 +372,7 @@ mod tests {
 
             service.close();
 
-            let result = timeout!(receiver.recv(), Duration::from_millis(250))
+            let result = timeout!(Duration::from_millis(250), receiver.recv())
                 .expect("expected to receive an event");
             match &*result {
                 LocalServiceDiscoveryEvent::Closed => (),
@@ -439,7 +439,7 @@ cookie: {}
             );
 
             // wait for the packet event to be received
-            let result = timeout!(receiver.recv(), Duration::from_millis(250))
+            let result = timeout!(Duration::from_millis(250), receiver.recv())
                 .expect("expected to receive an event");
             match &*result {
                 LocalServiceDiscoveryEvent::PeerDiscovered(info_hash, addr) => {

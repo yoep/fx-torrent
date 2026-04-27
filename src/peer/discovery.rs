@@ -57,7 +57,7 @@ impl PeerDiscovery {
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         connection_timeout: Duration,
-    ) -> Result<Box<dyn Peer>> {
+    ) -> Result<Peer> {
         match self {
             PeerDiscovery::Tcp(discovery) => {
                 discovery
@@ -130,8 +130,11 @@ impl From<UtpPeerDiscovery> for PeerDiscovery {
     }
 }
 
-impl From<Box<dyn Discovery>> for PeerDiscovery {
-    fn from(discovery: Box<dyn Discovery>) -> Self {
+impl<D> From<D> for PeerDiscovery
+where
+    D: Discovery + 'static,
+{
+    fn from(discovery: D) -> Self {
         Self::Other(Arc::from(discovery))
     }
 }
@@ -155,7 +158,7 @@ pub trait Discovery: Debug + Send + Sync {
     ///
     /// # Returns
     ///
-    /// It returns a [Peer] if the connection was established.
+    /// It returns a [TorrentPeer] if the connection was established.
     async fn dial(
         &self,
         peer_id: PeerId,
@@ -164,7 +167,7 @@ pub trait Discovery: Debug + Send + Sync {
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         connection_timeout: Duration,
-    ) -> Result<Box<dyn Peer>>;
+    ) -> Result<Peer>;
 
     /// Receive an incoming peer connection from the peer listener.
     ///
@@ -199,9 +202,57 @@ pub mod mock {
                 data_pool: DataPool,
                 protocol_extensions: ProtocolExtensionFlags,
                 connection_timeout: Duration,
-            ) -> Result<Box<dyn Peer>>;
+            ) -> Result<Peer>;
             async fn recv(&self) -> Option<PeerEntry>;
             fn close(&self);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::peer::tests::MockPeer;
+
+    #[derive(Debug)]
+    struct TestDiscovery {
+        addr: SocketAddr,
+    }
+
+    #[async_trait]
+    impl Discovery for TestDiscovery {
+        fn addr(&self) -> &SocketAddr {
+            &self.addr
+        }
+
+        async fn dial(
+            &self,
+            _: PeerId,
+            _: SocketAddr,
+            _: InnerTorrent,
+            _: DataPool,
+            _: ProtocolExtensionFlags,
+            _: Duration,
+        ) -> Result<Peer> {
+            Ok(MockPeer::new().into())
+        }
+
+        async fn recv(&self) -> Option<PeerEntry> {
+            None
+        }
+
+        fn close(&self) {
+            // no-op
+        }
+    }
+
+    #[test]
+    fn test_from_custom_peer_discovery() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 6881));
+        let discovery = TestDiscovery { addr };
+
+        let discovery: PeerDiscovery = discovery.into();
+
+        assert_eq!(discovery.addr(), &addr);
     }
 }

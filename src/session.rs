@@ -1267,8 +1267,8 @@ pub mod tests {
         let handle = torrent.handle();
 
         let event = timeout!(
-            rx.recv(),
             Duration::from_millis(250),
+            rx.recv(),
             "expected to receive a session event"
         )
         .unwrap();
@@ -1277,8 +1277,8 @@ pub mod tests {
         session.remove_torrent(&handle).await;
 
         let event = timeout!(
-            rx.recv(),
             Duration::from_millis(250),
+            rx.recv(),
             "expected to receive a session event"
         )
         .unwrap();

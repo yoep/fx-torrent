@@ -54,7 +54,7 @@ impl TorrentDhtPeersOperation {
             None => return true,
             Some(last_executed) => last_executed.elapsed(),
         };
-        let active_peer_connections = context.active_peer_connections().await;
+        let active_peer_connections = context.active_peer_connections();
 
         if active_peer_connections > 0 {
             elapsed >= RETRIEVE_INTERVAL
@@ -198,6 +198,7 @@ mod tests {
 
         // run till completion
         timeout!(
+            Duration::from_millis(250),
             async {
                 loop {
                     let _ = operation.execute(&mut context, vec![].as_slice()).await;
@@ -207,7 +208,6 @@ mod tests {
                     time::sleep(Duration::from_millis(10)).await;
                 }
             },
-            Duration::from_millis(250),
             "expected the operation to complete"
         );
         assert_eq!(

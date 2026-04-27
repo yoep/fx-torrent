@@ -1561,7 +1561,7 @@ mod tests {
         );
 
         // check the read result of the receiving stream
-        let (result_buffer_len, buffer) = timeout!(rx.recv(), Duration::from_millis(500)).unwrap();
+        let (result_buffer_len, buffer) = timeout!(Duration::from_millis(500), rx.recv()).unwrap();
         let result = String::from_utf8(buffer).unwrap();
         assert_eq!(
             bytes_len, result_buffer_len,
@@ -1625,7 +1625,7 @@ mod tests {
         incoming_stream.flush().await.unwrap();
 
         // wait for the data to be received in the outgoing stream
-        let (result_buffer_len, buffer) = timeout!(rx.recv(), Duration::from_millis(500))
+        let (result_buffer_len, buffer) = timeout!(Duration::from_millis(500), rx.recv())
             .expect("expected the data to have been received");
         let result = String::from_utf8(buffer).unwrap();
         assert_eq!(
