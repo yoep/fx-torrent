@@ -1,8 +1,10 @@
+use crate::channel::Reply;
 use crate::peer::extension::{Error, ExtensionNumber, Result};
 use crate::peer::protocol::Message;
 use crate::peer::{Peer, PeerContext};
-use log::{debug, warn};
+use log::{debug, trace, warn};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::{io, result};
 
@@ -105,9 +107,13 @@ impl TryFrom<u8> for AddrType {
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 #[serde(into = "u32", try_from = "u32")]
 enum ErrorCode {
+    /// The target endpoint is invalid.
     NoSuchPeer = 1,
+    /// The relaying peer is not connected to the target peer.
     NotConnected = 2,
+    /// The target peer does not support the holepunch extension.
     NoSupport = 3,
+    /// The target endpoint belongs to the relaying peer.
     NoSelf = 4,
 }
 
@@ -133,18 +139,23 @@ impl TryFrom<u32> for ErrorCode {
 
 /// The holepunch extension as defined in BEP55
 #[derive(Debug)]
-pub struct HolepunchExtension {}
+pub struct HolepunchExtension {
+    /// The outgoing rendezvous requests which have not yet been answered with a connect message.
+    pending_rendezvous: HashMap<SocketAddr, Reply<Result<SocketAddr>>>,
+}
 
 impl HolepunchExtension {
     pub const NAME: &'static str = "ut_holepunch";
 
     /// Create a new extension instance.
     pub fn new() -> Self {
-        Self {}
+        Self {
+            pending_rendezvous: Default::default(),
+        }
     }
 
     /// Handle the given extension message payload which has been received from the remote peer.
-    pub async fn on_message<'a>(&'a self, payload: &'a [u8], peer: &'a PeerContext) -> Result<()> {
+    pub async fn on_message(&mut self, payload: &[u8], peer: &PeerContext) -> Result<()> {
         let message = serde_bencode::from_bytes::<HolepunchMessage>(payload)?;
         let extension_number = match peer.find_remote_extension_number(Self::NAME) {
             None => return Err(Error::Unsupported),
@@ -169,16 +180,63 @@ impl HolepunchExtension {
                     );
                 }
             }
-            MessageType::Error => {
-                debug!(
-                    "Peer {} {} extension failed, {:?}",
-                    peer,
-                    Self::NAME,
-                    message.err_code
-                );
-            }
+            MessageType::Error => self.on_error(&message, peer).await,
         }
         Ok(())
+    }
+
+    /// Send a rendezvous message for the target addr to the remote peer.
+    pub async fn send_rendezvous(
+        &mut self,
+        target: SocketAddr,
+        response: Reply<Result<SocketAddr>>,
+        peer: &PeerContext,
+    ) {
+        let extension_number = match peer.find_remote_extension_number(Self::NAME) {
+            None => {
+                response.send(Err(Error::Unsupported));
+                return;
+            }
+            Some(e) => e,
+        };
+        let addr_type = if target.is_ipv4() {
+            AddrType::Ipv4
+        } else {
+            AddrType::Ipv6
+        };
+        let addr = match target.ip() {
+            IpAddr::V4(ip) => ip.octets().to_vec(),
+            IpAddr::V6(ip) => ip.octets().to_vec(),
+        };
+        let message = match serde_bencode::to_bytes(&HolepunchMessage {
+            message_type: MessageType::Rendezvous,
+            addr_type,
+            addr,
+            port: target.port(),
+            err_code: None,
+        }) {
+            Err(e) => {
+                response.send(Err(Error::Parsing(e.to_string())));
+                return;
+            }
+            Ok(e) => e,
+        };
+
+        match peer
+            .send(Message::ExtendedPayload(extension_number, message))
+            .await
+        {
+            Ok(_) => {
+                self.pending_rendezvous.insert(target, response);
+                trace!(
+                    "Peer {} {} extension stored rendezvous task for {}",
+                    peer,
+                    Self::NAME,
+                    target
+                );
+            }
+            Err(e) => response.send(Err(Error::Io(io::Error::new(io::ErrorKind::Other, e)))),
+        }
     }
 
     /// Try to connect to both the initiating peer and target peer.
@@ -243,12 +301,60 @@ impl HolepunchExtension {
     }
 
     /// Try to process a received [MessageType::Connect] message.
-    async fn on_connect(&self, message: &HolepunchMessage, peer: &PeerContext) -> Result<()> {
+    async fn on_connect(&mut self, message: &HolepunchMessage, peer: &PeerContext) -> Result<()> {
         let addr = message.addr()?;
+        // check if we've got a pending rendezvous task for the target addr
+        if let Some(response) = self.pending_rendezvous.remove(&addr) {
+            trace!(
+                "Peer {} {} extension processed rendezvous message for {}",
+                peer,
+                Self::NAME,
+                addr
+            );
+            response.send(Ok(addr));
+        }
+
         if let Err(e) = peer.torrent().add_peer(addr).await {
             debug!("Peer {} failed to add target peer, {}", peer, e);
         }
         Ok(())
+    }
+
+    /// Process a received error message.
+    async fn on_error(&mut self, message: &HolepunchMessage, peer: &PeerContext) {
+        let addr = match message.addr() {
+            Ok(addr) => addr,
+            Err(_) => return,
+        };
+        let err_code = match message.err_code {
+            Some(err_code) => err_code,
+            None => {
+                debug!(
+                    "Peer {} {} extension received error without error code, {:?}",
+                    peer,
+                    Self::NAME,
+                    message
+                );
+                return;
+            }
+        };
+        if let Some(response) = self.pending_rendezvous.remove(&addr) {
+            let reason = match err_code {
+                ErrorCode::NoSuchPeer => "invalid target peer",
+                ErrorCode::NotConnected => "not connected to target peer",
+                ErrorCode::NoSupport => "holepunch not supported by target peer",
+                ErrorCode::NoSelf => "no self connection allowed",
+            };
+            response.send(Err(Error::Operation(reason.to_string())));
+        } else {
+            debug!(
+                "Peer {} {} extension received error from {}, {:?}",
+                peer,
+                Self::NAME,
+                addr,
+                message.err_code
+            );
+        }
     }
 
     async fn send_err_code(
@@ -303,7 +409,7 @@ impl HolepunchExtension {
 mod tests {
     use super::*;
 
-    mod handle {
+    mod on_message {
         use super::*;
         use crate::operation::TorrentConnectPeersOperation;
         use crate::peer::{PeerId, ProtocolExtensionFlags, UtpPeerDiscovery};

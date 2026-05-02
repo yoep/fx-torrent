@@ -143,6 +143,25 @@ impl PeerPool {
         );
     }
 
+    /// Inform the peer pool that a hole punch operation is in progress.
+    pub fn peer_punching(&mut self, addr: &SocketAddr) {
+        if let Some(info) = self.peers.get_mut(addr) {
+            info.punching();
+        }
+    }
+
+    /// Inform the pool that a hole punch operation for the peer has completed.
+    /// The `punched` indicates whether the operation was successful or not.
+    pub fn peer_punched(&mut self, addr: &SocketAddr, punched: bool) {
+        if let Some(info) = self.peers.get_mut(addr) {
+            if punched {
+                info.punched();
+            } else {
+                info.punch_failed();
+            }
+        }
+    }
+
     /// Inform the pool that a peer connection has been closed.
     ///
     /// Returns the removed peer from the pool, if found.
@@ -361,6 +380,8 @@ struct PeerInfo {
     last_connected: Option<Instant>,
     /// The active connection to the remote peer.
     connection: Option<PeerConnection>,
+    /// The current state of the hole punch operation for the peer.
+    holepunch_state: HolePunchState,
 }
 
 impl PeerInfo {
@@ -375,6 +396,7 @@ impl PeerInfo {
             rank: PeerPriority::none(),
             last_connected: None,
             connection: None,
+            holepunch_state: HolePunchState::None,
         }
     }
 
@@ -391,6 +413,7 @@ impl PeerInfo {
             rank,
             last_connected: None,
             connection: None,
+            holepunch_state: HolePunchState::None,
         }
     }
 
@@ -400,11 +423,30 @@ impl PeerInfo {
     ///
     /// It returns true when the peer is a candidate, else false.
     pub fn is_connect_candidate(&self) -> bool {
-        !self.is_in_use && !self.is_banned && self.failure_count < CONNECTION_FAILURE_THRESHOLD
+        !self.is_in_use
+            && !self.is_banned
+            && self.failure_count < CONNECTION_FAILURE_THRESHOLD
+            && self.holepunch_state != HolePunchState::Punching
     }
 
     /// Increase the failure count for this peer.
     fn failed(&mut self) {
+        self.failure_count += 1;
+    }
+
+    /// Update the hole punch state to punching.
+    fn punching(&mut self) {
+        self.holepunch_state = HolePunchState::Punching;
+    }
+
+    /// Update the hole punch state to punched.
+    fn punched(&mut self) {
+        self.holepunch_state = HolePunchState::Punched;
+    }
+
+    /// Update the hole punch state to failed.
+    fn punch_failed(&mut self) {
+        self.holepunch_state = HolePunchState::Failed;
         self.failure_count += 1;
     }
 }
@@ -447,6 +489,15 @@ struct PeerConnection {
     peer: Peer,
     receiver: Subscription<PeerEvent>,
     state: PeerState,
+}
+
+/// The state of the hole punch operation for the peer.
+#[derive(Debug, Copy, Clone, PartialEq)]
+enum HolePunchState {
+    None,
+    Punching,
+    Punched,
+    Failed,
 }
 
 #[cfg(test)]
@@ -683,6 +734,7 @@ mod tests {
                     rank: rank,
                     last_connected: None,
                     connection: None,
+                    holepunch_state: HolePunchState::None,
                 }
             }};
             ($addr:expr, $rank:expr, $in_use:expr) => {{
@@ -702,6 +754,7 @@ mod tests {
                     rank,
                     last_connected: None,
                     connection: None,
+                    holepunch_state: HolePunchState::None,
                 }
             }};
         }
@@ -731,6 +784,7 @@ mod tests {
                 rank: PeerPriority::none(),
                 last_connected: None,
                 connection: None,
+                holepunch_state: HolePunchState::None,
             };
             assert_eq!(
                 false,
@@ -783,6 +837,7 @@ mod tests {
                     rank: PeerPriority::none(),
                     last_connected: None,
                     connection: None,
+                    holepunch_state: HolePunchState::None,
                 };
 
                 assert_eq!(Ordering::Greater, peer1.cmp(&peer2));
@@ -800,6 +855,7 @@ mod tests {
                     rank: PeerPriority::none(),
                     last_connected: None,
                     connection: None,
+                    holepunch_state: HolePunchState::None,
                 };
                 let peer2 = PeerInfo {
                     addr: ([127, 0, 0, 1], 8090).into(),
@@ -810,6 +866,7 @@ mod tests {
                     rank: PeerPriority::none(),
                     last_connected: None,
                     connection: None,
+                    holepunch_state: HolePunchState::None,
                 };
 
                 assert_eq!(Ordering::Greater, peer1.cmp(&peer2));

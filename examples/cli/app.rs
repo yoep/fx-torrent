@@ -16,8 +16,12 @@ use fx_torrent::operation::{
     TorrentMetadataOperation, TorrentOperationFactory, TorrentStatsOperation,
     TorrentTrackerPeersOperation, TorrentTrackersOperation,
 };
+use fx_torrent::peer::extension::{
+    HolepunchExtension, MetadataExtension, PeerExtension, PexExtension,
+};
 use fx_torrent::{
-    FxSessionCache, FxTorrentSession, Session, SessionConfig, SessionEvent, TorrentFlags,
+    ExtensionFactory, FxSessionCache, FxTorrentSession, Session, SessionConfig, SessionEvent,
+    TorrentFlags,
 };
 use log::{error, warn};
 use ratatui::layout::Constraint::{Length, Min};
@@ -546,6 +550,7 @@ impl App {
             )
             .session_cache(FxSessionCache::new(SESSION_CACHE_LIMIT))
             .operations(operations)
+            .default_extensions()
             .dht_option(dht)
             .build()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))

@@ -315,6 +315,7 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
+            vec![],
             None,
             None,
             |info_hash, data_pool| Arc::new(DiskStorage::new(info_hash, temp_path, data_pool))

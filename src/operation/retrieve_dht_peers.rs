@@ -172,6 +172,7 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
+            vec![],
             Some(dht)
         );
         let mut operation = TorrentDhtPeersOperation::new_with_timeout(Duration::from_millis(100));
@@ -232,6 +233,7 @@ mod tests {
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
                 vec![],
+                vec![],
                 None
             );
             let operation = TorrentDhtPeersOperation::new();
@@ -259,6 +261,7 @@ mod tests {
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
+                vec![],
                 vec![],
                 Some(dht)
             );

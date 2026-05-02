@@ -38,7 +38,28 @@ macro_rules! torrent_context {
             Some(crate::dht::DhtTracker::builder().build().await.unwrap())
         )
     }};
-    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr) => {{
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr) => {{
+        use crate::peer::extension::DontHaveExtension;
+        use crate::peer::extension::HolepunchExtension;
+        use crate::peer::extension::MetadataExtension;
+        use crate::peer::extension::PexExtension;
+
+        torrent_context!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $discoveries,
+            vec![
+                || MetadataExtension::new().into(),
+                || PexExtension::new().into(),
+                || DontHaveExtension::new().into(),
+                || HolepunchExtension::new().into(),
+            ],
+            Some(crate::dht::DhtTracker::builder().build().await.unwrap())
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr) => {{
         use std::sync::Arc;
 
         torrent_context!(
@@ -47,12 +68,13 @@ macro_rules! torrent_context {
             $options,
             $config,
             $discoveries,
+            $extensions,
             $dht,
             None,
             |_, _| Arc::new(crate::storage::MemoryStorage::new())
         )
     }};
-    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr, $lsd:expr) => {{
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr, $lsd:expr) => {{
         use std::sync::Arc;
 
         torrent_context!(
@@ -61,20 +83,18 @@ macro_rules! torrent_context {
             $options,
             $config,
             $discoveries,
+            $extensions,
             $dht,
             $lsd,
             |_, _| Arc::new(crate::storage::MemoryStorage::new())
         )
     }};
-    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr, $lsd:expr, $storage:expr) => {{
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr, $lsd:expr, $storage:expr) => {{
         use crate::dht::DhtTracker;
-        use crate::peer::extension::DontHaveExtension;
-        use crate::peer::extension::HolepunchExtension;
-        use crate::peer::extension::MetadataExtension;
-        use crate::peer::extension::PexExtension;
         use crate::peer::PeerDiscovery;
         use crate::torrent_data::DataPool;
         use crate::tracker::TrackerClient;
+        use crate::ExtensionFactory;
         use crate::LocalServiceDiscovery;
         use crate::{
             TorrentConfig, TorrentContext, TorrentFlags, TorrentMetadata,
@@ -86,6 +106,7 @@ macro_rules! torrent_context {
         let options: TorrentFlags = $options;
         let config: TorrentConfig = $config;
         let discoveries: Vec<PeerDiscovery> = $discoveries;
+        let extensions: Vec<ExtensionFactory> = $extensions;
         let dht: Option<DhtTracker> = $dht;
         let lsd: Option<LocalServiceDiscovery> = $lsd;
         let metadata: TorrentMetadata = metadata!(uri);
@@ -116,12 +137,7 @@ macro_rules! torrent_context {
                 config,
                 peer_port,
                 DEFAULT_TORRENT_PROTOCOL_EXTENSIONS(),
-                vec![
-                    || MetadataExtension::new().into(),
-                    || PexExtension::new().into(),
-                    || DontHaveExtension::new().into(),
-                    || HolepunchExtension::new().into(),
-                ],
+                extensions,
                 options,
                 data_pool.clone(),
                 trackers,

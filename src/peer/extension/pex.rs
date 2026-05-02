@@ -1,6 +1,6 @@
 use crate::peer::extension::{Error, ExtensionNumber, Result};
 use crate::peer::protocol::Message;
-use crate::peer::{ConnectionDirection, PeerClientInfo, PeerContext};
+use crate::peer::{ConnectionDirection, ConnectionProtocol, PeerClientInfo, PeerContext};
 use crate::{CompactIpv4Addrs, CompactIpv6Addrs, TorrentEvent};
 use bitmask_enum::bitmask;
 use fx_callback::{Callback, Subscription};
@@ -210,6 +210,9 @@ impl PexPool {
         if peer.connection_type == ConnectionDirection::Outbound {
             flags |= PexFlag::OutgoingConnection;
         }
+        if peer.connection_protocol == ConnectionProtocol::Utp {
+            flags |= PexFlag::UtpSupported;
+        }
 
         self.added_peers.push(PexPeer {
             addr: peer.addr.clone(),
@@ -222,6 +225,9 @@ impl PexPool {
 
         if peer.connection_type == ConnectionDirection::Outbound {
             flags |= PexFlag::OutgoingConnection;
+        }
+        if peer.connection_protocol == ConnectionProtocol::Utp {
+            flags |= PexFlag::UtpSupported;
         }
 
         self.dropped_peers.push(PexPeer {

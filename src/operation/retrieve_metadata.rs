@@ -203,6 +203,7 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
+            vec![],
             None
         );
         let mut operation = TorrentMetadataOperation::new(None);
@@ -223,6 +224,7 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
+            vec![],
             vec![],
             None
         );
@@ -251,6 +253,7 @@ mod tests {
             temp_path,
             TorrentFlags::Metadata,
             TorrentConfig::builder().build(),
+            vec![],
             vec![],
             Some(dht)
         );

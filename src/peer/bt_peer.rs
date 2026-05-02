@@ -1,11 +1,11 @@
-use crate::channel::{ChannelReceiver, ChannelSender, Reply};
+use crate::channel::{ChannelReceiver, ChannelSender, Reply, Response};
 use crate::merkle::LEAF_BLOCK_SIZE;
 use crate::metrics::Metric;
 use crate::peer::extension::{ExtensionNumber, ExtensionRegistry, PeerExtension};
 use crate::peer::peer_connection::PeerConnection;
 use crate::peer::protocol::{CloseReason, UtpStream};
 use crate::peer::protocol::{ExtendedHandshake, Handshake, HashRequest, Message, Piece, Request};
-use crate::peer::{Error, Metrics, PeerHandle, PeerId, PeerPriority, Result};
+use crate::peer::{extension, Error, Metrics, PeerHandle, PeerId, PeerPriority, Result};
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
 use crate::{
@@ -664,6 +664,20 @@ impl BitTorrentPeer {
             .unwrap_or_default()
     }
 
+    /// Try to HolePunch the given target peer address.
+    /// The response is completed once a `connect` message has been received from the relaying peer.
+    pub(crate) async fn holepunch(
+        &self,
+        addr: SocketAddr,
+    ) -> Response<SocketAddr, extension::Error> {
+        self.sender
+            .send(|tx| PeerCommand::SendHolePunch {
+                target: addr,
+                response: tx,
+            })
+            .await
+    }
+
     /// Send the given message to the remote peer.
     pub(crate) async fn send(&self, message: Message) -> Result<()> {
         self.sender
@@ -814,6 +828,11 @@ enum PeerCommand {
         message: Message,
         response: Reply<Result<()>>,
     },
+    /// Send a holepunch request to the remote peer.
+    SendHolePunch {
+        target: SocketAddr,
+        response: Reply<extension::Result<SocketAddr>>,
+    },
     /// Close the peer connection.
     Close { response: Reply<()> },
 }
@@ -952,7 +971,7 @@ impl PeerContext {
                 _ = self.cancellation_token.cancelled() => break,
                 _ = time::sleep(Duration::from_secs(KEEP_ALIVE_SECONDS)) => self.send_keep_alive().await,
                 Some(event) = self.connection.recv() => self.on_reader_event(event, extensions.as_mut_slice()).await,
-                Some(event) = command_receiver.recv() => self.on_command(event).await,
+                Some(event) = command_receiver.recv() => self.on_command(event, extensions.as_mut_slice()).await,
                 Ok(event) = torrent_event_receiver.recv() => self.on_torrent_event(&*event).await,
                 _ = interval.tick() => self.on_tick(extensions.as_mut_slice(), PEER_TICK_INTERVAL).await,
             }
@@ -1417,7 +1436,7 @@ impl PeerContext {
 
     /// Handle an internal peer command event.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn on_command(&mut self, command: PeerCommand) {
+    async fn on_command(&mut self, command: PeerCommand, extensions: &mut [PeerExtension]) {
         match command {
             PeerCommand::GetRemoteId { response } => response.send(self.remote_id()),
             PeerCommand::GetRemotePeer { response } => response.send(self.remote_peer().cloned()),
@@ -1460,6 +1479,9 @@ impl PeerContext {
             }
             PeerCommand::SendMessage { message, response } => {
                 response.send(self.send(message).await)
+            }
+            PeerCommand::SendHolePunch { target, response } => {
+                self.send_holepunch(target, response, extensions).await
             }
             PeerCommand::Close { response } => {
                 response.send(self.close(CloseReason::None).await);
@@ -2355,6 +2377,28 @@ impl PeerContext {
 
         self.update_state(PeerState::Idle);
         Ok(())
+    }
+
+    /// Try to send a HolePunch request to the remote peer.
+    /// This is done through the HolePunch extension, if available.
+    async fn send_holepunch(
+        &self,
+        target: SocketAddr,
+        response: Reply<extension::Result<SocketAddr>>,
+        extensions: &mut [PeerExtension],
+    ) {
+        let extension = match extensions.iter_mut().find_map(|e| match e {
+            PeerExtension::Holepunch(e) => Some(e),
+            _ => None,
+        }) {
+            None => {
+                response.send(Err(extension::Error::Unsupported));
+                return;
+            }
+            Some(e) => e,
+        };
+
+        extension.send_rendezvous(target, response, self).await;
     }
 
     /// Send the reject request to the remote peer.

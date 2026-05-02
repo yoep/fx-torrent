@@ -10,6 +10,11 @@ FX-Torrent is the most complete BitTorrent implementation fully written in Rust,
 It supports most of the Bittorrent protocol specifications, such as multi-file torrents, validating existing files, resuming torrent files,
 and is based on the `libtorrent` library for functionality and naming convention.
 
+- [Getting Started](#getting-started)
+- [Examples](#examples)
+- [Features](#features)
+- [DHT](#dht)
+
 ## Getting Started
 
 Create a new `FxTorrentSession` which manages one or more torrents.
@@ -104,7 +109,7 @@ When both features are missing, a `Error::MissingCryptoProvider` error will be r
 - [ ] [BEP52](https://www.bittorrent.org/beps/bep_0052.html) - The BitTorrent Protocol Specification v2 (WIP)
 - [x] [BEP53](https://www.bittorrent.org/beps/bep_0053.html) - Magnets
 - [x] [BEP54](https://www.bittorrent.org/beps/bep_0054.html) - The lt_donthave extension
-- [ ] [BEP55](https://www.bittorrent.org/beps/bep_0055.html) - Holepunch extension (WIP)
+- [x] [BEP55](https://www.bittorrent.org/beps/bep_0055.html) - Holepunch extension
 
 ## License
 

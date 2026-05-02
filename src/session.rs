@@ -16,7 +16,6 @@ use crate::operation::{
 use crate::operation::{TorrentDhtNodesOperation, TorrentDhtPeersOperation};
 #[cfg(feature = "extension-donthave")]
 use crate::peer::extension::DontHaveExtension;
-#[cfg(feature = "extension-holepunch")]
 use crate::peer::extension::HolepunchExtension;
 #[cfg(feature = "extension-metadata")]
 use crate::peer::extension::MetadataExtension;
@@ -706,7 +705,6 @@ impl FxTorrentSessionBuilder {
         #[cfg(feature = "extension-donthave")]
         self.extension_factories
             .push(|| DontHaveExtension::new().into());
-        #[cfg(feature = "extension-holepunch")]
         self.extension_factories
             .push(|| HolepunchExtension::new().into());
         self

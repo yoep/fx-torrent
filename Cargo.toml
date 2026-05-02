@@ -60,12 +60,11 @@ tracing-subscriber = { version = "0.3", optional = true }
 url = "2.5"
 
 [features]
-default = ["dht", "extension-metadata", "extension-pex", "extension-holepunch", "extension-donthave", "lsd", "tracker-server"]
+default = ["dht", "extension-metadata", "extension-pex", "extension-donthave", "lsd", "tracker-server"]
 
 dht = ["dep:ed25519"]
 ed25519-dalek = ["dep:ed25519-dalek"]
 extension-donthave = []
-extension-holepunch = []
 extension-metadata = []
 extension-pex = []
 lsd = []

@@ -1892,6 +1892,11 @@ impl TorrentContext {
         self.extensions.iter().map(|e| e()).collect()
     }
 
+    /// Returns `true` if the specified extension is enabled for the torrent, else `false`.
+    pub fn is_extension_enabled(&self, extension: &str) -> bool {
+        self.extensions.iter().any(|e| e().name() == extension)
+    }
+
     /// Returns the configured trackers for the torrent.
     pub fn trackers(&self) -> &[TorrentTracker] {
         self.trackers.as_slice()

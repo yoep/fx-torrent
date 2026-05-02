@@ -142,6 +142,7 @@ mod tests {
             TorrentFlags::Paused,
             TorrentConfig::builder().build(),
             vec![],
+            vec![],
             None
         );
         let mut operation = TorrentStatsOperation::new();
@@ -177,6 +178,7 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
+            vec![],
             vec![],
             None
         );

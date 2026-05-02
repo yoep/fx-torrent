@@ -1,3 +1,4 @@
+use crate::peer::extension;
 use crate::PieceIndex;
 use std::io;
 use std::net::SocketAddr;
@@ -40,6 +41,9 @@ pub enum Error {
     /// Indicates that an io error occurred
     #[error("an io error occurred, {0}")]
     Io(io::Error),
+    /// Indicates that a peer extension error occurred.
+    #[error("an extension error occurred, {0}")]
+    Extension(extension::Error),
     /// Indicates that the given payload is too large
     #[error("the payload exceeds the maximum size of {0}")]
     TooLarge(usize),
@@ -61,6 +65,7 @@ impl PartialEq for Error {
             (Error::Handshake(_, _), Error::Handshake(_, _)) => true,
             (Error::Parsing(_), Error::Parsing(_)) => true,
             (Error::Io(_), Error::Io(_)) => true,
+            (Error::Extension(lt), Error::Extension(rt)) => lt == rt,
             (Error::Closed, Error::Closed) => true,
             _ => false,
         }

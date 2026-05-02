@@ -1,6 +1,5 @@
 #[cfg(feature = "extension-donthave")]
 use crate::peer::extension::DontHaveExtension;
-#[cfg(feature = "extension-holepunch")]
 use crate::peer::extension::HolepunchExtension;
 #[cfg(feature = "extension-metadata")]
 use crate::peer::extension::MetadataExtension;
@@ -55,7 +54,6 @@ pub trait Extension: Debug + Send + Sync {
 pub enum PeerExtension {
     #[cfg(feature = "extension-donthave")]
     DontHave(DontHaveExtension),
-    #[cfg(feature = "extension-holepunch")]
     Holepunch(HolepunchExtension),
     #[cfg(feature = "extension-metadata")]
     Metadata(MetadataExtension),
@@ -70,7 +68,6 @@ impl PeerExtension {
         match self {
             #[cfg(feature = "extension-donthave")]
             PeerExtension::DontHave(_) => DontHaveExtension::NAME,
-            #[cfg(feature = "extension-holepunch")]
             PeerExtension::Holepunch(_) => HolepunchExtension::NAME,
             #[cfg(feature = "extension-metadata")]
             PeerExtension::Metadata(_) => MetadataExtension::NAME,
@@ -90,7 +87,6 @@ impl PeerExtension {
         match self {
             #[cfg(feature = "extension-donthave")]
             PeerExtension::DontHave(e) => e.on_message(payload, peer).await,
-            #[cfg(feature = "extension-holepunch")]
             PeerExtension::Holepunch(e) => e.on_message(payload, peer).await,
             #[cfg(feature = "extension-metadata")]
             PeerExtension::Metadata(e) => e.on_message(payload, peer).await,
@@ -122,7 +118,6 @@ impl From<DontHaveExtension> for PeerExtension {
     }
 }
 
-#[cfg(feature = "extension-holepunch")]
 impl From<HolepunchExtension> for PeerExtension {
     fn from(extension: HolepunchExtension) -> Self {
         Self::Holepunch(extension)

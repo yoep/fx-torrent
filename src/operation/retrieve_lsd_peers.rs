@@ -94,6 +94,7 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
+            vec![],
             None,
             Some(lsd)
         );
