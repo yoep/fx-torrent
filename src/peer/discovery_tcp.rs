@@ -251,7 +251,7 @@ mod tests {
         let listener = TcpPeerDiscovery::new()
             .await
             .expect("expected a new tcp peer listener");
-        let torrent = create_torrent!(
+        let torrent = torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),

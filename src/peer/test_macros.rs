@@ -6,17 +6,12 @@ macro_rules! create_utp_socket {
     ($port:expr) => {{
         use crate::peer::protocol::UtpSocket;
         use core::net::{Ipv4Addr, SocketAddr};
-        use core::time::Duration;
 
         let port: u16 = $port;
 
-        UtpSocket::new(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
-            Duration::from_secs(1),
-            vec![],
-        )
-        .await
-        .expect("expected an utp socket")
+        UtpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)), vec![])
+            .await
+            .expect("expected an utp socket")
     }};
 }
 
@@ -28,18 +23,17 @@ macro_rules! create_utp_socket_pair {
     ($incoming_extensions:expr, $outgoing_extensions:expr) => {{
         use crate::peer::protocol::{UtpSocket, UtpSocketExtensions};
         use core::net::{Ipv4Addr, SocketAddr};
-        use core::time::Duration;
 
         let incoming_extensions: UtpSocketExtensions = $incoming_extensions;
         let outgoing_extensions: UtpSocketExtensions = $outgoing_extensions;
 
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
-        let left = UtpSocket::new(addr, Duration::from_secs(2), incoming_extensions)
+        let left = UtpSocket::bind(addr, incoming_extensions)
             .await
             .expect("expected a new utp socket");
 
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
-        let right = UtpSocket::new(addr, Duration::from_secs(2), outgoing_extensions)
+        let right = UtpSocket::bind(addr, outgoing_extensions)
             .await
             .expect("expected a new utp socket");
 
@@ -68,5 +62,102 @@ macro_rules! create_utp_stream_pair {
             .expect("expected an incoming uTP stream");
 
         (incoming_stream, outgoing_stream)
+    }};
+}
+
+/// Create a new peer context instance.
+macro_rules! peer_context_pair {
+    ($torrent:expr) => {{
+        use crate::peer::extension::PeerExtension;
+        use crate::InnerTorrent;
+
+        let torrent: &InnerTorrent = $torrent;
+        let extensions: Vec<PeerExtension> = torrent.extensions().await.unwrap();
+
+        peer_context_pair!(
+            $torrent,
+            $torrent,
+            extensions.as_slice(),
+            extensions.as_slice()
+        )
+    }};
+    ($incoming:expr, $outgoing:expr, $incoming_extensions:expr, $outgoing_Extensions:expr) => {{
+        use crate::peer::extension::PeerExtension;
+        use crate::peer::peer_connection::PeerConnection;
+        use crate::peer::ConnectionDirection;
+        use crate::peer::Metrics;
+        use crate::peer::PeerContext;
+        use crate::peer::PeerId;
+        use crate::InnerTorrent;
+        use std::net::{Ipv4Addr, SocketAddr};
+        use std::time::Duration;
+        use tokio::net::TcpListener;
+        use tokio::net::TcpStream;
+        use tokio::sync::oneshot;
+
+        let incoming_torrent: &InnerTorrent = $incoming;
+        let incoming_extensions: &[PeerExtension] = $incoming_extensions;
+        let outgoing_torrent: &InnerTorrent = $outgoing;
+        let outgoing_extensions: &[PeerExtension] = $outgoing_Extensions;
+
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+
+        // wait for the incoming connection on a separate task
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let _ = tx.send(listener.accept().await.unwrap());
+        });
+
+        // define the shared peer data
+        let incoming_peer_id = PeerId::new();
+        let outgoing_peer_id = PeerId::new();
+        let incoming_metrics = Metrics::new();
+        let outgoing_metrics = Metrics::new();
+
+        let outgoing = TcpStream::connect(listener_addr).await.unwrap();
+        let (incoming, incoming_addr) = rx.await.unwrap();
+        (
+            PeerContext::new(
+                incoming_peer_id,
+                incoming_addr,
+                PeerConnection::new_tcp(
+                    incoming_peer_id,
+                    incoming_addr,
+                    incoming,
+                    incoming_metrics.clone(),
+                ),
+                ConnectionDirection::Inbound,
+                incoming_torrent.clone(),
+                incoming_torrent.data_pool().await.unwrap(),
+                incoming_torrent.protocol_extensions().await.unwrap(),
+                incoming_extensions,
+                incoming_metrics,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("expected a peer context for the incoming connection"),
+            PeerContext::new(
+                outgoing_peer_id,
+                listener_addr,
+                PeerConnection::new_tcp(
+                    outgoing_peer_id,
+                    listener_addr,
+                    outgoing,
+                    outgoing_metrics.clone(),
+                ),
+                ConnectionDirection::Outbound,
+                outgoing_torrent.clone(),
+                outgoing_torrent.data_pool().await.unwrap(),
+                outgoing_torrent.protocol_extensions().await.unwrap(),
+                outgoing_extensions,
+                outgoing_metrics,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("expected a peer context for the outgoing connection"),
+        )
     }};
 }

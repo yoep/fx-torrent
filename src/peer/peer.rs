@@ -42,6 +42,15 @@ impl Peer {
         }
     }
 
+    /// Returns the metrics of the peer.
+    pub fn metrics(&self) -> &Metrics {
+        match self {
+            Peer::BitTorrent(peer) => peer.metrics(),
+            Peer::Http(peer) => peer.metrics(),
+            Peer::Other(peer) => peer.metrics(),
+        }
+    }
+
     /// Returns the client information of the peer.
     pub fn client_info(&self) -> &PeerClientInfo {
         match self {
@@ -58,15 +67,6 @@ impl Peer {
             Peer::BitTorrent(peer) => peer.remote_piece_bitfield().await,
             Peer::Http(peer) => peer.remote_piece_bitfield().await,
             Peer::Other(peer) => peer.remote_piece_bitfield().await,
-        }
-    }
-
-    /// Returns the metrics of the peer.
-    pub fn metrics(&self) -> &Metrics {
-        match self {
-            Peer::BitTorrent(peer) => peer.metrics(),
-            Peer::Http(peer) => peer.metrics(),
-            Peer::Other(peer) => peer.metrics(),
         }
     }
 

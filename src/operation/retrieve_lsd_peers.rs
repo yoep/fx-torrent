@@ -88,7 +88,7 @@ mod tests {
         let lsd = LocalServiceDiscovery::new(Ipv4Addr::LOCALHOST.into())
             .await
             .unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),

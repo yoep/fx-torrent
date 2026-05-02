@@ -13,9 +13,9 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::select;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
+use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
 
 /// The unique handle of an uTP peer discovery resource instance.
@@ -204,7 +204,13 @@ impl InnerUtpPeerDiscovery {
         ];
 
         for addr in addrs {
-            match UtpSocket::new(addr, timeout, vec![]).await {
+            let socket = select! {
+                _ = time::sleep(timeout) => return Err(Error::Io(
+                    io::Error::new(io::ErrorKind::TimedOut, "timed out while binding uTP socket"),
+                )),
+                result = UtpSocket::bind(addr, vec![]) => result,
+            };
+            match socket {
                 Ok(socket) => {
                     trace!("Created uTP listener on {}", addr);
                     port = socket.addr().port();
@@ -258,7 +264,7 @@ mod tests {
             .await
             .expect("expected a new utp peer listener");
         let port = listener.addr().port();
-        let torrent = create_torrent!(
+        let torrent = torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),

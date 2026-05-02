@@ -36,3 +36,56 @@ impl DontHaveExtension {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::operation::TorrentCreatePiecesAndFilesOperation;
+    use crate::storage::MemoryStorage;
+    use crate::tests::helpers::wait_for_torrent_pieces;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_on_message() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let torrent = torrent!(
+            "ubuntu-udp.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())],
+            vec![],
+            |_| Box::new(MemoryStorage::new()),
+            None
+        );
+        let (mut incoming, _outgoing) = peer_context_pair!(&torrent.inner);
+        let extension = DontHaveExtension::new();
+
+        // wait for the pieces to be created
+        wait_for_torrent_pieces(&torrent).await;
+
+        // set the remote peer to have piece 1
+        incoming.set_remote_has_piece(1, true).await;
+        assert_eq!(
+            true,
+            incoming.remote_piece_bitfield().get(1).unwrap_or_default(),
+            "expected the remote peer to have piece 1"
+        );
+
+        // inform the peer that the remote no longer has piece 1
+        let bytes = 1u32.to_be_bytes();
+        extension
+            .on_message(bytes.as_slice(), &mut incoming)
+            .await
+            .expect("expected the message to be processed");
+
+        assert_eq!(
+            false,
+            incoming.remote_piece_bitfield().get(1).unwrap_or_default(),
+            "expected the remote peer to not have piece 1"
+        );
+    }
+}

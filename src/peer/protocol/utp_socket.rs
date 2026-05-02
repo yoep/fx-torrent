@@ -1,5 +1,7 @@
-use crate::peer::protocol::{Packet, StateType};
-use crate::peer::protocol::{UtpStream, UtpStreamContext, MAX_PACKET_SIZE, UTP_HEADER_SIZE};
+use crate::peer::protocol::{
+    Packet, StateType, UtpPacketCapture, UtpSelectiveAck, UtpStream, UtpStreamContext,
+};
+use crate::peer::protocol::{MAX_PACKET_SIZE, UTP_HEADER_SIZE};
 use crate::peer::{Error, Result};
 use async_trait::async_trait;
 use derive_more::Display;
@@ -8,14 +10,13 @@ use log::{debug, trace, warn};
 use rand::{rng, RngExt};
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::net::UdpSocket;
+use std::time::Instant;
+use tokio::net::{ToSocketAddrs, UdpSocket};
+use tokio::select;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{Mutex, RwLock};
-use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
 
 /// The UTP socket identifier.
@@ -25,12 +26,60 @@ pub type ConnectionId = u16;
 /// The packet sequence number.
 pub type SequenceNumber = u16;
 /// The uTP socket extensions.
-pub type UtpSocketExtensions = Vec<Box<dyn UtpSocketExtension>>;
+pub type UtpSocketExtensions = Vec<UtpSocketExtension>;
+
+/// The uTorrent transport protocol socket extension.
+#[derive(Debug)]
+pub enum UtpSocketExtension {
+    SelectiveAck(UtpSelectiveAck),
+    Capture(UtpPacketCapture),
+    Other(Box<dyn UtpSocketExtensionAddon>),
+}
+
+impl UtpSocketExtension {
+    /// Handle an incoming packet for the uTP extension.
+    pub async fn incoming(&self, packet: &mut Packet, stream: &UtpStreamContext) {
+        match self {
+            Self::SelectiveAck(extension) => extension.incoming(packet, stream).await,
+            Self::Capture(extension) => extension.incoming(packet).await,
+            Self::Other(extension) => extension.incoming(packet, stream).await,
+        }
+    }
+
+    /// Handle an outgoing packet for the uTP extension.
+    pub async fn outgoing(&self, packet: &mut Packet, stream: &UtpStreamContext) {
+        match self {
+            Self::SelectiveAck(_) => {
+                // TODO: implement
+            }
+            Self::Capture(extension) => extension.outgoing(packet).await,
+            Self::Other(extension) => extension.outgoing(packet, stream).await,
+        }
+    }
+}
+
+impl From<UtpSelectiveAck> for UtpSocketExtension {
+    fn from(extension: UtpSelectiveAck) -> Self {
+        Self::SelectiveAck(extension)
+    }
+}
+
+impl From<UtpPacketCapture> for UtpSocketExtension {
+    fn from(extension: UtpPacketCapture) -> Self {
+        Self::Capture(extension)
+    }
+}
+
+impl From<Box<dyn UtpSocketExtensionAddon>> for UtpSocketExtension {
+    fn from(extension: Box<dyn UtpSocketExtensionAddon>) -> Self {
+        Self::Other(extension)
+    }
+}
 
 /// The uTorrent transport protocol socket extension.
 /// An extension can be used to add additional functionality to the uTP socket packets.
 #[async_trait]
-pub trait UtpSocketExtension: Debug + Send + Sync {
+pub trait UtpSocketExtensionAddon: Debug + Send + Sync {
     /// Handle an incoming uTP packet for the given stream.
     ///
     /// # Arguments
@@ -85,7 +134,7 @@ pub struct UtpSocket {
 }
 
 impl UtpSocket {
-    /// Create a new UTP socket on the given address.
+    /// Try to bind a new uTP socket on the `addr` provided.
     ///
     /// The address should either be a [std::net::Ipv4Addr] or [std::net::Ipv6Addr] local machine address, and never an external address.
     /// If the socket port is no longer available, the UTP socket cannot be created and an error will be returned.
@@ -93,13 +142,8 @@ impl UtpSocket {
     /// # Arguments
     ///
     /// * `addr` - The socket address to bind the uTP socket to.
-    /// * `timeout` - The connection timeout for the uTP socket.
     /// * `extensions` - The uTP socket extensions to use.
-    pub async fn new(
-        addr: SocketAddr,
-        timeout: Duration,
-        extensions: UtpSocketExtensions,
-    ) -> Result<Self> {
+    pub async fn bind<A: ToSocketAddrs>(addr: A, extensions: UtpSocketExtensions) -> Result<Self> {
         let socket = UdpSocket::bind(addr).await?;
         let addr = socket.local_addr()?; // get the bound socket address in case port was 0
         let (incoming_stream_sender, incoming_stream_receiver) = unbounded_channel();
@@ -116,7 +160,6 @@ impl UtpSocket {
             incoming_stream_sender,
             incoming_stream_receiver: Mutex::new(incoming_stream_receiver),
             extensions: Arc::new(extensions),
-            timeout,
             cancellation_token,
         });
 
@@ -209,8 +252,6 @@ pub(crate) struct UtpSocketContext {
     incoming_stream_receiver: Mutex<UnboundedReceiver<UtpStream>>,
     /// The uTP extensions of the socket.
     extensions: Arc<UtpSocketExtensions>,
-    /// The connection timeout
-    timeout: Duration,
     /// The termination cancellation token
     cancellation_token: CancellationToken,
 }
@@ -227,7 +268,7 @@ impl UtpSocketContext {
                     match result {
                         Ok((0, _)) => break, // socket closed
                         Ok((bytes_read, addr)) => {
-                            self.on_packet_received(&buffer[..bytes_read], addr, context).await;
+                            self.on_packet_bytes_received(&buffer[..bytes_read], addr, context).await;
                         },
                         Err(e) => {
                             warn!("Utp socket {} reader failed to receive packet, {}", self, e);
@@ -254,26 +295,27 @@ impl UtpSocketContext {
     pub async fn send(&self, packet: Packet, addr: SocketAddr) -> Result<()> {
         // convert the packet into the payload bytes
         let bytes: Vec<u8> = packet.as_bytes()?;
-        let bytes_len = bytes.len();
 
         // verify the packet size
-        if bytes_len > MAX_PACKET_SIZE {
+        if bytes.len() > MAX_PACKET_SIZE {
             return Err(Error::TooLarge(MAX_PACKET_SIZE));
         }
 
         let start_time = Instant::now();
-        select! {
-            _ = time::sleep(self.timeout) => Err(Error::Io(io::Error::new(io::ErrorKind::TimedOut, format!("connection timed out after {}s", self.timeout.as_secs())))),
-            result = self.socket.send_to(&bytes, addr) => {
-                match result {
-                    Ok(_) => {
-                        let elapsed = start_time.elapsed();
-                        trace!("Utp socket {} ({}) sent {} bytes in {}.{:03}ms", self, addr, bytes_len, elapsed.as_millis(), elapsed.subsec_micros() % 1000);
-                        Ok(())
-                    },
-                    Err(e) => Err(Error::Io(e)),
-                }
+        match self.socket.send_to(&bytes, addr).await {
+            Ok(len) => {
+                let elapsed = start_time.elapsed();
+                trace!(
+                    "Utp socket {} ({}) sent {} bytes in {}.{:03}ms",
+                    self,
+                    addr,
+                    len,
+                    elapsed.as_millis(),
+                    elapsed.subsec_micros() % 1000
+                );
+                Ok(())
             }
+            Err(e) => Err(Error::Io(e)),
         }
     }
 
@@ -284,8 +326,8 @@ impl UtpSocketContext {
         connections.remove(&key);
     }
 
-    /// Handle a received packet payload from the socket.
-    async fn on_packet_received(
+    /// Process a received packet payload from the socket.
+    async fn on_packet_bytes_received(
         &self,
         packet_bytes: &[u8],
         addr: SocketAddr,
@@ -293,7 +335,7 @@ impl UtpSocketContext {
     ) {
         if packet_bytes.len() < UTP_HEADER_SIZE {
             trace!(
-                "Utp socket {} incoming packet from {} too small",
+                "Utp socket {} incoming packet from {} is too small, dropping it",
                 self,
                 addr
             );
@@ -312,9 +354,9 @@ impl UtpSocketContext {
                 );
                 // check if the packet is a new incoming connection
                 if packet.state_type == StateType::Syn {
-                    self.handle_incoming_connection(packet, addr, context).await;
+                    self.on_incoming_connection(packet, addr, context).await;
                 } else {
-                    self.handle_received_packet(packet).await;
+                    self.on_received_packet(packet).await;
                 }
             }
             Err(e) => warn!(
@@ -324,9 +366,9 @@ impl UtpSocketContext {
         }
     }
 
-    /// Handle a received packet from a remote peer.
-    /// The packet will be sent to the relevant uTP connection if found, else it will be dropped.
-    async fn handle_received_packet(&self, packet: Packet) {
+    /// Process a received packet from a remote peer.
+    /// The packet will be sent to the relevant uTP stream if found, else it will be dropped.
+    async fn on_received_packet(&self, packet: Packet) {
         let mut key_to_remove: Option<UtpConnId> = None;
 
         {
@@ -361,7 +403,7 @@ impl UtpSocketContext {
     }
 
     /// Try to handle a new incoming uTP connection.
-    async fn handle_incoming_connection(
+    async fn on_incoming_connection(
         &self,
         packet: Packet,
         addr: SocketAddr,
@@ -402,7 +444,7 @@ impl UtpSocketContext {
 
     /// Get the extension instances of the uTP socket.
     /// These will be applied within an uTP stream for every received- and sent packet.
-    fn extensions(&self) -> Arc<Vec<Box<dyn UtpSocketExtension>>> {
+    fn extensions(&self) -> Arc<Vec<UtpSocketExtension>> {
         self.extensions.clone()
     }
 }
@@ -501,7 +543,7 @@ mod tests {
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
 
         // bind to an ephemeral port on localhost
-        let socket = UtpSocket::new(addr, Duration::from_secs(1), vec![])
+        let socket = UtpSocket::bind(addr, vec![])
             .await
             .expect("expected an uTP socket");
 

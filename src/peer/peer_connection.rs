@@ -407,8 +407,8 @@ where
 mod tests {
     use super::*;
 
-    use crate::peer::protocol::tests::UtpPacketCaptureExtension;
     use crate::peer::protocol::Piece;
+    use crate::peer::protocol::UtpPacketCapture;
     use crate::peer::ProtocolExtensionFlags;
     use crate::InfoHash;
     use std::net::Ipv4Addr;
@@ -426,11 +426,11 @@ mod tests {
             let info_hash = InfoHash::from_str(hash).unwrap();
             let peer_id = PeerId::new();
             let protocol_extension_flags = ProtocolExtensionFlags::LTEP;
-            let incoming_capture = UtpPacketCaptureExtension::new();
-            let outgoing_capture = UtpPacketCaptureExtension::new();
+            let incoming_capture = UtpPacketCapture::new();
+            let outgoing_capture = UtpPacketCapture::new();
             let (incoming_socket, outgoing_socket) = create_utp_socket_pair!(
-                vec![Box::new(incoming_capture.clone())],
-                vec![Box::new(outgoing_capture.clone())]
+                vec![incoming_capture.clone().into()],
+                vec![outgoing_capture.clone().into()]
             );
             let (incoming_stream, mut outgoing_stream) =
                 create_utp_stream_pair!(&incoming_socket, &outgoing_socket);

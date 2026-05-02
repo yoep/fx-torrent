@@ -344,7 +344,7 @@ mod tests {
         let expected_result =
             Url::parse("https://mirror.com/pub/debian-11.6.0-amd64-netinst.iso/README%25201.md")
                 .unwrap();
-        let torrent = create_torrent!(
+        let torrent = torrent!(
             "debian.torrent",
             temp_path,
             TorrentFlags::none(),

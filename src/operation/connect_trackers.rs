@@ -220,7 +220,7 @@ mod tests {
                 .unwrap();
         let server_uri = percent_encode(server.url().as_str().as_bytes(), URL_ENCODE_RESERVED);
         let uri = format!("magnet:?xt=urn:btih:2C6B6858D61DA9543D4231A71DB4B1C9264B0685&dn=Ubuntu%2022.04%20LTS&tr={}", server_uri);
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             uri.as_str(),
             temp_path,
             TorrentFlags::none(),
@@ -269,7 +269,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let uri = "debian-udp.torrent";
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             uri,
             temp_path,
             TorrentFlags::none(),

@@ -318,11 +318,6 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
             .take()
             .unwrap_or_else(TorrentRequest::default_operations);
         let trackers = std::mem::take(&mut request.trackers);
-        if trackers.is_empty() {
-            return Err(TorrentError::InvalidRequest(
-                "at least 1 tracker is required".to_string(),
-            ));
-        }
 
         Ok(Self::new(
             metadata,
@@ -1028,6 +1023,11 @@ impl InnerTorrent {
     /// Returns the unique handle of the torrent.
     pub fn handle(&self) -> TorrentHandle {
         self.handle
+    }
+
+    /// Returns the channel sender for sending commands to the torrent.
+    pub fn sender(&self) -> &ChannelSender<TorrentCommand> {
+        &self.sender
     }
 
     /// Returns `true` if the torrent is still valid, else `false` if it has been closed.
@@ -3455,7 +3455,7 @@ mod tests {
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
             let (tx, rx) = oneshot::channel();
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -3503,7 +3503,7 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -3526,7 +3526,7 @@ mod tests {
             let temp_path = temp_dir.path().to_str().unwrap();
             let tracker_server = TrackerServer::new().await.unwrap();
             let tracker_manager = TrackerClient::new(Duration::from_secs(1));
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -3591,7 +3591,7 @@ mod tests {
             let filename = "debian-udp.torrent";
             let torrent_info_data = read_test_file_to_bytes(filename);
             let torrent_info = TorrentMetadata::try_from(torrent_info_data.as_slice()).unwrap();
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 filename,
                 temp_path,
                 TorrentFlags::none(),
@@ -3619,7 +3619,7 @@ mod tests {
                 TorrentMetadata::try_from(read_test_file_to_bytes(filename).as_slice()).unwrap();
             let magnet_uri = Magnet::try_from(&info).unwrap().to_string();
             let (tx, mut rx) = unbounded_channel();
-            let source_torrent = create_torrent!(
+            let source_torrent = torrent!(
                 filename,
                 temp_path,
                 TorrentFlags::none(),
@@ -3627,7 +3627,7 @@ mod tests {
                 vec![],
                 vec![TcpPeerDiscovery::new().await.unwrap().into()]
             );
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 magnet_uri.as_str(),
                 temp_path,
                 TorrentFlags::Metadata,
@@ -3690,7 +3690,7 @@ mod tests {
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
             let info_hash = InfoHash::from_str("EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -3712,7 +3712,7 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -3747,7 +3747,7 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -3779,7 +3779,7 @@ mod tests {
                 begin: 16384,
                 length: 16384,
             };
-            let (mut context, _) = create_torrent_context!(
+            let (mut context, _) = torrent_context!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -3810,7 +3810,7 @@ mod tests {
             let temp_path = temp_dir.path().to_str().unwrap();
             let expected_result = 75;
             let mut operation = TorrentCreatePiecesAndFilesOperation::new();
-            let (mut context, _) = create_torrent_context!(
+            let (mut context, _) = torrent_context!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -3849,7 +3849,7 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -3884,7 +3884,7 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -3921,7 +3921,7 @@ mod tests {
         );
         let expected_file_data = read_test_file_to_bytes("piece-1_30.iso");
         let (tx_state, mut rx_state) = unbounded_channel();
-        let source_torrent = create_torrent!(
+        let source_torrent = torrent!(
             "debian-udp.torrent",
             temp_path_source,
             TorrentFlags::UploadMode | TorrentFlags::SeedMode,
@@ -3932,7 +3932,7 @@ mod tests {
             ],
             vec![TcpPeerDiscovery::new().await.unwrap().into()]
         );
-        let target_torrent = create_torrent!(
+        let target_torrent = torrent!(
             "debian-udp.torrent",
             temp_path_target,
             TorrentFlags::DownloadMode | TorrentFlags::Paused,
@@ -4059,7 +4059,7 @@ mod tests {
             "piece-1_30.iso",
             Some("debian-12.4.0-amd64-DVD-1.iso"),
         );
-        let torrent = create_torrent!(
+        let torrent = torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
@@ -4108,7 +4108,7 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
@@ -4155,7 +4155,7 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::UploadMode,
@@ -4189,7 +4189,7 @@ mod tests {
         let temp_path = temp_dir.path().to_str().unwrap();
         let pieces_len = 100;
         let piece_size = 128;
-        let torrent = create_torrent!(
+        let torrent = torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
@@ -4264,7 +4264,7 @@ mod tests {
             0,
             1024,
         )];
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
@@ -4294,7 +4294,7 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
@@ -4352,7 +4352,7 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::DownloadMode,
@@ -4422,7 +4422,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let (tx, mut rx) = unbounded_channel();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
@@ -4471,7 +4471,7 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -4558,7 +4558,7 @@ mod tests {
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
             let mut operation = TorrentCreatePiecesAndFilesOperation::new();
-            let (mut context, _) = create_torrent_context!(
+            let (mut context, _) = torrent_context!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -4590,7 +4590,7 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 "multifile.torrent",
                 temp_path,
                 TorrentFlags::none(),

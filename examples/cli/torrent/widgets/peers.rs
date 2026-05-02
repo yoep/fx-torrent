@@ -1,7 +1,7 @@
 use crate::widgets::print_string_len;
 use fx_callback::{Callback, Subscription};
 use fx_torrent::format_bytes;
-use fx_torrent::peer::{Peer, PeerClientInfo, PeerEvent, PeerHandle, PeerState, TorrentPeer};
+use fx_torrent::peer::{Peer, PeerClientInfo, PeerEvent, PeerHandle, PeerState};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::{Color, Line, Style, Widget};

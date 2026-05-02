@@ -136,7 +136,7 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::Paused,
@@ -165,14 +165,14 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let (tx, rx) = oneshot::channel();
-        let torrent = create_torrent!(
+        let torrent = torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![]
         );
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
@@ -180,7 +180,7 @@ mod tests {
             vec![],
             None
         );
-        let (source, _target) = create_tcp_peer_pair!(&torrent);
+        let (source, _target) = tcp_peer_pair!(&torrent);
         let mut operation = TorrentStatsOperation::new();
 
         // initialize the operation

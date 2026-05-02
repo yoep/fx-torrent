@@ -156,7 +156,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let uri = "debian-udp.torrent";
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             uri,
             temp_path,
             TorrentFlags::none(),
@@ -189,7 +189,7 @@ mod tests {
         let temp_path = temp_dir.path().to_str().unwrap();
         let uri = "debian-udp.torrent";
         let server = TrackerServer::new().await.unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             uri,
             temp_path,
             TorrentFlags::none(),

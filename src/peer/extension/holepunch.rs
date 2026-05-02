@@ -1,8 +1,9 @@
 use crate::peer::extension::{Error, ExtensionNumber, Result};
 use crate::peer::protocol::Message;
-use crate::peer::PeerContext;
+use crate::peer::{Peer, PeerContext};
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::{io, result};
 
 /// The BEP55 holepunch extension message.
@@ -158,7 +159,24 @@ impl HolepunchExtension {
                         .await?;
                 }
             }
-            _ => {}
+            MessageType::Connect => {
+                if let Err(e) = self.on_connect(&message, peer).await {
+                    debug!(
+                        "Peer {} {} extension failed to process connect, {}",
+                        peer,
+                        Self::NAME,
+                        e
+                    );
+                }
+            }
+            MessageType::Error => {
+                debug!(
+                    "Peer {} {} extension failed, {:?}",
+                    peer,
+                    Self::NAME,
+                    message.err_code
+                );
+            }
         }
         Ok(())
     }
@@ -169,12 +187,67 @@ impl HolepunchExtension {
         target_addr: SocketAddr,
         peer: &PeerContext,
     ) -> result::Result<(), ErrorCode> {
+        // try to find the target peer in the torrent
         let target_peer = match peer.torrent().peer_by_addr(&target_addr).await {
             None => return Err(ErrorCode::NotConnected),
-            Some(peer) => peer,
+            Some(Peer::BitTorrent(peer)) => peer,
+            _ => return Err(ErrorCode::NoSupport),
         };
         // check if the target peer supports the HolePunch extension
+        let initiating_extension_number = match peer.find_remote_extension_number(Self::NAME) {
+            None => return Err(ErrorCode::NoSupport),
+            Some(e) => e,
+        };
+        let target_extension_number = match target_peer.remote_extension_number(Self::NAME).await {
+            None => return Err(ErrorCode::NoSupport),
+            Some(e) => e,
+        };
 
+        // send connect to the target peer with the remote peer addr
+        let connect_message = Self::create_connect_message(peer.addr())?;
+        if let Err(e) = target_peer
+            .send(Message::ExtendedPayload(
+                target_extension_number,
+                connect_message,
+            ))
+            .await
+        {
+            debug!(
+                "Peer {} {} extension failed to send message, {}",
+                target_peer,
+                Self::NAME,
+                e
+            );
+            return Err(ErrorCode::NotConnected);
+        }
+
+        // send a connect to the initiating peer
+        let connect_message = Self::create_connect_message(target_peer.addr())?;
+        if let Err(e) = peer
+            .send(Message::ExtendedPayload(
+                initiating_extension_number,
+                connect_message,
+            ))
+            .await
+        {
+            debug!(
+                "Peer {} {} extension failed to send message, {}",
+                peer,
+                Self::NAME,
+                e
+            );
+            return Err(ErrorCode::NotConnected);
+        }
+
+        Ok(())
+    }
+
+    /// Try to process a received [MessageType::Connect] message.
+    async fn on_connect(&self, message: &HolepunchMessage, peer: &PeerContext) -> Result<()> {
+        let addr = message.addr()?;
+        if let Err(e) = peer.torrent().add_peer(addr).await {
+            debug!("Peer {} failed to add target peer, {}", peer, e);
+        }
         Ok(())
     }
 
@@ -197,6 +270,33 @@ impl HolepunchExtension {
             .await
             .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))
     }
+
+    fn create_connect_message(addr: &SocketAddr) -> result::Result<Vec<u8>, ErrorCode> {
+        let addr_type = if addr.is_ipv4() {
+            AddrType::Ipv4
+        } else {
+            AddrType::Ipv6
+        };
+
+        let message = HolepunchMessage {
+            message_type: MessageType::Connect,
+            addr_type,
+            addr: match addr.ip() {
+                IpAddr::V4(ip) => ip.octets().to_vec(),
+                IpAddr::V6(ip) => ip.octets().to_vec(),
+            },
+            port: addr.port(),
+            err_code: None,
+        };
+        serde_bencode::to_bytes(&message).map_err(|e| {
+            warn!(
+                "{} extension failed to serialize message, {}",
+                Self::NAME,
+                e
+            );
+            ErrorCode::NoSupport
+        })
+    }
 }
 
 #[cfg(test)]
@@ -205,21 +305,151 @@ mod tests {
 
     mod handle {
         use super::*;
+        use crate::operation::TorrentConnectPeersOperation;
+        use crate::peer::{PeerId, ProtocolExtensionFlags, UtpPeerDiscovery};
+        use crate::storage::MemoryStorage;
+        use crate::{Torrent, TorrentCommand, TorrentConfig};
+        use std::time::Duration;
+        use tempfile::tempdir;
 
         #[tokio::test]
         async fn test_on_rendezvous() {
-            let message = HolepunchMessage {
-                message_type: MessageType::Rendezvous,
-                addr_type: AddrType::Ipv4,
-                addr: vec![],
-                port: 0,
-                err_code: None,
-            };
-            let extension = HolepunchExtension::new();
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let initiating_torrent = Torrent::request()
+                .metadata(metadata!("debian-udp.torrent"))
+                .config(TorrentConfig::builder().path(temp_path).build())
+                .protocol_extensions(ProtocolExtensionFlags::LTEP)
+                .extension(|| HolepunchExtension::new().into())
+                .operations(vec![Box::new(TorrentConnectPeersOperation::new(false))])
+                .peer_discovery(UtpPeerDiscovery::new().await.unwrap().into())
+                .storage(|_| Box::new(MemoryStorage::new()))
+                .build()
+                .expect("expected the initiating torrent to be created");
+            let relay_discovery = UtpPeerDiscovery::new().await.unwrap();
+            let relay_torrent = torrent!(
+                "debian-udp.torrent",
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![],
+                vec![relay_discovery.clone().into()],
+                |_| Box::new(MemoryStorage::new()),
+                None
+            );
 
-            let payload =
-                serde_bencode::to_bytes(&message).expect("expected a valid bencoded payload");
-            // extension.handle(payload.as_slice()).await.expect("expected the message to have been handled");
+            // connect the initiating torrent to the relay torrent
+            let (initiating_peer, relay_peer1, _in_socket, _out_socket) = utp_peer_pair!(
+                &initiating_torrent,
+                &relay_torrent,
+                ProtocolExtensionFlags::LTEP
+            );
+            initiating_torrent
+                .inner
+                .sender()
+                .fire_and_forget(TorrentCommand::PeerConnected {
+                    peer: relay_peer1.into(),
+                })
+                .await;
+            assert_timeout!(
+                Duration::from_millis(250),
+                initiating_torrent.active_peer_connections().await == 1,
+                "expected the initiating torrent to have 1 active peer connection"
+            );
+            assert_timeout!(
+                Duration::from_millis(550),
+                initiating_peer
+                    .remote_peer()
+                    .await
+                    .map(|e| e.extended_handshake)
+                    .unwrap_or_default(),
+                "expected the extended handshake to have been exchanged"
+            );
+
+            // create the target torrent
+            let target_torrent = torrent!(
+                "debian-udp.torrent",
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![Box::new(TorrentConnectPeersOperation::new(false)),],
+                vec![UtpPeerDiscovery::new().await.unwrap().into()],
+                |_| Box::new(MemoryStorage::new()),
+                None
+            );
+            let target_addr = SocketAddr::from((
+                Ipv4Addr::LOCALHOST,
+                target_torrent
+                    .peer_port()
+                    .await
+                    .expect("expected a target torrent peer port"),
+            ));
+
+            // connect the relay torrent to the target torrent
+            let relay_data_pool = relay_torrent.inner.data_pool().await.unwrap();
+            let peer = relay_discovery
+                .dial(
+                    PeerId::new(),
+                    target_addr,
+                    relay_torrent.inner.clone(),
+                    relay_data_pool,
+                    ProtocolExtensionFlags::LTEP,
+                    Duration::from_millis(250),
+                )
+                .await
+                .expect("expected the target peer to be dialed");
+            relay_torrent
+                .inner
+                .sender()
+                .fire_and_forget(TorrentCommand::PeerConnected { peer: peer.clone() })
+                .await;
+            assert_timeout!(
+                Duration::from_millis(250),
+                relay_torrent.active_peer_connections().await == 1,
+                "expected the relay torrent to have 1 active peer connection"
+            );
+            let peer = match peer {
+                Peer::BitTorrent(e) => e,
+                _ => unreachable!(),
+            };
+            assert_timeout!(
+                Duration::from_millis(550),
+                peer.remote_peer()
+                    .await
+                    .map(|e| e.extended_handshake)
+                    .unwrap_or_default(),
+                "expected the extended handshake to have been exchanged"
+            );
+
+            // send the rendezvous message from the initiating peer to the relay peer
+            let extension_number = initiating_peer
+                .remote_extension_number(HolepunchExtension::NAME)
+                .await
+                .expect("expected the HolePunch extension to have been found");
+            let payload = serde_bencode::to_bytes(&HolepunchMessage {
+                message_type: MessageType::Rendezvous,
+                addr_type: match target_addr.ip() {
+                    IpAddr::V4(_) => AddrType::Ipv4,
+                    IpAddr::V6(_) => AddrType::Ipv6,
+                },
+                addr: match target_addr.ip() {
+                    IpAddr::V4(ip) => ip.octets().to_vec(),
+                    IpAddr::V6(ip) => ip.octets().to_vec(),
+                },
+                port: target_addr.port(),
+                err_code: None,
+            })
+            .unwrap();
+            initiating_peer
+                .send(Message::ExtendedPayload(extension_number, payload))
+                .await
+                .unwrap();
+            assert_timeout!(
+                Duration::from_secs(3),
+                initiating_torrent.active_peer_connections().await == 2,
+                "expected the HolePunch to succeed"
+            );
         }
     }
 }

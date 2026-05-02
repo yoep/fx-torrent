@@ -1,16 +1,14 @@
 use crate::channel::{ChannelReceiver, ChannelSender, Reply};
 use crate::peer::protocol::{
-    CloseReason, Extension, Packet, SequenceNumber, StateType, UtpConnId, UtpMessage,
-    UtpSocketContext, UtpSocketExtension, UtpSocketExtensions, UtpSocketId,
-    MAX_PACKET_PAYLOAD_SIZE,
+    CloseReason, Packet, SequenceNumber, StateType, UtpConnId, UtpMessage, UtpSocketContext,
+    UtpSocketExtension, UtpSocketExtensions, UtpSocketId, MAX_PACKET_PAYLOAD_SIZE,
 };
 use crate::peer::{Error, Result};
-use async_trait::async_trait;
 use derive_more::Display;
 use futures::task::AtomicWaker;
 use futures::Future;
 use itertools::Itertools;
-use log::{debug, trace, warn};
+use log::{debug, trace};
 use rand::random;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -473,7 +471,7 @@ impl UtpStreamContext {
     }
 
     /// Get the extensions of the uTP stream.
-    fn extensions(&self) -> &[Box<dyn UtpSocketExtension>] {
+    fn extensions(&self) -> &[UtpSocketExtension] {
         &self.extensions
     }
 
@@ -1098,31 +1096,6 @@ struct InnerReadBuffer {
     waker: AtomicWaker,
 }
 
-/// The selective acks extension for the uTP socket connection.
-/// This allows non-sequentially ack packets.
-#[derive(Debug)]
-pub struct UtpSelectiveAckExtension;
-
-#[async_trait]
-impl UtpSocketExtension for UtpSelectiveAckExtension {
-    async fn incoming(&self, packet: &mut Packet, stream: &UtpStreamContext) {
-        match packet.extension {
-            Extension::SelectiveAck { .. } => {
-                // TODO
-                warn!(
-                    "Utp stream {} selective acks extensions not yet implemented",
-                    stream
-                );
-            }
-            _ => {}
-        }
-    }
-
-    async fn outgoing(&self, _packet: &mut Packet, _stream: &UtpStreamContext) {
-        // TODO
-    }
-}
-
 #[derive(Debug)]
 struct PendingPacket {
     packet: Packet,
@@ -1243,7 +1216,9 @@ fn is_less_than(a: u16, b: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer::protocol::tests::UtpPacketCaptureExtension;
+
+    use crate::peer::protocol::Extension;
+    use crate::peer::protocol::UtpPacketCapture;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -1254,7 +1229,7 @@ mod tests {
         let (_sender, receiver) = unbounded_channel();
         let socket = create_utp_socket!();
         let context = socket.context();
-        let capture = UtpPacketCaptureExtension::new();
+        let capture = UtpPacketCapture::new();
 
         let stream = UtpStream::new_incoming(
             UtpConnId::new(),
@@ -1262,7 +1237,7 @@ mod tests {
             context.clone(),
             initial_sequence_number,
             receiver,
-            Arc::new(vec![Box::new(capture.clone())]),
+            Arc::new(vec![capture.clone().into()]),
         )
         .await
         .expect("expected an uTP stream to have been created");
@@ -1317,14 +1292,14 @@ mod tests {
         let (sender, receiver) = unbounded_channel();
         let socket = create_utp_socket!();
         let context = socket.context();
-        let capture = UtpPacketCaptureExtension::new();
+        let capture = UtpPacketCapture::new();
 
         let stream = UtpStream::new_outgoing(
             UtpConnId::new(),
             SocketAddr::from(socket.addr()),
             context.clone(),
             receiver,
-            Arc::new(vec![Box::new(capture.clone())]),
+            Arc::new(vec![capture.clone().into()]),
         )
         .await
         .expect("expected an uTP stream to have been created");
@@ -1395,7 +1370,7 @@ mod tests {
             context.clone(),
             expected_sequence_number,
             receiver,
-            Arc::new(vec![Box::new(UtpPacketCaptureExtension::new())]),
+            Arc::new(vec![UtpPacketCapture::new().into()]),
         )
         .await
         .expect("expected an uTP stream to have been created");
@@ -1425,11 +1400,11 @@ mod tests {
     async fn test_utp_stream_connection_pairing() {
         init_logger!();
         let expected_outgoing_syn_sequence_number = 1u16;
-        let incoming_capture = UtpPacketCaptureExtension::new();
-        let outgoing_capture = UtpPacketCaptureExtension::new();
+        let incoming_capture = UtpPacketCapture::new();
+        let outgoing_capture = UtpPacketCapture::new();
         let (incoming, outgoing) = create_utp_socket_pair!(
-            vec![Box::new(incoming_capture.clone())],
-            vec![Box::new(outgoing_capture.clone())]
+            vec![incoming_capture.clone().into()],
+            vec![outgoing_capture.clone().into()]
         );
         let (incoming_stream, outgoing_stream) = create_utp_stream_pair!(&incoming, &outgoing);
 
@@ -1502,11 +1477,11 @@ mod tests {
     async fn test_utp_stream_outgoing_write_incoming_read() {
         init_logger!();
         let expected_result = "Nullam varius felis in massa eleifend consectetur.";
-        let incoming_capture = UtpPacketCaptureExtension::new();
-        let outgoing_capture = UtpPacketCaptureExtension::new();
+        let incoming_capture = UtpPacketCapture::new();
+        let outgoing_capture = UtpPacketCapture::new();
         let (incoming, outgoing) = create_utp_socket_pair!(
-            vec![Box::new(incoming_capture.clone())],
-            vec![Box::new(outgoing_capture.clone())]
+            vec![incoming_capture.clone().into()],
+            vec![outgoing_capture.clone().into()]
         );
         let (mut incoming_stream, mut outgoing_stream) =
             create_utp_stream_pair!(&incoming, &outgoing);

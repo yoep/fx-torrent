@@ -142,7 +142,7 @@ mod tests {
         let temp_path = temp_dir.path().to_str().unwrap();
         let piece: PieceIndex = 0;
         let data = read_test_file_to_bytes("piece-1.iso");
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),

@@ -1,7 +1,7 @@
 use crate::channel::{ChannelReceiver, ChannelSender, Reply};
 use crate::merkle::LEAF_BLOCK_SIZE;
 use crate::metrics::Metric;
-use crate::peer::extension::{ExtensionName, ExtensionNumber, ExtensionRegistry, PeerExtension};
+use crate::peer::extension::{ExtensionNumber, ExtensionRegistry, PeerExtension};
 use crate::peer::peer_connection::PeerConnection;
 use crate::peer::protocol::{CloseReason, UtpStream};
 use crate::peer::protocol::{ExtendedHandshake, Handshake, HashRequest, Message, Piece, Request};
@@ -615,16 +615,35 @@ impl BitTorrentPeer {
     /// # Returns
     ///
     /// Returns true when the extension is supported, else false
-    pub async fn supports_extension(&self, extension_name: ExtensionName) -> bool {
+    pub async fn supports_extension<S: Into<String>>(&self, extension_name: S) -> bool {
         // both the remote peer and this peer should support the given extension name
         self.sender
             .send(|tx| PeerCommand::IsExtensionSupported {
-                name: extension_name,
+                name: extension_name.into(),
                 response: tx,
             })
             .await
             .await
             .unwrap_or_default()
+    }
+
+    /// Return the remote [ExtensionNumber] for the given extension name, if found.
+    /// Returns [None] when the extension is not supported by the remote peer.
+    ///
+    /// Related [BitTorrentPeer::supports_extension].
+    pub async fn remote_extension_number<S: Into<String>>(
+        &self,
+        extension_name: S,
+    ) -> Option<ExtensionNumber> {
+        self.sender
+            .send(|tx| PeerCommand::FindExtensionNumber {
+                name: extension_name.into(),
+                response: tx,
+            })
+            .await
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Returns the total number of pending requests to the remote peer.
@@ -645,8 +664,19 @@ impl BitTorrentPeer {
             .unwrap_or_default()
     }
 
+    /// Send the given message to the remote peer.
+    pub(crate) async fn send(&self, message: Message) -> Result<()> {
+        self.sender
+            .send(|tx| PeerCommand::SendMessage {
+                message,
+                response: tx,
+            })
+            .await
+            .await
+    }
+
     /// Close the peer connection.
-    pub async fn close(&self) {
+    pub(crate) async fn close(&self) {
         let _ = self
             .sender
             .send(|tx| PeerCommand::Close { response: tx })
@@ -666,60 +696,27 @@ impl BitTorrentPeer {
         timeout: Duration,
     ) -> Result<Self> {
         let (command_sender, command_receiver) = channel!(64);
-        let extensions = match torrent.extensions().await {
-            Ok(extensions) => extensions,
-            Err(e) => {
-                // if we receive an error while retrieving the extensions,
-                // the torrent is probably canceled
-                debug!(
-                    "Torrent {} failed to retrieve peer extensions, {}",
-                    torrent, e
-                );
-                return Err(Error::Closed);
-            }
-        };
-        let extension_registry = Self::create_extension_registry(&extensions);
-        let peer_handle = PeerHandle::new();
-        let total_pieces = data_pool.num_of_pieces().await;
-
-        let client = PeerClientInfo {
-            handle: peer_handle,
-            id: peer_id,
-            addr,
-            connection_type,
-            connection_protocol: connection.protocol(),
-        };
         metrics.client_choked.set(true);
         metrics.remote_choked.set(true);
 
-        let mut context = PeerContext {
-            client,
-            // the remote information is unknown until the handshake has been completed
-            remote: None,
+        let extensions = match torrent.extensions().await {
+            Ok(extensions) => extensions,
+            Err(_) => return Err(Error::Closed),
+        };
+        let torrent_event_receiver = torrent.subscribe();
+        let mut context = PeerContext::new(
+            peer_id,
+            addr,
+            connection,
+            connection_type,
             torrent,
             data_pool,
-            state: PeerState::Handshake,
             protocol_extensions,
+            extensions.as_slice(),
             metrics,
-            // connections should always start in the choked state
-            client_choke_state: ChokeState::Choked,
-            remote_choke_state: ChokeState::Choked,
-            // connections should always start in the not interested state
-            client_interest_state: InterestState::NotInterested,
-            remote_interest_state: InterestState::NotInterested,
-            extension_registry,
-            client_pieces: BitVec::from_elem(total_pieces, false),
-            remote_pieces: BitVec::from_elem(total_pieces, false),
-            remote_fast_pieces: BitVec::from_elem(total_pieces, false),
-            // create new peer request buffers which are not running as the peer connection starts in the state choked
-            client_pending_requests: HashMap::with_capacity(0),
-            client_pending_request_permits: HashMap::with_capacity(0),
-            remote_pending_requests: Vec::with_capacity(0),
-            connection,
-            callbacks: MultiThreadedCallback::new(),
-            cancellation_token: CancellationToken::new(),
             timeout,
-        };
+        )
+        .await?;
         let peer = Self {
             client: context.client.clone(),
             metrics: context.metrics.clone(),
@@ -732,30 +729,13 @@ impl BitTorrentPeer {
         context.exchange_handshake().await?;
 
         // run the peer context in a separate task
-        tokio::spawn(async move { context.run(command_receiver, extensions).await });
+        tokio::spawn(async move {
+            context
+                .run(command_receiver, torrent_event_receiver, extensions)
+                .await
+        });
 
         Ok(peer)
-    }
-
-    /// Create an extension registry for the given extensions.
-    ///
-    /// # Arguments
-    ///
-    /// * `extensions` - The extensions which should be registered in the registry.
-    ///
-    /// # Returns
-    ///
-    /// Returns the created extension registry for the given extensions.
-    fn create_extension_registry(extensions: &[PeerExtension]) -> ExtensionRegistry {
-        let mut extension_index = 0u8;
-
-        extensions
-            .iter()
-            .map(|e| {
-                extension_index += 1;
-                (e.name().to_string(), extension_index)
-            })
-            .collect()
     }
 }
 
@@ -820,10 +800,20 @@ enum PeerCommand {
     GetClientBitfield { response: Reply<BitVec> },
     /// Returns `true` if the peer and remote peer support the given extension, else `false`.
     IsExtensionSupported { name: String, response: Reply<bool> },
+    /// Returns the extension number of the given extension name if found, else `None`.
+    FindExtensionNumber {
+        name: String,
+        response: Reply<Option<ExtensionNumber>>,
+    },
     /// Returns the total number of pending requests to the remote peer.
     GetClientPendingRequestsLen { response: Reply<usize> },
     /// Returns the total number of pending requests from the remote peer.
     GetRemotePendingRequestsLen { response: Reply<usize> },
+    /// Send the given message to the remote peer.
+    SendMessage {
+        message: Message,
+        response: Reply<Result<()>>,
+    },
     /// Close the peer connection.
     Close { response: Reply<()> },
 }
@@ -887,11 +877,65 @@ pub struct PeerContext {
 }
 
 impl PeerContext {
+    /// Create a new peer context instance.
+    pub(crate) async fn new(
+        peer_id: PeerId,
+        addr: SocketAddr,
+        connection: PeerConnection,
+        connection_type: ConnectionDirection,
+        torrent: InnerTorrent,
+        data_pool: DataPool,
+        protocol_extensions: ProtocolExtensionFlags,
+        extensions: &[PeerExtension],
+        metrics: Metrics,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let peer_handle = PeerHandle::new();
+        let total_pieces = data_pool.num_of_pieces().await;
+        let extension_registry = Self::create_extension_registry(extensions);
+
+        Ok(Self {
+            client: PeerClientInfo {
+                handle: peer_handle,
+                id: peer_id,
+                addr,
+                connection_type,
+                connection_protocol: connection.protocol(),
+            },
+            // the remote information is unknown until the handshake has been completed
+            remote: None,
+            torrent,
+            data_pool,
+            state: PeerState::Handshake,
+            protocol_extensions,
+            metrics,
+            // connections should always start in the choked state
+            client_choke_state: ChokeState::Choked,
+            remote_choke_state: ChokeState::Choked,
+            // connections should always start in the not interested state
+            client_interest_state: InterestState::NotInterested,
+            remote_interest_state: InterestState::NotInterested,
+            extension_registry,
+            client_pieces: BitVec::from_elem(total_pieces, false),
+            remote_pieces: BitVec::from_elem(total_pieces, false),
+            remote_fast_pieces: BitVec::from_elem(total_pieces, false),
+            // create new peer request buffers which are not running as the peer connection starts in the state choked
+            client_pending_requests: HashMap::with_capacity(0),
+            client_pending_request_permits: HashMap::with_capacity(0),
+            remote_pending_requests: Vec::with_capacity(0),
+            connection,
+            callbacks: MultiThreadedCallback::new(),
+            cancellation_token: CancellationToken::new(),
+            timeout,
+        })
+    }
+
     /// Run the main loop of peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn run(
         &mut self,
         mut command_receiver: ChannelReceiver<PeerCommand>,
+        mut torrent_event_receiver: Subscription<TorrentEvent>,
         mut extensions: Vec<PeerExtension>,
     ) {
         // Try to send the initial message to the remote peer
@@ -902,7 +946,6 @@ impl PeerContext {
         }
 
         let mut interval = time::interval(PEER_TICK_INTERVAL);
-        let mut torrent_receiver = self.torrent.subscribe();
 
         loop {
             select! {
@@ -910,7 +953,7 @@ impl PeerContext {
                 _ = time::sleep(Duration::from_secs(KEEP_ALIVE_SECONDS)) => self.send_keep_alive().await,
                 Some(event) = self.connection.recv() => self.on_reader_event(event, extensions.as_mut_slice()).await,
                 Some(event) = command_receiver.recv() => self.on_command(event).await,
-                Ok(event) = torrent_receiver.recv() => self.on_torrent_event(&*event).await,
+                Ok(event) = torrent_event_receiver.recv() => self.on_torrent_event(&*event).await,
                 _ = interval.tick() => self.on_tick(extensions.as_mut_slice(), PEER_TICK_INTERVAL).await,
             }
         }
@@ -1375,7 +1418,6 @@ impl PeerContext {
     /// Handle an internal peer command event.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_command(&mut self, command: PeerCommand) {
-        trace!("Peer {} received command {:?}", self, command);
         match command {
             PeerCommand::GetRemoteId { response } => response.send(self.remote_id()),
             PeerCommand::GetRemotePeer { response } => response.send(self.remote_peer().cloned()),
@@ -1404,6 +1446,9 @@ impl PeerContext {
             PeerCommand::IsExtensionSupported { name, response } => {
                 response.send(self.is_extension_supported(name.as_str()))
             }
+            PeerCommand::FindExtensionNumber { name, response } => {
+                response.send(self.find_remote_extension_number(name.as_str()))
+            }
             PeerCommand::GetClientPendingRequestsLen { response } => response.send(
                 self.client_pending_requests
                     .iter()
@@ -1412,6 +1457,9 @@ impl PeerContext {
             ),
             PeerCommand::GetRemotePendingRequestsLen { response } => {
                 response.send(self.remote_pending_requests.len())
+            }
+            PeerCommand::SendMessage { message, response } => {
+                response.send(self.send(message).await)
             }
             PeerCommand::Close { response } => {
                 response.send(self.close(CloseReason::None).await);
@@ -2584,6 +2632,19 @@ impl PeerContext {
 
         self.invoke_event(PeerEvent::Closed(reason));
     }
+
+    /// Return the extension registry for the given extensions.
+    fn create_extension_registry(extensions: &[PeerExtension]) -> ExtensionRegistry {
+        let mut extension_index = 0u8;
+
+        extensions
+            .iter()
+            .map(|e| {
+                extension_index += 1;
+                (e.name().to_string(), extension_index)
+            })
+            .collect()
+    }
 }
 
 impl Callback<PeerEvent> for PeerContext {
@@ -2603,7 +2664,7 @@ impl Drop for PeerContext {
 mod tests {
     use super::*;
     use crate::operation::{TorrentCreatePiecesAndFilesOperation, TorrentFileValidationOperation};
-    use crate::peer::protocol::tests::UtpPacketCaptureExtension;
+    use crate::peer::protocol::UtpPacketCapture;
     use crate::peer::tests::create_utp_peer_pair;
     use crate::storage::{DiskStorage, MemoryStorage};
     use crate::tests::copy_test_file;
@@ -2619,7 +2680,7 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -2627,7 +2688,7 @@ mod tests {
                 vec![],
                 vec![]
             );
-            let (outgoing, incoming) = create_tcp_peer_pair!(&torrent);
+            let (outgoing, incoming) = tcp_peer_pair!(&torrent);
 
             let result = incoming.state().await;
             assert_ne!(PeerState::Error, result);
@@ -2648,7 +2709,7 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -2656,11 +2717,11 @@ mod tests {
                 vec![],
                 vec![]
             );
-            let incoming_capture = UtpPacketCaptureExtension::new();
-            let outgoing_capture = UtpPacketCaptureExtension::new();
+            let incoming_capture = UtpPacketCapture::new();
+            let outgoing_capture = UtpPacketCapture::new();
             let (incoming_socket, outgoing_socket) = create_utp_socket_pair!(
-                vec![Box::new(incoming_capture.clone())],
-                vec![Box::new(outgoing_capture.clone())]
+                vec![incoming_capture.clone().into()],
+                vec![outgoing_capture.clone().into()]
             );
             let (outgoing, incoming) = create_utp_peer_pair(
                 &incoming_socket,
@@ -2709,7 +2770,7 @@ mod tests {
                 .await
                 .unwrap();
             let listener_addr = (Ipv4Addr::LOCALHOST, listener.local_addr().unwrap().port()).into();
-            let torrent = create_torrent!(
+            let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,
                 TorrentFlags::none(),
@@ -2815,7 +2876,7 @@ mod tests {
             "piece-1_30.iso",
             Some("debian-12.4.0-amd64-DVD-1.iso"),
         );
-        let source = create_torrent!(
+        let source = torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
@@ -2832,7 +2893,7 @@ mod tests {
             )),
             None
         );
-        let target = create_torrent!(
+        let target = torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
@@ -2860,7 +2921,7 @@ mod tests {
 
         // create the peer pair
         let (_source_peer, target_peer) =
-            create_tcp_peer_pair!(&source, &target, ProtocolExtensionFlags::LTEP);
+            tcp_peer_pair!(&source, &target, ProtocolExtensionFlags::LTEP);
 
         // check if the target peer has wanted pieces from the source
         // as the bitfield is sent after the handshake, it might not have been received yet
@@ -2881,7 +2942,7 @@ mod tests {
             "piece-1_30.iso",
             Some("debian-12.4.0-amd64-DVD-1.iso"),
         );
-        let source = create_torrent!(
+        let source = torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::UploadMode,
@@ -2898,7 +2959,7 @@ mod tests {
             )),
             None
         );
-        let target = create_torrent!(
+        let target = torrent!(
             "debian-udp.torrent",
             temp_dir.path().join("outgoing").to_str().unwrap(),
             TorrentFlags::DownloadMode,
@@ -2926,7 +2987,7 @@ mod tests {
 
         // create the peer pair
         let (source_peer, target_peer) =
-            create_tcp_peer_pair!(&source, &target, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS());
+            tcp_peer_pair!(&source, &target, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS());
 
         // check if the pieces are available in the source peer
         let source_peer_bitfield = source_peer.client_piece_bitfield().await;
@@ -2959,14 +3020,15 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let torrent = create_torrent!(
+        let torrent = torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
-            vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())]
+            vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())],
+            vec![]
         );
-        let (outgoing, _incoming) = create_tcp_peer_pair!(&torrent);
+        let (outgoing, _incoming) = tcp_peer_pair!(&torrent);
 
         // create the pieces for the torrent
         wait_for_torrent_pieces(&torrent).await;
