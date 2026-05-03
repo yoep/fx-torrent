@@ -224,9 +224,9 @@ impl PeerPool {
     ///
     /// * `len` - The total number of peer list address to retrieve.
     pub fn new_connection_candidates(&mut self, len: usize) -> Vec<SocketAddr> {
-        let peers_len = self.peers.len();
+        let peers_len = self.active_peer_connections();
         let remaining_slots = self.limit.saturating_sub(peers_len);
-        let len = len.min(remaining_slots).min(peers_len);
+        let len = remaining_slots.min(len);
 
         self.peers
             .iter_mut()

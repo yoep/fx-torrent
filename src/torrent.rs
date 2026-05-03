@@ -42,6 +42,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::time::timeout;
 use tokio::{select, time};
 use tokio_util::sync::{
     CancellationToken, WaitForCancellationFuture, WaitForCancellationFutureOwned,
@@ -1817,7 +1818,7 @@ impl TorrentContext {
                 },
                 Some((idx, entry)) = peer_connections.next() => {
                     if let Some(entry) = entry {
-                        self.handle_incoming_peer_connection(entry).await;
+                        self.on_incoming_peer_connection(entry).await;
                         let discovery = &peer_discoveries[idx];
                         peer_connections.push(Box::pin(async move {
                             let entry = discovery.recv().await;
@@ -2338,6 +2339,7 @@ impl TorrentContext {
     }
 
     /// Handle a closed torrent peer connection.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_peer_closed(&mut self, addr: SocketAddr, reason: CloseReason) {
         trace!(
             "Torrent {} peer connection closed {:?}, reason: {:?}",
@@ -2350,11 +2352,16 @@ impl TorrentContext {
             Some(peer) => peer,
         };
 
-        let bitfield = peer.remote_piece_bitfield().await;
-
-        // decrease the availability of the pieces that the peer had
-        for (piece_index, _) in bitfield.iter().enumerate().filter(|(_, value)| *value) {
-            self.data_pool.update_availability(&piece_index, -1).await;
+        match timeout(Duration::from_millis(200), peer.remote_piece_bitfield()).await {
+            Ok(bitfield) => {
+                // decrease the availability of the pieces that the peer had
+                for (piece_index, _) in bitfield.iter().enumerate().filter(|(_, value)| *value) {
+                    self.data_pool.update_availability(&piece_index, -1).await;
+                }
+            }
+            Err(e) => {
+                debug!("Torrent {} failed to collect peer bitfield, {}", self, e);
+            }
         }
 
         self.metrics.peers.dec();
@@ -2553,38 +2560,37 @@ impl TorrentContext {
         let total_pieces = pieces.len();
         self.data_pool.set_pieces(pieces).await;
 
-        {
-            // update the piece availability based on the current peer connections
-            let mut availability: BTreeMap<PieceIndex, u32> = BTreeMap::new();
-            let mut peer_count = 0u32;
+        // update the piece availability based on the current peer connections
+        let mut availability: BTreeMap<PieceIndex, u32> = BTreeMap::new();
+        let mut peer_count = 0u32;
 
-            {
-                for peer in self.peer_pool.peers() {
-                    peer_count += 1;
-                    for (piece_index, _) in peer
-                        .remote_piece_bitfield()
-                        .await
-                        .into_iter()
-                        .enumerate()
-                        .filter(|(_, value)| *value)
+        for peer in self.peer_pool.peers() {
+            peer_count += 1;
+            match timeout(Duration::from_millis(200), peer.remote_piece_bitfield()).await {
+                Ok(bitfield) => {
+                    for (piece_index, _) in
+                        bitfield.into_iter().enumerate().filter(|(_, value)| *value)
                     {
                         *availability.entry(piece_index).or_insert(0) += 1;
                     }
                 }
-            }
-
-            let availability_len = availability.len();
-            if availability_len > 0 {
-                for (piece, availability) in availability {
-                    self.data_pool
-                        .update_availability(&piece, availability as i32)
-                        .await;
+                Err(e) => {
+                    debug!("Torrent {} failed to collect peer bitfield, {}", self, e);
                 }
-                debug!(
-                    "Torrent {} updated {} piece availabilities from {} peers",
-                    self, availability_len, peer_count
-                );
             }
+        }
+
+        let availability_len = availability.len();
+        if availability_len > 0 {
+            for (piece, availability) in availability {
+                self.data_pool
+                    .update_availability(&piece, availability as i32)
+                    .await;
+            }
+            debug!(
+                "Torrent {} updated {} piece availabilities from {} peers",
+                self, availability_len, peer_count
+            );
         }
 
         debug!("Torrent {} updated {} pieces", self, total_pieces);
@@ -2942,7 +2948,7 @@ impl TorrentContext {
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn handle_incoming_peer_connection(&mut self, entry: PeerEntry) {
+    async fn on_incoming_peer_connection(&mut self, entry: PeerEntry) {
         trace!(
             "Torrent {} is trying to accept incoming {} peer connection",
             self,

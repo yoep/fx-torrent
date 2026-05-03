@@ -16,12 +16,8 @@ use fx_torrent::operation::{
     TorrentMetadataOperation, TorrentOperationFactory, TorrentStatsOperation,
     TorrentTrackerPeersOperation, TorrentTrackersOperation,
 };
-use fx_torrent::peer::extension::{
-    HolepunchExtension, MetadataExtension, PeerExtension, PexExtension,
-};
 use fx_torrent::{
-    ExtensionFactory, FxSessionCache, FxTorrentSession, Session, SessionConfig, SessionEvent,
-    TorrentFlags,
+    FxSessionCache, FxTorrentSession, Session, SessionConfig, SessionEvent, TorrentFlags,
 };
 use log::{error, warn};
 use ratatui::layout::Constraint::{Length, Min};

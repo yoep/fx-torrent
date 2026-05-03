@@ -13,18 +13,12 @@ use crate::app_logger::AppLogger;
 use log::LevelFilter;
 use std::io;
 use tokio::select;
-#[cfg(feature = "tracing")]
-use tracing_chrome::{ChromeLayerBuilder, FlushGuard};
-#[cfg(feature = "tracing")]
-use tracing_subscriber::layer::SubscriberExt;
-#[cfg(feature = "tracing")]
-use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> io::Result<()> {
     let app_logger = AppLogger::new();
     #[cfg(feature = "tracing")]
-    let _tracing_guard = init_tracing(app_logger.clone());
+    tracing::init_tracing(app_logger.clone());
     let mut app = App::new(app_logger.clone()).await?;
     let terminal = ratatui::init();
 
@@ -40,19 +34,31 @@ async fn main() -> io::Result<()> {
     result
 }
 
-#[cfg(feature = "tracing")]
-fn init_tracing(app_logger: AppLogger) -> FlushGuard {
-    let (chrome_layer, guard) = ChromeLayerBuilder::new().build();
-    tracing_subscriber::registry()
-        .with(chrome_layer)
-        .with(app_logger)
-        .init();
-    guard
-}
-
 #[cfg(not(feature = "tracing"))]
 fn init_logger(app_logger: AppLogger) -> io::Result<()> {
     log::set_boxed_logger(Box::new(app_logger))
         .map(|()| log::set_max_level(LevelFilter::Trace))
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+}
+
+#[cfg(feature = "tracing")]
+mod tracing {
+    use super::*;
+
+    use console_subscriber::ConsoleLayer;
+    use std::time::Duration;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    pub fn init_tracing(app_logger: AppLogger) {
+        let console_layer = ConsoleLayer::builder()
+            .with_default_env()
+            .retention(Duration::from_secs(60))
+            .spawn();
+
+        tracing_subscriber::registry()
+            .with(console_layer)
+            .with(app_logger)
+            .init();
+    }
 }

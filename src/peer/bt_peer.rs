@@ -1241,6 +1241,7 @@ impl PeerContext {
 
     /// Process a pending request requested by the remote peer.
     /// This tries to retrieve the requested data from the torrent.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_remote_pending_request(&mut self, request: Request) {
         // check if the client is choked, if so, we reject the request
         // this can happen if the client choke's while the request was still queued in the command channel
@@ -1500,6 +1501,7 @@ impl PeerContext {
 
     /// Check if the remote peer has at least one wanted piece available.
     /// If so, trigger the necessary commands to retrieve this piece.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn check_for_wanted_pieces(&mut self) {
         let is_download_allowed = self.torrent.is_download_allowed().await;
         if !is_download_allowed || self.data_pool.is_completed().await {
@@ -1604,6 +1606,7 @@ impl PeerContext {
     ///
     /// If the remote peer is [InterestState::Interested] and the torrent allows uploads,
     /// then we queue the command to try to obtain an upload permit.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn request_upload_permit_if_needed(&mut self, ignore_remote_interest_state: bool) {
         if self.client_choke_state == ChokeState::UnChoked {
             return;
@@ -2625,6 +2628,7 @@ impl PeerContext {
     }
 
     /// Invoke the extension tick function for all enabled extensions.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_extensions_tick(&mut self, extensions: &mut [PeerExtension], interval: Duration) {
         for extension in extensions {
             let start = Instant::now();

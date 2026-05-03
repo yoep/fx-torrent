@@ -11,7 +11,7 @@ It supports most of the Bittorrent protocol specifications, such as multi-file t
 and is based on the `libtorrent` library for functionality and naming convention.
 
 - [Getting Started](#getting-started)
-- [Examples](#examples)
+- [CLI example](#cli-example)
 - [Features](#features)
 - [DHT](#dht)
 
@@ -56,11 +56,9 @@ async fn main() -> Result<(), io::Error> {
 }
 ```
 
-### Examples
+For more examples, see the [examples](./examples) directory.
 
-For more examples, see the [examples](./examples).
-
-#### CLI example
+### CLI example
 
 The CLI example makes use of most of the functionality provided by the library and 
 can be used to download torrents from magnet links or torrent files.
@@ -68,7 +66,16 @@ The CLI also allows the introspection of the DHT network and Trackers.
 
 The example is built on top of the [Ratatui](https://ratatui.rs/) as terminal UI library.
 
-![CLI torrent example](./docs/cli-torrent-example.png)
+#### Tracing & Tokio Unstable
+
+The CLI example enables the **tracing** feature by default to support the `tokio-console` subscriber. 
+This requires the `tokio_unstable` configuration flag to be passed to the compiler.
+
+```shell
+RUSTFLAGS="--cfg tokio_unstable" cargo run --example cli
+```
+
+If you do not wish to use experimental tokio features, you must disable the `tracing` feature in the example.
 
 ## DHT
 

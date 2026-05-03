@@ -34,7 +34,7 @@ byteorder = "1.5"
 crc = "3.4"
 derive_more = { version = "2.1", features = ["display"] }
 ed25519 = { version = "2.2", optional = true }
-ed25519-dalek = { version = "2.2", optional = true}
+ed25519-dalek = { version = "2.2", optional = true }
 futures = "0.3"
 fx-callback = "2.0"
 fx-handle = "1.0"
@@ -69,7 +69,12 @@ extension-metadata = []
 extension-pex = []
 lsd = []
 ring-compat = ["dep:ring-compat"]
-tracing = ["dep:tracing", "dep:tracing-futures", "dep:tracing-subscriber"]
+tracing = [
+    "dep:tracing",
+    "dep:tracing-futures",
+    "dep:tracing-subscriber",
+    "tokio/tracing"
+]
 tracker-server = ["dep:axum"]
 
 [dev-dependencies]
@@ -81,7 +86,7 @@ mockall = "0.14"
 ratatui = "0.30"
 tempfile = "3.27"
 tokio = { version = "1.52", features = ["signal"] }
-tracing-chrome = "0.7"
+console-subscriber = "0.5"
 
 [package.metadata.docs.rs]
 all-features = true

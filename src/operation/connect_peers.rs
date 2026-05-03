@@ -373,6 +373,7 @@ impl TorrentConnectPeersOperation {
         peers: &[BitTorrentPeer],
         context: &mut TorrentContext,
     ) {
+        let mut punching = false;
         for peer in peers {
             if !timeout(
                 Duration::from_millis(200),
@@ -385,9 +386,25 @@ impl TorrentConnectPeersOperation {
             }
 
             context.peer_pool_mut().peer_punching(&target_addr);
-            let response = peer.holepunch(target_addr).await;
-            self.holepunch_queue
-                .spawn(async move { (target_addr, response.await.err()) });
+            match timeout(Duration::from_millis(500), peer.holepunch(target_addr)).await {
+                Ok(response) => {
+                    punching = true;
+                    self.holepunch_queue
+                        .spawn(async move { (target_addr, response.await.err()) });
+                }
+                Err(e) => {
+                    context.peer_pool_mut().peer_punched(&target_addr, false);
+                    debug!("Torrent {} failed to start holepunch, {}", context, e);
+                }
+            }
+        }
+
+        // if we're unable to punch the target peer
+        // record the initial attempt as a timeout failure
+        if !punching {
+            context
+                .peer_pool_mut()
+                .peer_closed(&target_addr, CloseReason::Timeout);
         }
     }
 
