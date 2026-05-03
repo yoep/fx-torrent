@@ -239,10 +239,40 @@ pub fn to_string<T: ser::Serialize>(b: &T) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bencode::from_str;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct TestStruct {
+        inner: InnerStruct,
+        active: bool,
+        messages: Vec<String>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct InnerStruct {
+        message: String,
+    }
 
     #[test]
     fn test_serialize_bool() {
         assert_eq!(to_string(&true).unwrap(), "i1e");
         assert_eq!(to_string(&false).unwrap(), "i0e");
+    }
+
+    #[test]
+    fn test_serialize_struct() {
+        let expected_result = TestStruct {
+            inner: InnerStruct {
+                message: "FooBar".to_string(),
+            },
+            active: true,
+            messages: vec!["lorem".to_string(), "ipsum".to_string()],
+        };
+
+        let payload = to_string(&expected_result).unwrap();
+        let result = from_str(payload.as_str()).unwrap();
+
+        assert_eq!(expected_result, result);
     }
 }
