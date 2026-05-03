@@ -1,4 +1,5 @@
-use crate::dht::errors::{Error, Result};
+use crate::bencode;
+use crate::dht::{Error, Result};
 use ed25519::signature::{Signer, Verifier};
 use ed25519::{ComponentBytes, Signature, SignatureBytes};
 #[cfg(any(feature = "ed25519-dalek", test))]
@@ -82,7 +83,7 @@ impl ItemSignature {
             sequence_nr: *sequence_nr,
             value,
         };
-        let item_signature_bytes = serde_bencode::to_bytes(&item_signature)?;
+        let item_signature_bytes = bencode::to_bytes(&item_signature)?;
 
         match self.inner {
             #[cfg(any(feature = "ed25519-dalek", test))]
@@ -123,7 +124,7 @@ impl ItemSignature {
             sequence_nr: *sequence_nr,
             value,
         };
-        let verification_item_bytes = serde_bencode::to_bytes(&verification_item)?;
+        let verification_item_bytes = bencode::to_bytes(&verification_item)?;
 
         match self.inner {
             #[cfg(any(feature = "ed25519-dalek", test))]

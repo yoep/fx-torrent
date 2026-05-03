@@ -1,6 +1,5 @@
 use crate::tracker::TrackerHandle;
-use crate::InfoHash;
-use serde_bencode::Error;
+use crate::{bencode, InfoHash};
 use std::io;
 use thiserror::Error;
 use tokio::time::error::Elapsed;
@@ -88,8 +87,8 @@ impl From<ParseError> for TrackerError {
     }
 }
 
-impl From<serde_bencode::error::Error> for TrackerError {
-    fn from(error: Error) -> Self {
+impl From<bencode::Error> for TrackerError {
+    fn from(error: bencode::Error) -> Self {
         Self::Parse(error.to_string())
     }
 }

@@ -1,3 +1,4 @@
+use crate::bencode;
 use crate::channel::Reply;
 use crate::peer::extension::{Error, ExtensionNumber, Result};
 use crate::peer::protocol::Message;
@@ -156,7 +157,7 @@ impl HolepunchExtension {
 
     /// Handle the given extension message payload which has been received from the remote peer.
     pub async fn on_message(&mut self, payload: &[u8], peer: &PeerContext) -> Result<()> {
-        let message = serde_bencode::from_bytes::<HolepunchMessage>(payload)?;
+        let message = bencode::from_bytes::<HolepunchMessage>(payload)?;
         let extension_number = match peer.find_remote_extension_number(Self::NAME) {
             None => return Err(Error::Unsupported),
             Some(e) => e,
@@ -208,7 +209,7 @@ impl HolepunchExtension {
             IpAddr::V4(ip) => ip.octets().to_vec(),
             IpAddr::V6(ip) => ip.octets().to_vec(),
         };
-        let message = match serde_bencode::to_bytes(&HolepunchMessage {
+        let message = match bencode::to_bytes(&HolepunchMessage {
             message_type: MessageType::Rendezvous,
             addr_type,
             addr,
@@ -364,7 +365,7 @@ impl HolepunchExtension {
         extension_number: ExtensionNumber,
         peer: &PeerContext,
     ) -> Result<()> {
-        let payload = serde_bencode::to_bytes(&HolepunchMessage {
+        let payload = bencode::to_bytes(&HolepunchMessage {
             message_type: MessageType::Error,
             addr_type: message.addr_type,
             addr: message.addr.clone(),
@@ -394,7 +395,7 @@ impl HolepunchExtension {
             port: addr.port(),
             err_code: None,
         };
-        serde_bencode::to_bytes(&message).map_err(|e| {
+        bencode::to_bytes(&message).map_err(|e| {
             warn!(
                 "{} extension failed to serialize message, {}",
                 Self::NAME,

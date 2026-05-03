@@ -1,6 +1,6 @@
-use crate::errors::{Result, TorrentError};
 use crate::info_hash::InfoHash;
-use crate::{errors, Magnet, Sha1Hash, Sha256Hash};
+use crate::{bencode, error, Magnet, Sha1Hash, Sha256Hash};
+use crate::{Result, TorrentError};
 use bitmask_enum::bitmask;
 use log::{debug, warn};
 use serde::de::{Error, MapAccess, Visitor};
@@ -439,7 +439,7 @@ impl TorrentMetadataInfo {
     ///
     /// Returns the calculated info hash, or returns an error when the info hash could not be calculated.
     pub fn info_hash(&self) -> Result<InfoHash> {
-        let metadata_bytes = serde_bencode::to_bytes(&self)?;
+        let metadata_bytes = bencode::to_bytes(&self)?;
         let is_v2 = self.meta_version.filter(|e| *e == 2).is_some();
 
         if is_v2 {
@@ -765,12 +765,12 @@ impl TryFrom<&[u8]> for TorrentMetadata {
     /// A Result containing the parsed TorrentInfo if successful,
     /// or a TorrentError if parsing fails.
     fn try_from(value: &[u8]) -> Result<Self> {
-        let mut torrent_info = serde_bencode::from_bytes::<Self>(value)
+        let mut torrent_info = bencode::from_bytes::<Self>(value)
             .map_err(|e| TorrentError::TorrentParse(e.to_string()))?;
         // retrieve the metadata version from the metadata info, default to version 1 if unknown
         let metadata_version = torrent_info.metadata_version().unwrap_or(1);
         // calculate the info hash from the info dict
-        let info_bytes = serde_bencode::to_bytes(&torrent_info.info)
+        let info_bytes = bencode::to_bytes(&torrent_info.info)
             .map_err(|e| TorrentError::TorrentParse(e.to_string()))?;
         let info_len = info_bytes.len();
         // calculate the info hash based on the metadata version
@@ -813,9 +813,9 @@ impl TryFrom<Magnet> for TorrentMetadata {
 }
 
 impl TryFrom<&TorrentMetadata> for Magnet {
-    type Error = errors::MagnetError;
+    type Error = error::MagnetError;
 
-    fn try_from(value: &TorrentMetadata) -> errors::MagnetResult<Self> {
+    fn try_from(value: &TorrentMetadata) -> error::MagnetResult<Self> {
         if let Some(uri) = value.magnet_uri.as_ref() {
             Magnet::from_str(uri)
         } else {
@@ -1320,13 +1320,13 @@ mod tests {
     #[test]
     fn test_file_attribute_flags_deserialize() {
         let expected_result = FileAttributeFlags::Executable | FileAttributeFlags::PaddingFile;
-        let bytes = serde_bencode::to_bytes(&expected_result).unwrap();
-        let result: FileAttributeFlags = serde_bencode::from_bytes(bytes.as_ref()).unwrap();
+        let bytes = bencode::to_bytes(&expected_result).unwrap();
+        let result: FileAttributeFlags = bencode::from_bytes(bytes.as_ref()).unwrap();
         assert_eq!(expected_result, result);
 
         let expected_result = FileAttributeFlags::Symlink;
-        let bytes = serde_bencode::to_bytes(&expected_result).unwrap();
-        let result: FileAttributeFlags = serde_bencode::from_bytes(bytes.as_ref()).unwrap();
+        let bytes = bencode::to_bytes(&expected_result).unwrap();
+        let result: FileAttributeFlags = bencode::from_bytes(bytes.as_ref()).unwrap();
         assert_eq!(expected_result, result);
     }
 

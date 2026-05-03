@@ -1,5 +1,5 @@
 use crate::peer::extension;
-use crate::PieceIndex;
+use crate::{bencode, PieceIndex};
 use std::io;
 use std::net::SocketAddr;
 use thiserror::Error;
@@ -75,6 +75,12 @@ impl PartialEq for Error {
 impl From<crate::TorrentError> for Error {
     fn from(error: crate::TorrentError) -> Self {
         Self::Io(io::Error::new(io::ErrorKind::Other, error))
+    }
+}
+
+impl From<bencode::Error> for Error {
+    fn from(error: bencode::Error) -> Self {
+        Self::Parsing(error.to_string())
     }
 }
 

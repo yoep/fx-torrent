@@ -1,3 +1,4 @@
+use crate::bencode;
 use crate::dht::krpc::ErrorMessage;
 use std::{io, result};
 use thiserror::Error;
@@ -46,8 +47,8 @@ impl From<ErrorMessage> for Error {
     }
 }
 
-impl From<serde_bencode::error::Error> for Error {
-    fn from(e: serde_bencode::error::Error) -> Self {
+impl From<bencode::Error> for Error {
+    fn from(e: bencode::Error) -> Self {
         Self::Parse(e.to_string())
     }
 }

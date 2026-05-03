@@ -573,14 +573,15 @@ mod tests {
 
     mod node_token {
         use super::*;
+        use crate::bencode;
 
         #[test]
         fn test_serialize() {
             let expected_result = "10:LoremIpsum";
             let token = NodeToken("LoremIpsum".as_bytes().to_vec());
 
-            let result = serde_bencode::to_string(&token)
-                .expect("expected the token to have been serialized");
+            let result =
+                bencode::to_string(&token).expect("expected the token to have been serialized");
 
             assert_eq!(expected_result, result.as_str());
         }
@@ -591,7 +592,7 @@ mod tests {
             let expected_result = NodeToken("LoremIps".as_bytes().to_vec());
 
             let result: NodeToken =
-                serde_bencode::from_str(value).expect("expected the token to be valid");
+                bencode::from_str(value).expect("expected the token to be valid");
 
             assert_eq!(expected_result, result);
         }
@@ -599,11 +600,11 @@ mod tests {
         #[test]
         fn test_deserialize_bytes() {
             let expected_result = NodeToken("Qwerty".as_bytes().to_vec());
-            let bytes = serde_bencode::to_bytes(&expected_result)
-                .expect("expected the token to be serialized");
+            let bytes =
+                bencode::to_bytes(&expected_result).expect("expected the token to be serialized");
 
-            let result: NodeToken = serde_bencode::from_bytes(bytes.as_slice())
-                .expect("expected the token to be valid");
+            let result: NodeToken =
+                bencode::from_bytes(bytes.as_slice()).expect("expected the token to be valid");
 
             assert_eq!(expected_result, result);
         }

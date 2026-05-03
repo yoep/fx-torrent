@@ -1,7 +1,7 @@
 use crate::peer::extension::{Error, Result};
 use crate::peer::protocol::Message;
 use crate::peer::{extension, PeerContext, ProtocolExtensionFlags};
-use crate::{PieceIndex, TorrentMetadataInfo};
+use crate::{bencode, PieceIndex, TorrentMetadataInfo};
 use log::{debug, error, trace, warn};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Debug, Formatter};
@@ -141,7 +141,7 @@ impl MetadataExtension {
                 msg_type: MetadataMessageType::Reject,
                 data: vec![],
             };
-            let payload = serde_bencode::to_bytes(&message)
+            let payload = bencode::to_bytes(&message)
                 .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
 
             trace!(
@@ -195,7 +195,7 @@ impl MetadataExtension {
             if total_pieces - 1 == message.piece as usize {
                 // try to deserialize the metadata
                 let metadata: TorrentMetadataInfo =
-                    serde_bencode::from_bytes(self.metadata_buffer.as_ref().unwrap())?;
+                    bencode::from_bytes(self.metadata_buffer.as_ref().unwrap())?;
                 debug!("Peer {} completed metadata requests, {:?}", peer, metadata);
 
                 // update the metadata of the underlying torrent through the peer
@@ -236,7 +236,7 @@ impl MetadataExtension {
             msg_type: MetadataMessageType::Request,
             data: vec![],
         };
-        let payload = serde_bencode::to_bytes(&message)?;
+        let payload = bencode::to_bytes(&message)?;
 
         trace!(
             "Sending metadata request {}",
@@ -280,7 +280,7 @@ impl MetadataExtension {
         peer: &PeerContext,
     ) -> Result<()> {
         // serialize the metadata
-        let metadata_bytes = serde_bencode::to_bytes(&metadata)?;
+        let metadata_bytes = bencode::to_bytes(&metadata)?;
         let metadata_size = metadata_bytes.len();
         let message = MetadataExtensionMessage {
             piece,
@@ -292,7 +292,7 @@ impl MetadataExtension {
             None => return Err(Error::Unsupported),
             Some(e) => e,
         };
-        let mut payload = serde_bencode::to_bytes(&message)?;
+        let mut payload = bencode::to_bytes(&message)?;
 
         // calculate the payload size that should be sent
         let start_index = piece * METADATA_PIECE_SIZE;
@@ -324,7 +324,7 @@ impl MetadataExtension {
     /// the payload which represent the bencoded metadata.
     fn deserialize(payload: &[u8]) -> Result<MetadataExtensionMessage> {
         let mut cursor = Cursor::new(payload);
-        let mut deserializer = serde_bencode::de::Deserializer::new(&mut cursor);
+        let mut deserializer = bencode::Deserializer::new(&mut cursor);
 
         let mut message: MetadataExtensionMessage = Deserialize::deserialize(&mut deserializer)?;
         message.data = cursor.chunk().to_vec();
@@ -394,7 +394,7 @@ mod tests {
             };
             let expected_result = "d8:msg_typei0e5:piecei0ee";
 
-            let result = serde_bencode::to_string(&extension).unwrap();
+            let result = bencode::to_string(&extension).unwrap();
 
             assert_eq!(expected_result, result.as_str());
         }
@@ -409,7 +409,7 @@ mod tests {
                 data: vec![],
             };
 
-            let result = serde_bencode::from_bytes(message.as_bytes()).unwrap();
+            let result = bencode::from_bytes(message.as_bytes()).unwrap();
 
             assert_eq!(expected_result, result);
         }

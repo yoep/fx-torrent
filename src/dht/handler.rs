@@ -1,10 +1,10 @@
+use crate::bencode::Value;
 use crate::dht::krpc::{ErrorMessage, QueryMessage, ResponseMessage};
 use crate::dht::routing_table::RoutingTable;
 use crate::dht::server::{ItemEntry, MutableItemProperties, ServerNode};
 use crate::dht::{Error, PeerEntry, Result};
 use crate::{InfoHash, Sha1Hash};
 use itertools::Either;
-use serde_bencode::value::Value;
 use std::fmt::Debug;
 use std::iter;
 use std::net::SocketAddr;
