@@ -10,6 +10,11 @@ FX-Torrent is the most complete BitTorrent implementation fully written in Rust,
 It supports most of the Bittorrent protocol specifications, such as multi-file torrents, validating existing files, resuming torrent files,
 and is based on the `libtorrent` library for functionality and naming convention.
 
+- [Getting Started](#getting-started)
+- [CLI example](#cli-example)
+- [Features](#features)
+- [DHT](#dht)
+
 ## Getting Started
 
 Create a new `FxTorrentSession` which manages one or more torrents.
@@ -31,6 +36,7 @@ async fn main() -> Result<(), io::Error> {
                 .client_name("MyClient")
                 .build(),
         )
+        .default_extensions()
         .build()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
@@ -50,9 +56,26 @@ async fn main() -> Result<(), io::Error> {
 }
 ```
 
-### Examples
+For more examples, see the [examples](./examples) directory.
 
-For more examples, see the [examples](./examples).
+### CLI example
+
+The CLI example makes use of most of the functionality provided by the library and 
+can be used to download torrents from magnet links or torrent files.
+The CLI also allows the introspection of the DHT network and Trackers.
+
+The example is built on top of the [Ratatui](https://ratatui.rs/) as terminal UI library.
+
+#### Tracing & Tokio Unstable
+
+The CLI example enables the **tracing** feature by default to support the `tokio-console` subscriber. 
+This requires the `tokio_unstable` configuration flag to be passed to the compiler.
+
+```shell
+RUSTFLAGS="--cfg tokio_unstable" cargo run --example cli
+```
+
+If you do not wish to use experimental tokio features, you must disable the `tracing` feature in the example.
 
 ## DHT
 
@@ -62,15 +85,6 @@ When using the `dht` feature, enabled by default, one of the following additiona
 
 These crypto providers are used within the DHT network to verify mutable items within the network.
 When both features are missing, a `Error::MissingCryptoProvider` error will be returned.
-
-### CLI example
-
-The CLI example can be used to download torrents from a magnet link or torrent file.
-It uses [Ratatui](https://ratatui.rs/) as the terminal UI library.
-
-![CLI torrent example](./docs/cli-torrent-example.png)
-
-![CLI DHT info](./docs/cli-dht-info.png)
 
 ## Features
 
@@ -88,6 +102,7 @@ It uses [Ratatui](https://ratatui.rs/) as the terminal UI library.
 - [x] [BEP19](https://www.bittorrent.org/beps/bep_0019.html) - WebSeed - HTTP/FTP Seeding (GetRight style)
 - [x] [BEP20](https://www.bittorrent.org/beps/bep_0020.html) - Peer ID Conventions
 - [x] [BEP21](https://www.bittorrent.org/beps/bep_0021.html) - Extension for partial seeds
+- [ ] [BEP24](https://www.bittorrent.org/beps/bep_0024.html) - Tracker Returns External IP
 - [x] [BEP29](https://www.bittorrent.org/beps/bep_0029.html) - uTorrent transport protocol
 - [x] [BEP32](https://www.bittorrent.org/beps/bep_0032.html) - BitTorrent DHT Extensions for IPv6
 - [x] [BEP33](https://www.bittorrent.org/beps/bep_0033.html) - DHT scrape
@@ -101,7 +116,7 @@ It uses [Ratatui](https://ratatui.rs/) as the terminal UI library.
 - [ ] [BEP52](https://www.bittorrent.org/beps/bep_0052.html) - The BitTorrent Protocol Specification v2 (WIP)
 - [x] [BEP53](https://www.bittorrent.org/beps/bep_0053.html) - Magnets
 - [x] [BEP54](https://www.bittorrent.org/beps/bep_0054.html) - The lt_donthave extension
-- [ ] [BEP55](https://www.bittorrent.org/beps/bep_0055.html) - Holepunch extension (WIP)
+- [x] [BEP55](https://www.bittorrent.org/beps/bep_0055.html) - Holepunch extension
 
 ## License
 

@@ -534,6 +534,7 @@ pub struct ExtendedHandshake {
     /// This is a much more reliable way of identifying the client than relying on the peer id encoding.
     #[serde(rename = "v", skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
+    /// The number of maximum outstanding requests allowed by the peer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regg: Option<i32>,
     #[serde(default, with = "crate::peer::protocol::bt::serde_bool_int")]

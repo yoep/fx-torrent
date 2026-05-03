@@ -1,11 +1,9 @@
 use crate::peer::protocol::{UtpSocket, UtpStream};
 use crate::peer::{
-    BitTorrentPeer, Error, Peer, PeerDiscovery, PeerEntry, PeerId, PeerStream,
-    ProtocolExtensionFlags, Result,
+    BitTorrentPeer, Error, Peer, PeerEntry, PeerId, PeerStream, ProtocolExtensionFlags, Result,
 };
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
-use async_trait::async_trait;
 use derive_more::Display;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -15,9 +13,9 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::select;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
+use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
 
 /// The unique handle of an uTP peer discovery resource instance.
@@ -72,24 +70,19 @@ impl UtpPeerDiscovery {
 
         let inner_main_loop = inner.clone();
         tokio::spawn(async move {
-            inner_main_loop.start(sender).await;
+            inner_main_loop.run(sender).await;
         });
 
         Ok(Self { inner })
     }
-}
 
-#[async_trait]
-impl PeerDiscovery for UtpPeerDiscovery {
-    fn addr(&self) -> &SocketAddr {
+    /// Returns the address on which the discovery is listening on.
+    pub fn addr(&self) -> &SocketAddr {
         &self.inner.addr
     }
 
-    fn port(&self) -> u16 {
-        self.inner.addr.port()
-    }
-
-    async fn dial(
+    /// Try to dial the peer target address.
+    pub async fn dial(
         &self,
         peer_id: PeerId,
         peer_addr: SocketAddr,
@@ -97,7 +90,7 @@ impl PeerDiscovery for UtpPeerDiscovery {
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         connection_timeout: Duration,
-    ) -> Result<Box<dyn Peer>> {
+    ) -> Result<Peer> {
         let socket = self
             .inner
             .sockets
@@ -107,18 +100,17 @@ impl PeerDiscovery for UtpPeerDiscovery {
         if let Some(socket) = socket {
             let stream = socket.connect(peer_addr).await?;
 
-            return Ok(Box::new(
-                BitTorrentPeer::new_outbound(
-                    peer_id,
-                    peer_addr,
-                    PeerStream::Utp(stream),
-                    torrent,
-                    data_pool,
-                    protocol_extensions,
-                    connection_timeout,
-                )
-                .await?,
-            ));
+            return Ok(BitTorrentPeer::new_outbound(
+                peer_id,
+                peer_addr,
+                stream.into(),
+                torrent,
+                data_pool,
+                protocol_extensions,
+                connection_timeout,
+            )
+            .await?
+            .into());
         }
 
         Err(Error::Io(io::Error::new(
@@ -130,7 +122,8 @@ impl PeerDiscovery for UtpPeerDiscovery {
         )))
     }
 
-    async fn recv(&self) -> Option<PeerEntry> {
+    /// Try to receive a new incoming peer entry from the discovery.
+    pub async fn recv(&self) -> Option<PeerEntry> {
         let mut receiver = self.inner.receiver.lock().await;
         match receiver.recv().await {
             None => None,
@@ -141,7 +134,8 @@ impl PeerDiscovery for UtpPeerDiscovery {
         }
     }
 
-    fn close(&self) {
+    /// Close the peer discovery and stop accepting new connections.
+    pub fn close(&self) {
         self.inner.cancellation_token.cancel();
     }
 }
@@ -164,8 +158,8 @@ struct InnerUtpPeerDiscovery {
 }
 
 impl InnerUtpPeerDiscovery {
-    /// Start the main loop of the utp peer discovery.
-    async fn start(&self, sender: UnboundedSender<UtpStream>) {
+    /// Run the main loop of the utp peer discovery.
+    async fn run(&self, sender: UnboundedSender<UtpStream>) {
         debug!(
             "UTP peer discovery {} started on port {}",
             self,
@@ -210,7 +204,13 @@ impl InnerUtpPeerDiscovery {
         ];
 
         for addr in addrs {
-            match UtpSocket::new(addr, timeout, vec![]).await {
+            let socket = select! {
+                _ = time::sleep(timeout) => return Err(Error::Io(
+                    io::Error::new(io::ErrorKind::TimedOut, "timed out while binding uTP socket"),
+                )),
+                result = UtpSocket::bind(addr, vec![]) => result,
+            };
+            match socket {
                 Ok(socket) => {
                     trace!("Created uTP listener on {}", addr);
                     port = socket.addr().port();
@@ -233,7 +233,6 @@ impl InnerUtpPeerDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -251,7 +250,7 @@ mod tests {
         let result = utp_discovery.unwrap();
         assert_ne!(
             0,
-            result.port(),
+            result.addr().port(),
             "expected a port number to have been assigned"
         );
     }
@@ -264,14 +263,14 @@ mod tests {
         let listener = UtpPeerDiscovery::new()
             .await
             .expect("expected a new utp peer listener");
-        let port = listener.port();
-        let torrent = create_torrent!(
+        let port = listener.addr().port();
+        let torrent = torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
-            vec![Box::new(listener.clone())]
+            vec![listener.clone().into()]
         );
         let protocol_extensions = torrent.protocol_extensions().await.unwrap();
 

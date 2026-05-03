@@ -3,7 +3,6 @@ use crate::peer::PeerDiscovery;
 use crate::{LocalServiceDiscoveryEvent, TorrentContext};
 use async_trait::async_trait;
 use fx_callback::{Callback, Subscription};
-use std::sync::Arc;
 
 /// Retrieve torrent peers from the local service discovery.
 #[derive(Debug)]
@@ -63,7 +62,7 @@ impl TorrentOperation for TorrentLsdPeersOperation {
     async fn execute(
         &mut self,
         context: &mut TorrentContext,
-        _: &[Arc<dyn PeerDiscovery>],
+        _: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         if !self.initialized {
             self.initialize(context);
@@ -89,11 +88,12 @@ mod tests {
         let lsd = LocalServiceDiscovery::new(Ipv4Addr::LOCALHOST.into())
             .await
             .unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
+            vec![],
             vec![],
             None,
             Some(lsd)

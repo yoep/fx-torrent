@@ -212,7 +212,7 @@ impl TorrentOperation for TorrentFileValidationOperation {
     async fn execute(
         &mut self,
         torrent: &mut TorrentContext,
-        _: &[Arc<dyn PeerDiscovery>],
+        _: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         // early exit if the torrent is paused or in an error state
         if !self.should_check_files(torrent) {
@@ -264,7 +264,7 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
@@ -284,7 +284,7 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
@@ -309,11 +309,12 @@ mod tests {
             "piece-1_30.iso",
             Some("debian-12.4.0-amd64-DVD-1.iso"),
         );
-        let (mut context, mut command_receiver) = create_torrent_context!(
+        let (mut context, mut command_receiver) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
+            vec![],
             vec![],
             None,
             None,

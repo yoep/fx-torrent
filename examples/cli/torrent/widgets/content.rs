@@ -2,8 +2,8 @@ use crate::app::{FXKeyEvent, FXWidget};
 use crate::torrent::widgets::file_selection::FileSelectionWidget;
 use crate::torrent::widgets::{FilePriorityWidget, FilesWidget, PeersWidget, PriorityAction};
 use async_trait::async_trait;
-use fx_torrent::peer::PeerHandle;
-use fx_torrent::{File, FileIndex, FilePriority, PieceIndex, Torrent, TorrentPeer};
+use fx_torrent::peer::{Peer, PeerHandle};
+use fx_torrent::{File, FileIndex, FilePriority, PieceIndex, Torrent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint::Percentage;
 use ratatui::layout::{Layout, Rect};
@@ -33,7 +33,7 @@ impl ContentWidget {
         }
     }
 
-    pub async fn add_peer(&mut self, peer: TorrentPeer) {
+    pub async fn add_peer(&mut self, peer: Peer) {
         self.peers_widget.add_peer(peer).await;
     }
 

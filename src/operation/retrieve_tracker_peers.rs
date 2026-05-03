@@ -5,7 +5,6 @@ use crate::TorrentContext;
 use async_trait::async_trait;
 use fx_callback::{Callback, Subscription};
 use log::{debug, warn};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
@@ -116,7 +115,7 @@ impl TorrentOperation for TorrentTrackerPeersOperation {
     async fn execute(
         &mut self,
         context: &mut TorrentContext,
-        _: &[Arc<dyn PeerDiscovery>],
+        _: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         if !self.initialized {
             self.initialize(context).await;
@@ -157,11 +156,12 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let uri = "debian-udp.torrent";
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             uri,
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
+            vec![],
             vec![],
             None
         );
@@ -190,11 +190,12 @@ mod tests {
         let temp_path = temp_dir.path().to_str().unwrap();
         let uri = "debian-udp.torrent";
         let server = TrackerServer::new().await.unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             uri,
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
+            vec![],
             vec![],
             None
         );

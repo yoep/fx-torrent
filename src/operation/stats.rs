@@ -4,7 +4,6 @@ use crate::peer::{PeerDiscovery, PeerEvent};
 use crate::{TorrentContext, TorrentEvent};
 use async_trait::async_trait;
 use fx_callback::{Callback, Subscription};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The torrent stats operation collects metrics from the torrent peers and publishes them via the [TorrentEvent::Stats] event.
@@ -109,7 +108,7 @@ impl TorrentOperation for TorrentStatsOperation {
     async fn execute(
         &mut self,
         context: &mut TorrentContext,
-        _: &[Arc<dyn PeerDiscovery>],
+        _: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         self.initialize(context);
 
@@ -125,8 +124,7 @@ impl TorrentOperation for TorrentStatsOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer::Peer;
-    use crate::{create_peer_pair, create_torrent, TorrentEvent, TorrentFlags};
+    use crate::{TorrentEvent, TorrentFlags};
     use fx_callback::Callback;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -138,11 +136,12 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::Paused,
             TorrentConfig::builder().build(),
+            vec![],
             vec![],
             None
         );
@@ -167,22 +166,23 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let (tx, rx) = oneshot::channel();
-        let torrent = create_torrent!(
+        let torrent = torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![]
         );
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
+            vec![],
             None
         );
-        let (source, _target) = create_peer_pair!(&torrent);
+        let (source, _target) = tcp_peer_pair!(&torrent);
         let mut operation = TorrentStatsOperation::new();
 
         // initialize the operation
@@ -195,8 +195,8 @@ mod tests {
         );
 
         // add the peer to the peer pool
-        let source_client = source.client();
-        let result = context.peer_pool_mut().add_peer(Box::new(source));
+        let source_client = source.client_info().clone();
+        let result = context.peer_pool_mut().add_peer(source.into());
         assert!(
             result.is_ok(),
             "expected the peer to be added, but got {:?}",

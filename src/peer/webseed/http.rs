@@ -1,11 +1,10 @@
 use crate::metrics::Metric;
 use crate::peer::{
-    ConnectionDirection, ConnectionProtocol, Error, Metrics, Peer, PeerClientInfo, PeerEvent,
-    PeerHandle, PeerId, PeerState, Result,
+    ConnectionDirection, ConnectionProtocol, Error, Metrics, PeerClientInfo, PeerEvent, PeerHandle,
+    PeerId, PeerState, Result,
 };
 use crate::torrent::InnerTorrent;
-use crate::{FileAttributeFlags, Piece, PieceIndex, TorrentFileInfo, TorrentMetadata};
-use async_trait::async_trait;
+use crate::{FileAttributeFlags, Piece, TorrentFileInfo, TorrentMetadata};
 use bit_vec::BitVec;
 use derive_more::Display;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
@@ -40,6 +39,7 @@ pub struct HttpPeer {
 }
 
 impl HttpPeer {
+    /// Create a new HTTP/webseed peer instance.
     pub fn new(url: Url, torrent: InnerTorrent) -> Result<Self> {
         let handle = Handle::new();
         let client = Client::builder()
@@ -78,52 +78,41 @@ impl HttpPeer {
 
         Ok(Self { inner })
     }
-}
 
-#[async_trait]
-impl Peer for HttpPeer {
-    fn handle(&self) -> PeerHandle {
-        self.inner.handle
-    }
-
-    fn handle_as_ref(&self) -> &PeerHandle {
+    /// Returns the unique handle of the peer.
+    pub fn handle(&self) -> &PeerHandle {
         &self.inner.handle
     }
 
-    fn client(&self) -> PeerClientInfo {
-        self.inner.client_info.clone()
-    }
-
-    fn addr(&self) -> SocketAddr {
-        self.inner.addr
-    }
-
-    fn addr_as_ref(&self) -> &SocketAddr {
+    /// Returns the address of the remote peer.   
+    pub fn addr(&self) -> &SocketAddr {
         &self.inner.addr
     }
 
-    fn metrics(&self) -> &Metrics {
+    /// Returns the client information of the peer.  
+    pub fn client_info(&self) -> &PeerClientInfo {
+        &self.inner.client_info
+    }
+
+    /// Returns the metrics of the peer.
+    pub fn metrics(&self) -> &Metrics {
         &self.inner.metrics
     }
 
-    async fn state(&self) -> PeerState {
+    /// Returns the state of the peer.
+    pub async fn state(&self) -> PeerState {
+        // TODO: implement state changes
         PeerState::Idle
     }
 
-    async fn is_seed(&self) -> bool {
-        true
-    }
-
-    async fn remote_piece_bitfield(&self) -> BitVec {
+    /// Returns the bitfield of the remote peer.
+    pub async fn remote_piece_bitfield(&self) -> BitVec {
         let total_pieces = self.inner.torrent.total_pieces().await;
         BitVec::from_elem(total_pieces, true)
     }
 
-    fn notify_piece_availability(&self, _: Vec<PieceIndex>) {
-        // no-op
-    }
-
-    async fn close(&self) {
+    /// Close the peer connection.
+    pub fn close(&self) {
         self.inner.cancellation_token.cancel();
     }
 }
@@ -343,7 +332,6 @@ impl HttpPeerContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent;
     use crate::tests::read_test_file_to_bytes;
     use tempfile::tempdir;
 
@@ -356,7 +344,7 @@ mod tests {
         let expected_result =
             Url::parse("https://mirror.com/pub/debian-11.6.0-amd64-netinst.iso/README%25201.md")
                 .unwrap();
-        let torrent = create_torrent!(
+        let torrent = torrent!(
             "debian.torrent",
             temp_path,
             TorrentFlags::none(),

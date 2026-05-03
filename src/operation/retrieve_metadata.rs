@@ -3,7 +3,6 @@ use crate::peer::PeerDiscovery;
 use crate::{InnerTorrent, TorrentContext, TorrentFlags, TorrentMetadataInfo, TorrentState};
 use async_trait::async_trait;
 use log::{debug, info, trace, warn};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
@@ -153,7 +152,7 @@ impl TorrentOperation for TorrentMetadataOperation {
     async fn execute(
         &mut self,
         torrent: &mut TorrentContext,
-        _: &[Arc<dyn PeerDiscovery>],
+        _: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         self.cleanup_finished_tasks();
         self.update_local_state(torrent);
@@ -198,11 +197,12 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
+            vec![],
             vec![],
             None
         );
@@ -219,11 +219,12 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             uri,
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
+            vec![],
             vec![],
             None
         );
@@ -247,11 +248,12 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             uri,
             temp_path,
             TorrentFlags::Metadata,
             TorrentConfig::builder().build(),
+            vec![],
             vec![],
             Some(dht)
         );
@@ -280,6 +282,7 @@ mod tests {
 
         // run till completion
         timeout!(
+            Duration::from_millis(200),
             async {
                 loop {
                     let _ = operation.execute(&mut context, vec![].as_slice()).await;
@@ -289,7 +292,6 @@ mod tests {
                     time::sleep(Duration::from_millis(10)).await;
                 }
             },
-            Duration::from_millis(200),
             "expected the DHT operation to have been completed"
         );
         assert_eq!(

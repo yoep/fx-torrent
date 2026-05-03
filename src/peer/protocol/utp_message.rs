@@ -8,8 +8,12 @@ use std::fmt::{Debug, Formatter};
 pub enum UtpMessage {
     /// Connect to the utp peer with the connection id
     Connect { connection: ConnectionId },
-    /// The latest known state of an uTP peer with `sequence_number` & `acknowledge_number`.
-    State(ConnectionId, SequenceNumber, SequenceNumber),
+    /// The latest known state of an uTP peer.
+    State {
+        connection: ConnectionId,
+        seq_number: SequenceNumber,
+        ack_number: SequenceNumber,
+    },
     /// Message containing data information
     Data {
         connection: ConnectionId,
@@ -49,10 +53,14 @@ impl UtpMessage {
                 acknowledge_number,
                 payload: Vec::with_capacity(0),
             },
-            UtpMessage::State(connection_id, seq_number, ack_number) => Packet {
+            UtpMessage::State {
+                connection,
+                seq_number,
+                ack_number,
+            } => Packet {
                 state_type: StateType::State,
                 extension: Extension::None,
-                connection_id,
+                connection_id: connection,
                 timestamp_microseconds,
                 timestamp_difference_microseconds,
                 window_size,
@@ -108,11 +116,11 @@ impl TryFrom<&Packet> for UtpMessage {
             StateType::Syn => Ok(UtpMessage::Connect {
                 connection: value.connection_id,
             }),
-            StateType::State => Ok(UtpMessage::State(
-                value.connection_id,
-                value.sequence_number,
-                value.acknowledge_number,
-            )),
+            StateType::State => Ok(UtpMessage::State {
+                connection: value.connection_id,
+                seq_number: value.sequence_number,
+                ack_number: value.acknowledge_number,
+            }),
             StateType::Data => Ok(UtpMessage::Data {
                 connection: value.connection_id,
                 payload: value.payload.clone(),
@@ -133,7 +141,7 @@ impl From<&UtpMessage> for StateType {
     fn from(value: &UtpMessage) -> Self {
         match value {
             UtpMessage::Connect { .. } => StateType::Syn,
-            UtpMessage::State(_, _, _) => StateType::State,
+            UtpMessage::State { .. } => StateType::State,
             UtpMessage::Data { .. } => StateType::Data,
             UtpMessage::Terminate { .. } => StateType::Reset,
             UtpMessage::Close { .. } => StateType::Fin,
@@ -147,7 +155,15 @@ impl Debug for UtpMessage {
             UtpMessage::Connect { connection } => {
                 write!(f, "Connect{{ connection: {} }}", connection)
             }
-            UtpMessage::State(id, seq, ack) => write!(f, "State({}, {}, {})", id, seq, ack),
+            UtpMessage::State {
+                connection,
+                seq_number,
+                ack_number,
+            } => write!(
+                f,
+                "State{{ connection: {}, seq_number: {}, ack_number: {} }}",
+                connection, seq_number, ack_number
+            ),
             UtpMessage::Data {
                 connection,
                 payload,
@@ -185,7 +201,11 @@ mod tests {
         let result = StateType::from(&message);
         assert_eq!(StateType::Syn, result);
 
-        let message = UtpMessage::State(connection_id, 0, 0);
+        let message = UtpMessage::State {
+            connection: connection_id,
+            seq_number: 0,
+            ack_number: 0,
+        };
         let result = StateType::from(&message);
         assert_eq!(StateType::State, result);
 

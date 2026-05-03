@@ -1,7 +1,7 @@
 use crate::widgets::print_string_len;
 use fx_callback::{Callback, Subscription};
+use fx_torrent::format_bytes;
 use fx_torrent::peer::{Peer, PeerClientInfo, PeerEvent, PeerHandle, PeerState};
-use fx_torrent::{format_bytes, TorrentPeer};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::{Color, Line, Style, Widget};
@@ -23,16 +23,16 @@ impl PeersWidget {
         }
     }
 
-    pub async fn add_peer(&mut self, peer: TorrentPeer) {
+    pub async fn add_peer(&mut self, peer: Peer) {
         let events_receiver = peer.subscribe();
         let state = peer.state().await;
         let is_seed = peer.is_seed().await;
         let metrics = peer.metrics();
 
         self.peers.insert(
-            peer.handle(),
+            *peer.handle(),
             TorrentPeerData {
-                client: peer.client(),
+                client: peer.client_info().clone(),
                 available_pieces: metrics.available_pieces.get(),
                 client_interested: metrics.client_interested.get(),
                 remote_interested: metrics.remote_interested.get(),
@@ -163,7 +163,7 @@ impl Widget for &PeersWidget {
 
 #[derive(Debug)]
 struct TorrentPeerData {
-    peer: TorrentPeer,
+    peer: Peer,
     client: PeerClientInfo,
     state: PeerState,
     is_seed: bool,

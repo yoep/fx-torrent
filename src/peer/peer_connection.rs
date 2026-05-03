@@ -1,11 +1,10 @@
 use crate::peer::protocol::{Handshake, Message, UtpStream};
-use crate::peer::{ConnectionProtocol, Error, Metrics, PeerConn, PeerId, PeerResponse, Result};
-use async_trait::async_trait;
+use crate::peer::{ConnectionProtocol, Error, Metrics, PeerId, PeerResponse, Result};
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use derive_more::Display;
 use log::{debug, trace, warn};
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter};
 use std::io;
 use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, WriteHalf};
@@ -18,9 +17,120 @@ use tokio_util::sync::CancellationToken;
 /// The bytes length of an expected handshake message
 const HANDSHAKE_MESSAGE_LENGTH: usize = 68;
 
+/// The connection between our peer and the remote peer.
+#[derive(Debug)]
+pub enum PeerConnection {
+    Tcp(InnerConnection<TcpStream>),
+    Utp(InnerConnection<UtpStream>),
+}
+
+impl PeerConnection {
+    /// Create a new TCP peer connection.
+    pub fn new_tcp(id: PeerId, addr: SocketAddr, stream: TcpStream, metrics: Metrics) -> Self {
+        let cancellation_token = CancellationToken::new();
+        let (sender, receiver) = unbounded_channel();
+        let (reader, writer) = tokio::io::split(stream);
+
+        let mut reader = PeerReader::new(
+            id,
+            addr,
+            ConnectionProtocol::Tcp,
+            reader,
+            sender,
+            metrics,
+            cancellation_token.clone(),
+        );
+        tokio::spawn(async move { reader.run().await });
+
+        Self::Tcp(InnerConnection::<TcpStream> {
+            id,
+            addr,
+            receiver: Mutex::new(receiver),
+            writer: PeerWriter::new(writer),
+            cancellation_token,
+        })
+    }
+
+    /// Create a new uTP peer connection.
+    pub fn new_utp(id: PeerId, addr: SocketAddr, stream: UtpStream, metrics: Metrics) -> Self {
+        let cancellation_token = CancellationToken::new();
+        let (sender, receiver) = unbounded_channel();
+        let (reader, writer) = tokio::io::split(stream);
+
+        let mut reader = PeerReader::new(
+            id,
+            addr,
+            ConnectionProtocol::Utp,
+            reader,
+            sender,
+            metrics,
+            cancellation_token.clone(),
+        );
+        tokio::spawn(async move { reader.run().await });
+
+        Self::Utp(InnerConnection::<UtpStream> {
+            id,
+            addr,
+            receiver: Mutex::new(receiver),
+            writer: PeerWriter::new(writer),
+            cancellation_token,
+        })
+    }
+
+    /// Returns the protocol of the connection.
+    pub fn protocol(&self) -> ConnectionProtocol {
+        match self {
+            PeerConnection::Tcp(_) => ConnectionProtocol::Tcp,
+            PeerConnection::Utp(_) => ConnectionProtocol::Utp,
+        }
+    }
+
+    /// Try to receive an incoming message from the remote peer through the connection.
+    pub async fn recv(&self) -> Option<PeerResponse> {
+        match self {
+            PeerConnection::Tcp(conn) => conn.recv().await,
+            PeerConnection::Utp(conn) => conn.recv().await,
+        }
+    }
+
+    /// Try to write a message to the remote peer.
+    ///
+    /// ## Remark
+    ///
+    /// The caller should handle the write timeout.
+    pub async fn write(&self, bytes: &[u8]) -> Result<()> {
+        match self {
+            PeerConnection::Tcp(conn) => conn.write(bytes).await,
+            PeerConnection::Utp(conn) => conn.write(bytes).await,
+        }
+    }
+
+    /// Try to close the connection with the remote peer.
+    pub async fn close(&self) -> Result<()> {
+        match self {
+            PeerConnection::Tcp(conn) => conn.close().await,
+            PeerConnection::Utp(conn) => conn.close().await,
+        }
+    }
+}
+
+impl Display for PeerConnection {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let conn_type = match self {
+            PeerConnection::Tcp(_) => "Tcp",
+            PeerConnection::Utp(_) => "Utp",
+        };
+        let conn_info = match self {
+            PeerConnection::Tcp(conn) => conn.to_string(),
+            PeerConnection::Utp(conn) => conn.to_string(),
+        };
+        write!(f, "{}:{}", conn_type, conn_info)
+    }
+}
+
 #[derive(Debug, Display)]
 #[display("{}[{}]", id, addr)]
-pub struct PeerConnection<W>
+pub struct InnerConnection<W>
 where
     W: AsyncWrite + Debug + Send,
 {
@@ -28,8 +138,6 @@ where
     id: PeerId,
     /// The remote peer address
     addr: SocketAddr,
-    /// The underlying protocol being used within the connection
-    protocol: ConnectionProtocol,
     /// The receiver of the peer connection reader
     receiver: Mutex<UnboundedReceiver<PeerReaderEvent>>,
     /// The writer of the connection
@@ -37,84 +145,10 @@ where
     cancellation_token: CancellationToken,
 }
 
-impl<W> PeerConnection<W>
+impl<W> InnerConnection<W>
 where
     W: AsyncWrite + Debug + Send,
 {
-    pub fn new_tcp(
-        id: PeerId,
-        addr: SocketAddr,
-        stream: TcpStream,
-        metrics: Metrics,
-    ) -> PeerConnection<TcpStream> {
-        let protocol = ConnectionProtocol::Tcp;
-        let cancellation_token = CancellationToken::new();
-        let (sender, receiver) = unbounded_channel();
-        let (reader, writer) = tokio::io::split(stream);
-
-        let mut reader = PeerReader::new(
-            id,
-            addr,
-            protocol,
-            reader,
-            sender,
-            metrics,
-            cancellation_token.clone(),
-        );
-        tokio::spawn(async move { reader.run().await });
-
-        PeerConnection::<TcpStream> {
-            id,
-            addr,
-            protocol,
-            receiver: Mutex::new(receiver),
-            writer: PeerWriter::new(writer),
-            cancellation_token,
-        }
-    }
-
-    pub fn new_utp(
-        id: PeerId,
-        addr: SocketAddr,
-        stream: UtpStream,
-        metrics: Metrics,
-    ) -> PeerConnection<UtpStream> {
-        let protocol = ConnectionProtocol::Utp;
-        let cancellation_token = CancellationToken::new();
-        let (sender, receiver) = unbounded_channel();
-        let (reader, writer) = tokio::io::split(stream);
-
-        let mut reader = PeerReader::new(
-            id,
-            addr,
-            protocol,
-            reader,
-            sender,
-            metrics,
-            cancellation_token.clone(),
-        );
-        tokio::spawn(async move { reader.run().await });
-
-        PeerConnection::<UtpStream> {
-            id,
-            addr,
-            protocol,
-            receiver: Mutex::new(receiver),
-            writer: PeerWriter::new(writer),
-            cancellation_token,
-        }
-    }
-}
-
-#[async_trait]
-impl<W> PeerConn for PeerConnection<W>
-where
-    W: AsyncWrite + Debug + Send,
-{
-    fn protocol(&self) -> ConnectionProtocol {
-        self.protocol
-    }
-
     async fn recv(&self) -> Option<PeerResponse> {
         if let Some(event) = self.receiver.lock().await.recv().await {
             return Some(match event {
@@ -156,7 +190,7 @@ where
     }
 }
 
-impl<W> Drop for PeerConnection<W>
+impl<W> Drop for InnerConnection<W>
 where
     W: AsyncWrite + Debug + Send,
 {
@@ -373,8 +407,8 @@ where
 mod tests {
     use super::*;
 
-    use crate::peer::protocol::tests::UtpPacketCaptureExtension;
     use crate::peer::protocol::Piece;
+    use crate::peer::protocol::UtpPacketCapture;
     use crate::peer::ProtocolExtensionFlags;
     use crate::InfoHash;
     use std::net::Ipv4Addr;
@@ -392,15 +426,15 @@ mod tests {
             let info_hash = InfoHash::from_str(hash).unwrap();
             let peer_id = PeerId::new();
             let protocol_extension_flags = ProtocolExtensionFlags::LTEP;
-            let incoming_capture = UtpPacketCaptureExtension::new();
-            let outgoing_capture = UtpPacketCaptureExtension::new();
+            let incoming_capture = UtpPacketCapture::new();
+            let outgoing_capture = UtpPacketCapture::new();
             let (incoming_socket, outgoing_socket) = create_utp_socket_pair!(
-                vec![Box::new(incoming_capture.clone())],
-                vec![Box::new(outgoing_capture.clone())]
+                vec![incoming_capture.clone().into()],
+                vec![outgoing_capture.clone().into()]
             );
             let (incoming_stream, mut outgoing_stream) =
                 create_utp_stream_pair!(&incoming_socket, &outgoing_socket);
-            let connection = PeerConnection::<UtpStream>::new_utp(
+            let connection = PeerConnection::new_utp(
                 peer_id,
                 incoming_stream.addr(),
                 incoming_stream,
@@ -475,7 +509,7 @@ mod tests {
             let (mut incoming_stream, outgoing_stream) =
                 create_utp_stream_pair!(&incoming_socket, &outgoing_socket);
             let outgoing_stream_addr = outgoing_stream.addr();
-            let connection = PeerConnection::<UtpStream>::new_utp(
+            let connection = PeerConnection::new_utp(
                 peer_id,
                 outgoing_stream_addr,
                 outgoing_stream,
@@ -489,8 +523,8 @@ mod tests {
 
             let mut buffer = vec![0u8; HANDSHAKE_MESSAGE_LENGTH];
             let _ = timeout!(
-                incoming_stream.read_exact(&mut buffer),
                 Duration::from_millis(500),
+                incoming_stream.read_exact(&mut buffer),
                 "expected to have received the handshake bytes"
             )
             .unwrap();
@@ -551,8 +585,8 @@ mod tests {
             }.unwrap();
 
             let result = timeout!(
-                rx.recv(),
                 Duration::from_millis(500),
+                rx.recv(),
                 "expected a peer reader event"
             )
             .unwrap();
@@ -583,7 +617,7 @@ mod tests {
         let outgoing_stream = TcpStream::connect(incoming_addr)
             .await
             .expect("expected to create an outgoing connection");
-        let connection = PeerConnection::<TcpStream>::new_tcp(
+        let connection = PeerConnection::new_tcp(
             PeerId::new(),
             incoming_addr,
             outgoing_stream,

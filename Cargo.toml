@@ -34,7 +34,7 @@ byteorder = "1.5"
 crc = "3.4"
 derive_more = { version = "2.1", features = ["display"] }
 ed25519 = { version = "2.2", optional = true }
-ed25519-dalek = { version = "2.2", optional = true}
+ed25519-dalek = { version = "2.2", optional = true }
 futures = "0.3"
 fx-callback = "2.0"
 fx-handle = "1.0"
@@ -52,7 +52,7 @@ sha1 = "0.11.0"
 sha2 = "0.11.0"
 socket2 = "0.6"
 thiserror = "2.0"
-tokio = { version = "1.50", features = ["rt-multi-thread", "time", "macros"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "time", "macros"] }
 tokio-util = "0.7"
 tracing = { version = "0.1", optional = true }
 tracing-futures = { version = "0.2", optional = true }
@@ -60,17 +60,21 @@ tracing-subscriber = { version = "0.3", optional = true }
 url = "2.5"
 
 [features]
-default = ["dht", "extension-metadata", "extension-pex", "extension-holepunch", "extension-donthave", "lsd", "tracker-server"]
+default = ["dht", "extension-metadata", "extension-pex", "extension-donthave", "lsd", "tracker-server"]
 
 dht = ["dep:ed25519"]
 ed25519-dalek = ["dep:ed25519-dalek"]
 extension-donthave = []
-extension-holepunch = []
 extension-metadata = []
 extension-pex = []
 lsd = []
 ring-compat = ["dep:ring-compat"]
-tracing = ["dep:tracing", "dep:tracing-futures", "dep:tracing-subscriber"]
+tracing = [
+    "dep:tracing",
+    "dep:tracing-futures",
+    "dep:tracing-subscriber",
+    "tokio/tracing"
+]
 tracker-server = ["dep:axum"]
 
 [dev-dependencies]
@@ -81,8 +85,8 @@ log4rs = { version = "1.4", features = ["console_writer"] }
 mockall = "0.14"
 ratatui = "0.30"
 tempfile = "3.27"
-tokio = { version = "1.50", features = ["signal"] }
-tracing-chrome = "0.7"
+tokio = { version = "1.52", features = ["signal"] }
+console-subscriber = "0.5"
 
 [package.metadata.docs.rs]
 all-features = true

@@ -1,10 +1,8 @@
-use crate::peer::discovery::PeerDiscovery;
 use crate::peer::{
     BitTorrentPeer, Error, Peer, PeerEntry, PeerId, PeerStream, ProtocolExtensionFlags, Result,
 };
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
-use async_trait::async_trait;
 use derive_more::Display;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -24,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 pub type TcpPeerDiscoveryHandle = Handle;
 
 /// A peer dialer which establishes TCP peer connections.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TcpPeerDiscovery {
     inner: Arc<InnerTcpPeerDiscovery>,
 }
@@ -70,54 +68,19 @@ impl TcpPeerDiscovery {
 
         let inner_loop = inner.clone();
         tokio::spawn(async move {
-            inner_loop.start(sender, sockets).await;
+            inner_loop.run(sender, sockets).await;
         });
 
         Ok(Self { inner })
     }
 
-    /// Try to create a new BitTorrent peer from the given TCP stream.
-    async fn create_peer_from_stream(
-        peer_id: PeerId,
-        peer_addr: SocketAddr,
-        stream: TcpStream,
-        torrent: InnerTorrent,
-        data_pool: DataPool,
-        protocol_extensions: ProtocolExtensionFlags,
-        connection_timeout: Duration,
-    ) -> Result<Box<dyn Peer>> {
-        Ok(Box::new(
-            BitTorrentPeer::new_outbound(
-                peer_id,
-                peer_addr,
-                PeerStream::Tcp(stream),
-                torrent,
-                data_pool,
-                protocol_extensions,
-                connection_timeout,
-            )
-            .await?,
-        ))
-    }
-}
-
-impl Drop for TcpPeerDiscovery {
-    fn drop(&mut self) {
-        self.inner.cancellation_token.cancel();
-    }
-}
-
-#[async_trait]
-impl PeerDiscovery for TcpPeerDiscovery {
-    fn addr(&self) -> &SocketAddr {
+    /// Returns the address on which the discovery is listening on.
+    pub fn addr(&self) -> &SocketAddr {
         &self.inner.addr
     }
 
-    fn port(&self) -> u16 {
-        self.inner.addr.port()
-    }
-
-    async fn dial(
+    /// Try to dial the target peer address.
+    pub async fn dial(
         &self,
         peer_id: PeerId,
         peer_addr: SocketAddr,
@@ -125,7 +88,7 @@ impl PeerDiscovery for TcpPeerDiscovery {
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         connection_timeout: Duration,
-    ) -> Result<Box<dyn Peer>> {
+    ) -> Result<Peer> {
         select! {
             _ = time::sleep(connection_timeout) => {
                 Err(Error::Io(io::Error::new(io::ErrorKind::TimedOut, format!("connection with {} timed out", peer_addr))))
@@ -143,11 +106,42 @@ impl PeerDiscovery for TcpPeerDiscovery {
         }
     }
 
-    async fn recv(&self) -> Option<PeerEntry> {
+    /// Try to receive a new incoming peer entry from the discovery.
+    pub async fn recv(&self) -> Option<PeerEntry> {
         self.inner.receiver.lock().await.recv().await
     }
 
-    fn close(&self) {
+    /// Close the peer discovery and stop accepting new connections.
+    pub fn close(&self) {
+        self.inner.cancellation_token.cancel();
+    }
+
+    /// Try to create a new BitTorrent peer from the given TCP stream.
+    async fn create_peer_from_stream(
+        peer_id: PeerId,
+        peer_addr: SocketAddr,
+        stream: TcpStream,
+        torrent: InnerTorrent,
+        data_pool: DataPool,
+        protocol_extensions: ProtocolExtensionFlags,
+        connection_timeout: Duration,
+    ) -> Result<Peer> {
+        Ok(BitTorrentPeer::new_outbound(
+            peer_id,
+            peer_addr,
+            stream.into(),
+            torrent,
+            data_pool,
+            protocol_extensions,
+            connection_timeout,
+        )
+        .await?
+        .into())
+    }
+}
+
+impl Drop for TcpPeerDiscovery {
+    fn drop(&mut self) {
         self.inner.cancellation_token.cancel();
     }
 }
@@ -162,8 +156,8 @@ struct InnerTcpPeerDiscovery {
 }
 
 impl InnerTcpPeerDiscovery {
-    /// Start the main loop of the tcp peer listener.
-    async fn start(&self, sender: UnboundedSender<PeerEntry>, sockets: Vec<TcpListener>) {
+    /// Run the main loop of the tcp peer listener.
+    async fn run(&self, sender: UnboundedSender<PeerEntry>, sockets: Vec<TcpListener>) {
         debug!(
             "TCP peer discovery {} started on port {}",
             self,
@@ -244,9 +238,9 @@ impl InnerTcpPeerDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::create_torrent;
     use crate::peer::tests::new_tcp_peer_discovery;
     use crate::peer::PeerState;
+    use crate::storage::MemoryStorage;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -254,41 +248,64 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let listener = new_tcp_peer_discovery()
+        let listener = TcpPeerDiscovery::new()
             .await
             .expect("expected a new tcp peer listener");
-        let torrent = create_torrent!(
+        let torrent = torrent!(
             "debian-udp.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
-            vec![Box::new(listener)]
+            vec![listener.into()],
+            |_| Box::new(MemoryStorage::new()),
+            None
         );
         let listener_port = torrent
             .peer_port()
             .await
             .expect("expected a torrent peer listener port");
-        let protocol_extensions = torrent.protocol_extensions().await.unwrap();
-        let dialer = new_tcp_peer_discovery()
+        let protocol_extensions =
+            timeout!(Duration::from_millis(100), torrent.protocol_extensions())
+                .expect("expected the torrent protocol extensions");
+        let dialer = TcpPeerDiscovery::new()
             .await
             .expect("expected a new tcp peer dialer");
 
-        let result = dialer
-            .dial(
+        // try to create an outgoing peer connection through the dialer
+        let data_pool = timeout!(
+            Duration::from_millis(100),
+            torrent.inner.data_pool(),
+            "expected the torrent data pool"
+        )
+        .unwrap();
+        let result = timeout!(
+            Duration::from_millis(250),
+            dialer.dial(
                 PeerId::new(),
                 SocketAddr::from((Ipv4Addr::LOCALHOST, listener_port)),
                 torrent.inner.clone(),
-                torrent.inner.data_pool().await.unwrap(),
+                data_pool,
                 protocol_extensions,
                 Duration::from_secs(1),
             )
-            .await
-            .expect("expected a tcp peer connection to have been established");
-        let state = result.state().await;
+        )
+        .expect("expected a tcp peer connection to have been established");
+
+        // validate the state of the created outgoing peer connection
+        let state = timeout!(
+            Duration::from_millis(100),
+            result.state(),
+            "expected the peer state"
+        );
         assert_ne!(PeerState::Error, state);
 
-        let total_peers = torrent.active_peer_connections().await;
+        // validate that the peer has been added to the torrent peer pool
+        let total_peers = timeout!(
+            Duration::from_millis(1500),
+            torrent.active_peer_connections(),
+            "expected the active peer connections"
+        );
         assert_eq!(
             1, total_peers,
             "expected the connection to have been established with the torrent listener"
@@ -306,25 +323,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tcp_discovery_port() {
-        init_logger!();
-        let listener = new_tcp_peer_discovery().await.unwrap();
-
-        let result = listener.port();
-
-        assert_ne!(
-            0, result,
-            "expected the underlying assigned port by the OS the have been returned"
-        );
-        assert_eq!(listener.inner.addr.port(), result);
-    }
-
-    #[tokio::test]
     async fn test_tcp_discovery_recv() {
         init_logger!();
         let (tx, mut rx) = unbounded_channel();
         let listener = new_tcp_peer_discovery().await.unwrap();
-        let port = listener.port();
+        let port = listener.addr().port();
 
         tokio::spawn(async move {
             if let Some(entry) = listener.recv().await {
@@ -338,8 +341,8 @@ mod tests {
             .expect("expected the connection to succeed");
 
         let result = timeout!(
-            rx.recv(),
             Duration::from_millis(200),
+            rx.recv(),
             "expected to receive an incoming connection"
         )
         .unwrap();
@@ -358,7 +361,7 @@ mod tests {
     async fn test_tcp_discovery_drop() {
         init_logger!();
         let listener = new_tcp_peer_discovery().await.unwrap();
-        let addr: SocketAddr = (Ipv4Addr::LOCALHOST, listener.port()).into();
+        let addr: SocketAddr = (Ipv4Addr::LOCALHOST, listener.addr().port()).into();
 
         drop(listener);
         time::sleep(Duration::from_millis(100)).await;

@@ -1463,8 +1463,8 @@ mod tests {
             .expect("expected the tracker to have been created");
 
         let result = timeout!(
-            rx.recv(),
             Duration::from_millis(750),
+            rx.recv(),
             "expected to receive an event"
         )
         .unwrap();

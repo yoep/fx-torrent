@@ -1,5 +1,445 @@
 use std::sync::Once;
 
+/// Create a [TorrentContext] instance for the given uri and options.
+macro_rules! torrent_context {
+    ($uri:expr, $temp_dir:expr, $options:expr) => {{
+        torrent_context!(
+            $uri,
+            $temp_dir,
+            $options,
+            crate::TorrentConfig::builder().path($temp_dir).build()
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr) => {{
+        use crate::peer::{TcpPeerDiscovery, UtpPeerDiscovery};
+
+        let tcp_discovery = TcpPeerDiscovery::new()
+            .await
+            .expect("expected a new tcp peer discovery");
+        let utp_discovery = UtpPeerDiscovery::new()
+            .await
+            .expect("expected a new utp peer discovery");
+
+        torrent_context!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            vec![tcp_discovery.into(), utp_discovery.into(),]
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr) => {{
+        torrent_context!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $discoveries,
+            Some(crate::dht::DhtTracker::builder().build().await.unwrap())
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr) => {{
+        use crate::peer::extension::DontHaveExtension;
+        use crate::peer::extension::HolepunchExtension;
+        use crate::peer::extension::MetadataExtension;
+        use crate::peer::extension::PexExtension;
+
+        torrent_context!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $discoveries,
+            vec![
+                || MetadataExtension::new().into(),
+                || PexExtension::new(std::time::Duration::from_secs(90)).into(),
+                || DontHaveExtension::new().into(),
+                || HolepunchExtension::new().into(),
+            ],
+            Some(crate::dht::DhtTracker::builder().build().await.unwrap())
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr) => {{
+        use std::sync::Arc;
+
+        torrent_context!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $discoveries,
+            $extensions,
+            $dht,
+            None,
+            |_, _| Arc::new(crate::storage::MemoryStorage::new())
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr, $lsd:expr) => {{
+        use std::sync::Arc;
+
+        torrent_context!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $discoveries,
+            $extensions,
+            $dht,
+            $lsd,
+            |_, _| Arc::new(crate::storage::MemoryStorage::new())
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr, $lsd:expr, $storage:expr) => {{
+        use crate::dht::DhtTracker;
+        use crate::peer::PeerDiscovery;
+        use crate::torrent_data::DataPool;
+        use crate::tracker::TrackerClient;
+        use crate::ExtensionFactory;
+        use crate::LocalServiceDiscovery;
+        use crate::{
+            TorrentConfig, TorrentContext, TorrentFlags, TorrentMetadata,
+            DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
+        };
+        use std::time::Duration;
+
+        let uri: &str = $uri;
+        let options: TorrentFlags = $options;
+        let config: TorrentConfig = $config;
+        let discoveries: Vec<PeerDiscovery> = $discoveries;
+        let extensions: Vec<ExtensionFactory> = $extensions;
+        let dht: Option<DhtTracker> = $dht;
+        let lsd: Option<LocalServiceDiscovery> = $lsd;
+        let metadata: TorrentMetadata = metadata!(uri);
+        let info_hash = metadata.info_hash.clone();
+        let config = TorrentConfig::builder()
+            .path($temp_dir)
+            .peer_connection_timeout(config.peer_connection_timeout)
+            .max_in_flight_pieces(config.max_in_flight_pieces)
+            .peers_upper_limit(config.peers_upper_limit)
+            .peers_lower_limit(config.peers_lower_limit)
+            .peers_in_flight(config.peers_in_flight)
+            .build();
+        let data_pool = DataPool::new();
+        let (command_sender, receiver) = channel!(512);
+        let mut trackers = vec![TrackerClient::new(Duration::from_secs(2)).into()];
+
+        if let Some(dht) = dht {
+            trackers.push(dht.into());
+        }
+        if let Some(lsd) = lsd {
+            trackers.push(lsd.into());
+        }
+
+        let peer_port = discoveries.first().map(|e| e.addr().port());
+        (
+            TorrentContext::new(
+                metadata,
+                config,
+                peer_port,
+                DEFAULT_TORRENT_PROTOCOL_EXTENSIONS(),
+                extensions,
+                options,
+                data_pool.clone(),
+                trackers,
+                ($storage)(info_hash, data_pool),
+                command_sender,
+            ),
+            receiver,
+        )
+    }};
+}
+
+/// Create a new [Torrent] instance.
+macro_rules! torrent {
+    ($uri:expr, $temp_dir:expr, $options:expr) => {{
+        torrent!(
+            $uri,
+            $temp_dir,
+            $options,
+            crate::TorrentConfig::builder().path($temp_dir).build()
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr) => {{
+        torrent!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            crate::operation::DEFAULT_OPERATIONS()
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr) => {{
+        use crate::peer::{TcpPeerDiscovery, UtpPeerDiscovery};
+
+        let tcp_discovery = TcpPeerDiscovery::new()
+            .await
+            .expect("expected a new tcp peer discovery");
+        let peer_port = tcp_discovery.addr().port();
+        let utp_discovery = UtpPeerDiscovery::with_port(peer_port)
+            .await
+            .expect("expected a new utp peer discovery");
+
+        torrent!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $operations,
+            vec![tcp_discovery.into(), utp_discovery.into(),]
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr) => {{
+        torrent!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $operations,
+            $discoveries,
+            |params| {
+                Box::new(crate::storage::DiskStorage::new(
+                    params.info_hash,
+                    params.path,
+                    params.data_pool,
+                ))
+            }
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr) => {{
+        torrent!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $operations,
+            $discoveries,
+            $storage,
+            Some(crate::dht::DhtTracker::builder().build().await.unwrap())
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr, $dht:expr) => {{
+        torrent!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $operations,
+            $discoveries,
+            $storage,
+            $dht,
+            crate::tracker::TrackerClient::new(std::time::Duration::from_secs(2))
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr, $dht:expr, $tracker_manager:expr) => {{
+        use crate::peer::extension::DontHaveExtension;
+        use crate::peer::extension::HolepunchExtension;
+        use crate::peer::extension::MetadataExtension;
+        use crate::peer::extension::PexExtension;
+
+        torrent!(
+            $uri,
+            $temp_dir,
+            $options,
+            $config,
+            $operations,
+            $discoveries,
+            $storage,
+            $dht,
+            $tracker_manager,
+            vec![
+                || DontHaveExtension::new().into(),
+                || HolepunchExtension::new().into(),
+                || MetadataExtension::new().into(),
+                || PexExtension::new(std::time::Duration::from_secs(5)).into(),
+            ]
+        )
+    }};
+    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr, $dht:expr, $tracker_manager:expr, $extensions:expr) => {{
+        use crate::dht::DhtTracker;
+        use crate::operation::TorrentOperation;
+        use crate::peer::PeerDiscovery;
+        use crate::ExtensionFactory;
+        use crate::{Torrent, TorrentConfig, TorrentFlags};
+
+        let uri: &str = $uri;
+        let options: TorrentFlags = $options;
+        let config: TorrentConfig = $config;
+        let operations: Vec<Box<dyn TorrentOperation>> = $operations;
+        let discoveries: Vec<PeerDiscovery> = $discoveries;
+        let extensions: Vec<ExtensionFactory> = $extensions;
+        let dht: Option<DhtTracker> = $dht;
+        let torrent_info = metadata!(uri);
+        let tracker_manager = $tracker_manager;
+        let config = TorrentConfig::builder()
+            .path($temp_dir)
+            .peer_connection_timeout(config.peer_connection_timeout)
+            .max_in_flight_pieces(config.max_in_flight_pieces)
+            .peers_upper_limit(config.peers_upper_limit)
+            .peers_lower_limit(config.peers_lower_limit)
+            .build();
+        let mut trackers = vec![tracker_manager.into()];
+
+        if let Some(dht) = dht {
+            trackers.push(dht.into());
+        }
+
+        Torrent::request()
+            .metadata(torrent_info)
+            .peer_discoveries(discoveries)
+            .options(options)
+            .config(config)
+            .operations(operations)
+            .storage($storage)
+            .trackers(trackers)
+            .extensions(extensions)
+            .build()
+            .unwrap()
+    }};
+}
+
+/// Create a new pair of TCP peers.
+macro_rules! tcp_peer_pair {
+    ($torrent:expr) => {{
+        tcp_peer_pair!($torrent, $torrent, crate::peer::ProtocolExtensionFlags::none())
+    }};
+    ($torrent:expr, $protocol_extensions:expr) => {{
+        tcp_peer_pair!($torrent, $torrent, $protocol_extensions)
+    }};
+    ($incoming_torrent:expr, $outgoing_torrent:expr, $protocol_extensions:expr) => {{
+        use crate::Torrent;
+        use crate::peer::BitTorrentPeer;
+        use crate::peer::PeerId;
+        use crate::peer::ProtocolExtensionFlags;
+        use std::net::{Ipv4Addr};
+        use std::time::Duration;
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::sync::oneshot;
+
+        let incoming_torrent: &Torrent = $incoming_torrent;
+        let outgoing_torrent: &Torrent = $outgoing_torrent;
+        let protocol_extensions: ProtocolExtensionFlags = $protocol_extensions;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let outgoing_addr = listener.local_addr().unwrap();
+        let outgoing_stream = TcpStream::connect(outgoing_addr).await.unwrap();
+        let (incoming_stream, incoming_addr) = listener.accept().await.unwrap();
+
+        // offload the incoming peer to a separate task
+        // this is required, as the `new_inbound` wait for the handshake to be completed before returning
+        let incoming_peer = BitTorrentPeer::new_inbound(
+            PeerId::new(),
+            incoming_addr,
+            incoming_stream.into(),
+            incoming_torrent.inner.clone(),
+            incoming_torrent.inner.data_pool().await.unwrap(),
+            protocol_extensions,
+            Duration::from_secs(2),
+        );
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let result = incoming_peer.await.expect("expected the incoming peer to have been created");
+            let _ = tx.send(result);
+        });
+
+        let outgoing_peer = BitTorrentPeer::new_outbound(
+            PeerId::new(),
+            outgoing_addr,
+            outgoing_stream.into(),
+            outgoing_torrent.inner.clone(),
+            outgoing_torrent.inner.data_pool().await.unwrap(),
+            protocol_extensions,
+            Duration::from_secs(2),
+        ).await.expect("expected the outgoing peer to have been created");
+
+        let incoming_peer = rx.await.expect("expected the incoming peer to have been received");
+        (incoming_peer, outgoing_peer)
+    }}
+}
+
+/// Create a new pair of uTP peers.
+macro_rules! utp_peer_pair {
+    ($torrent:expr) => {{
+        use crate::peer::ProtocolExtensionFlags;
+
+        utp_peer_pair!($torrent, $torrent, ProtocolExtensionFlags::none())
+    }};
+    ($incoming_torrent:expr, $outgoing_torrent:expr, $protocol_extensions:expr) => {{
+        use core::net::{SocketAddr, Ipv4Addr};
+
+        let incoming_socket = crate::peer::protocol::UtpSocket::bind(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            vec![],
+        ).await.unwrap();
+        let outgoing_socket = crate::peer::protocol::UtpSocket::bind(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            vec![],
+        ).await.unwrap();
+
+        let pair = utp_peer_pair!(
+            $incoming_torrent,
+            $outgoing_torrent,
+            $protocol_extensions,
+            &incoming_socket,
+            &outgoing_socket
+        );
+
+        (pair.0, pair.1, incoming_socket, outgoing_socket)
+    }};
+    ($incoming_torrent:expr, $outgoing_torrent:expr, $protocol_extensions:expr, $in_socket:expr, $out_socket:expr) => {{
+        use crate::Torrent;
+        use crate::peer::protocol::UtpSocket;
+        use crate::peer::{BitTorrentPeer, PeerId, ProtocolExtensionFlags};
+        use std::time::Duration;
+        use tokio::sync::oneshot;
+
+        let incoming_torrent: &Torrent = $incoming_torrent;
+        let outgoing_torrent: &Torrent = $outgoing_torrent;
+        let protocol_extensions: ProtocolExtensionFlags = $protocol_extensions;
+
+        let incoming_socket: &UtpSocket = $in_socket;
+        let outgoing_socket: &UtpSocket = $out_socket;
+
+        let outgoing_stream = outgoing_socket
+            .connect(incoming_socket.addr())
+            .await
+            .expect("expected an outgoing uTP stream to be established");
+        let incoming_stream = incoming_socket
+            .recv()
+            .await
+            .expect("expected an incoming uTP stream to be established");
+
+        // offload the incoming peer to a separate task
+        // this is required, as the `new_inbound` wait for the handshake to be completed before returning
+        let incoming_peer = BitTorrentPeer::new_inbound(
+            PeerId::new(),
+            incoming_stream.addr(),
+            incoming_stream.into(),
+            incoming_torrent.inner.clone(),
+            incoming_torrent.inner.data_pool().await.unwrap(),
+            protocol_extensions,
+            Duration::from_secs(2),
+        );
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let result = incoming_peer.await.expect("expected the incoming peer to have been created");
+            let _ = tx.send(result);
+        });
+
+        let outgoing_peer = BitTorrentPeer::new_outbound(
+            PeerId::new(),
+            outgoing_stream.addr(),
+            outgoing_stream.into(),
+            outgoing_torrent.inner.clone(),
+            outgoing_torrent.inner.data_pool().await.unwrap(),
+            protocol_extensions,
+            Duration::from_secs(2),
+        ).await.expect("expected the outgoing peer to have been created");
+
+        let incoming_peer = rx.await.expect("expected the incoming peer to have been created");
+        (incoming_peer, outgoing_peer)
+    }};
+}
+
 pub(crate) static INIT: Once = Once::new();
 
 /// Initializes the logger with the specified log level.
@@ -52,126 +492,6 @@ macro_rules! metadata {
     }};
 }
 
-/// Create a [TorrentContext] instance for the given uri and options.
-#[macro_export]
-macro_rules! create_torrent_context {
-    ($uri:expr, $temp_dir:expr, $options:expr) => {{
-        create_torrent_context!(
-            $uri,
-            $temp_dir,
-            $options,
-            crate::TorrentConfig::builder().path($temp_dir).build()
-        )
-    }};
-    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr) => {{
-        use crate::peer::{PeerDiscovery, TcpPeerDiscovery, UtpPeerDiscovery};
-
-        let tcp_discovery = TcpPeerDiscovery::new()
-            .await
-            .expect("expected a new tcp peer discovery");
-        let utp_discovery = UtpPeerDiscovery::new()
-            .await
-            .expect("expected a new utp peer discovery");
-        let discoveries: Vec<Box<dyn PeerDiscovery>> =
-            vec![Box::new(tcp_discovery), Box::new(utp_discovery)];
-
-        create_torrent_context!($uri, $temp_dir, $options, $config, discoveries)
-    }};
-    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr) => {{
-        create_torrent_context!(
-            $uri,
-            $temp_dir,
-            $options,
-            $config,
-            $discoveries,
-            Some(crate::dht::DhtTracker::builder().build().await.unwrap())
-        )
-    }};
-    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr) => {{
-        use std::sync::Arc;
-
-        create_torrent_context!(
-            $uri,
-            $temp_dir,
-            $options,
-            $config,
-            $discoveries,
-            $dht,
-            None,
-            |_, _| Arc::new(crate::storage::MemoryStorage::new())
-        )
-    }};
-    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr, $lsd:expr) => {{
-        use std::sync::Arc;
-
-        create_torrent_context!(
-            $uri,
-            $temp_dir,
-            $options,
-            $config,
-            $discoveries,
-            $dht,
-            $lsd,
-            |_, _| Arc::new(crate::storage::MemoryStorage::new())
-        )
-    }};
-    ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $dht:expr, $lsd:expr, $storage:expr) => {{
-        use crate::dht::DhtTracker;
-        use crate::peer::PeerDiscovery;
-        use crate::torrent_data::DataPool;
-        use crate::tracker::TrackerClient;
-        use crate::LocalServiceDiscovery;
-        use crate::{
-            TorrentConfig, TorrentContext, TorrentFlags, TorrentMetadata,
-            DEFAULT_TORRENT_EXTENSIONS, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
-        };
-        use std::time::Duration;
-
-        let uri: &str = $uri;
-        let options: TorrentFlags = $options;
-        let config: TorrentConfig = $config;
-        let discoveries: Vec<Box<dyn PeerDiscovery>> = $discoveries;
-        let dht: Option<DhtTracker> = $dht;
-        let lsd: Option<LocalServiceDiscovery> = $lsd;
-        let metadata: TorrentMetadata = metadata!(uri);
-        let info_hash = metadata.info_hash.clone();
-        let config = TorrentConfig::builder()
-            .path($temp_dir)
-            .peer_connection_timeout(config.peer_connection_timeout)
-            .max_in_flight_pieces(config.max_in_flight_pieces)
-            .peers_upper_limit(config.peers_upper_limit)
-            .peers_lower_limit(config.peers_lower_limit)
-            .peers_in_flight(config.peers_in_flight)
-            .build();
-        let data_pool = DataPool::new();
-        let (command_sender, receiver) = channel!(512);
-        let mut trackers = vec![TrackerClient::new(Duration::from_secs(2)).into()];
-
-        if let Some(dht) = dht {
-            trackers.push(dht.into());
-        }
-        if let Some(lsd) = lsd {
-            trackers.push(lsd.into());
-        }
-
-        (
-            TorrentContext::new(
-                metadata,
-                config,
-                discoveries.first().map(|e| e.port()),
-                DEFAULT_TORRENT_PROTOCOL_EXTENSIONS(),
-                DEFAULT_TORRENT_EXTENSIONS(),
-                options,
-                data_pool.clone(),
-                trackers,
-                ($storage)(info_hash, data_pool),
-                command_sender,
-            ),
-            receiver,
-        )
-    }};
-}
-
 /// Asserts that a condition is true within a specified timeout.
 macro_rules! assert_timeout {
     ($timeout:expr, $condition:expr) => {{
@@ -207,10 +527,10 @@ macro_rules! assert_timeout {
 
 /// A macro wrapper for [`tokio::time::timeout`] that awaits a future with a timeout duration.
 macro_rules! timeout {
-    ($future:expr, $duration:expr) => {{
-        timeout!($future, $duration, "operation timed-out")
+    ($duration:expr, $future:expr) => {{
+        timeout!($duration, $future, "operation timed-out")
     }};
-    ($future:expr, $duration:expr, $message:expr) => {{
+    ($duration:expr, $future:expr, $message:expr) => {{
         use std::io;
         use std::time::Duration;
         use tokio::time::timeout;

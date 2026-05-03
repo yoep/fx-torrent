@@ -6,7 +6,6 @@ use futures::future::BoxFuture;
 use futures::FutureExt;
 use log::{debug, trace};
 use std::fmt::Debug;
-use std::sync::Arc;
 use tokio::net::lookup_host;
 
 /// Connect to the DHT nodes defined within the torrent metadata.
@@ -108,7 +107,7 @@ impl TorrentOperation for TorrentDhtNodesOperation {
     async fn execute(
         &mut self,
         context: &mut TorrentContext,
-        _: &[Arc<dyn PeerDiscovery>],
+        _: &[PeerDiscovery],
     ) -> TorrentOperationResult {
         self.poll_in_flight();
 
@@ -145,11 +144,12 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let (mut context, _) = create_torrent_context!(
+        let (mut context, _) = torrent_context!(
             uri,
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
+            vec![],
             vec![],
             Some(dht)
         );
@@ -168,14 +168,11 @@ mod tests {
         );
 
         // keep polling till the operation is completed
-        timeout!(
-            async {
-                while !operation.initialized {
-                    let _ = operation.execute(&mut context, vec![].as_slice()).await;
-                }
-            },
-            Duration::from_secs(5)
-        );
+        timeout!(Duration::from_secs(5), async {
+            while !operation.initialized {
+                let _ = operation.execute(&mut context, vec![].as_slice()).await;
+            }
+        });
         let result = operation.initialized;
         assert_eq!(true, result, "expected the operation to be completed");
     }
@@ -189,11 +186,12 @@ mod tests {
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
             let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
-            let (context, _) = create_torrent_context!(
+            let (context, _) = torrent_context!(
                 uri,
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
+                vec![],
                 vec![],
                 None
             );
@@ -218,11 +216,12 @@ mod tests {
                 .build()
                 .await
                 .unwrap();
-            let (context, _) = create_torrent_context!(
+            let (context, _) = torrent_context!(
                 uri,
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
+                vec![],
                 vec![],
                 Some(dht)
             );

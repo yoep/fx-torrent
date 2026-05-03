@@ -546,6 +546,7 @@ impl App {
             )
             .session_cache(FxSessionCache::new(SESSION_CACHE_LIMIT))
             .operations(operations)
+            .default_extensions()
             .dht_option(dht)
             .build()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
