@@ -454,7 +454,7 @@ impl Drop for TorrentConnectPeersOperation {
 mod tests {
     use super::*;
     use crate::peer;
-    use crate::peer::extension::{DontHaveExtension, MetadataExtension, PexExtension};
+    use crate::peer::extension::{DontHaveExtension, MetadataExtension};
     use crate::peer::{MockDiscovery, PeerDiscovery};
     use std::net::Ipv4Addr;
     use tempfile::tempdir;
@@ -558,11 +558,9 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
-            vec![
-                || MetadataExtension::new().into(),
-                || PexExtension::new().into(),
-                || DontHaveExtension::new().into(),
-            ],
+            vec![|| MetadataExtension::new().into(), || {
+                DontHaveExtension::new().into()
+            },],
             None
         );
         let mut operation = TorrentConnectPeersOperation::new(false);

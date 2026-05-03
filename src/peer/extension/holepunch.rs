@@ -412,38 +412,24 @@ mod tests {
     mod on_message {
         use super::*;
         use crate::operation::TorrentConnectPeersOperation;
-        use crate::peer::{PeerId, ProtocolExtensionFlags, UtpPeerDiscovery};
+        use crate::peer::{
+            PeerDiscovery, PeerId, ProtocolExtensionFlags, TcpPeerDiscovery, UtpPeerDiscovery,
+        };
         use crate::storage::MemoryStorage;
-        use crate::{Torrent, TorrentCommand, TorrentConfig};
+        use crate::{Torrent, TorrentConfig};
         use std::time::Duration;
         use tempfile::tempdir;
 
         #[tokio::test]
-        async fn test_on_rendezvous() {
+        async fn test_send_rendezvous() {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let initiating_torrent = Torrent::request()
-                .metadata(metadata!("debian-udp.torrent"))
-                .config(TorrentConfig::builder().path(temp_path).build())
-                .protocol_extensions(ProtocolExtensionFlags::LTEP)
-                .extension(|| HolepunchExtension::new().into())
-                .operations(vec![Box::new(TorrentConnectPeersOperation::new(false))])
-                .peer_discovery(UtpPeerDiscovery::new().await.unwrap().into())
-                .storage(|_| Box::new(MemoryStorage::new()))
-                .build()
-                .expect("expected the initiating torrent to be created");
+            let initiating_torrent =
+                create_torrent(temp_path, UtpPeerDiscovery::new().await.unwrap().into()).await;
             let relay_discovery = UtpPeerDiscovery::new().await.unwrap();
-            let relay_torrent = torrent!(
-                "debian-udp.torrent",
-                temp_path,
-                TorrentFlags::none(),
-                TorrentConfig::builder().build(),
-                vec![],
-                vec![relay_discovery.clone().into()],
-                |_| Box::new(MemoryStorage::new()),
-                None
-            );
+            let relay_torrent =
+                create_relay_torrent(temp_path, &[relay_discovery.clone().into()]).await;
 
             // connect the initiating torrent to the relay torrent
             let (initiating_peer, relay_peer1, _in_socket, _out_socket) = utp_peer_pair!(
@@ -453,10 +439,7 @@ mod tests {
             );
             initiating_torrent
                 .inner
-                .sender()
-                .fire_and_forget(TorrentCommand::PeerConnected {
-                    peer: relay_peer1.into(),
-                })
+                .peer_connected(relay_peer1.into())
                 .await;
             assert_timeout!(
                 Duration::from_millis(250),
@@ -474,16 +457,8 @@ mod tests {
             );
 
             // create the target torrent
-            let target_torrent = torrent!(
-                "debian-udp.torrent",
-                temp_path,
-                TorrentFlags::none(),
-                TorrentConfig::builder().build(),
-                vec![Box::new(TorrentConnectPeersOperation::new(false)),],
-                vec![UtpPeerDiscovery::new().await.unwrap().into()],
-                |_| Box::new(MemoryStorage::new()),
-                None
-            );
+            let target_torrent =
+                create_torrent(temp_path, UtpPeerDiscovery::new().await.unwrap().into()).await;
             let target_addr = SocketAddr::from((
                 Ipv4Addr::LOCALHOST,
                 target_torrent
@@ -505,11 +480,7 @@ mod tests {
                 )
                 .await
                 .expect("expected the target peer to be dialed");
-            relay_torrent
-                .inner
-                .sender()
-                .fire_and_forget(TorrentCommand::PeerConnected { peer: peer.clone() })
-                .await;
+            relay_torrent.inner.peer_connected(peer.clone()).await;
             assert_timeout!(
                 Duration::from_millis(250),
                 relay_torrent.active_peer_connections().await == 1,
@@ -529,33 +500,151 @@ mod tests {
             );
 
             // send the rendezvous message from the initiating peer to the relay peer
-            let extension_number = initiating_peer
-                .remote_extension_number(HolepunchExtension::NAME)
-                .await
-                .expect("expected the HolePunch extension to have been found");
-            let payload = serde_bencode::to_bytes(&HolepunchMessage {
-                message_type: MessageType::Rendezvous,
-                addr_type: match target_addr.ip() {
-                    IpAddr::V4(_) => AddrType::Ipv4,
-                    IpAddr::V6(_) => AddrType::Ipv6,
-                },
-                addr: match target_addr.ip() {
-                    IpAddr::V4(ip) => ip.octets().to_vec(),
-                    IpAddr::V6(ip) => ip.octets().to_vec(),
-                },
-                port: target_addr.port(),
-                err_code: None,
-            })
-            .unwrap();
-            initiating_peer
-                .send(Message::ExtendedPayload(extension_number, payload))
-                .await
-                .unwrap();
+            let response = initiating_peer.holepunch(target_addr).await;
+            // await the rendezvous response
+            let result = timeout!(
+                Duration::from_secs(1),
+                response,
+                "expected the rendezvous to complete"
+            );
+            assert_eq!(Ok(target_addr), result);
             assert_timeout!(
                 Duration::from_secs(3),
                 initiating_torrent.active_peer_connections().await == 2,
                 "expected the HolePunch to succeed"
             );
+        }
+
+        #[tokio::test]
+        async fn test_rendezvous_not_supported_by_target() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let initiating_torrent =
+                create_torrent(temp_path, UtpPeerDiscovery::new().await.unwrap().into()).await;
+            let relay_discovery = TcpPeerDiscovery::new().await.unwrap();
+            let relay_torrent = create_relay_torrent(
+                temp_path,
+                &[
+                    relay_discovery.clone().into(),
+                    UtpPeerDiscovery::new().await.unwrap().into(),
+                ],
+            )
+            .await;
+
+            // connect the initiating torrent to the relay torrent
+            let (initiating_peer, relay_peer1, _in_socket, _out_socket) = utp_peer_pair!(
+                &initiating_torrent,
+                &relay_torrent,
+                ProtocolExtensionFlags::LTEP
+            );
+            initiating_torrent
+                .inner
+                .peer_connected(relay_peer1.into())
+                .await;
+            assert_timeout!(
+                Duration::from_millis(250),
+                initiating_torrent.active_peer_connections().await == 1,
+                "expected the initiating torrent to have 1 active peer connection"
+            );
+            assert_timeout!(
+                Duration::from_millis(550),
+                initiating_peer
+                    .remote_peer()
+                    .await
+                    .map(|e| e.extended_handshake)
+                    .unwrap_or_default(),
+                "expected the extended handshake to have been exchanged"
+            );
+
+            // create the target torrent
+            let target_torrent =
+                create_torrent(temp_path, TcpPeerDiscovery::new().await.unwrap().into()).await;
+            let target_addr = SocketAddr::from((
+                Ipv4Addr::LOCALHOST,
+                target_torrent
+                    .peer_port()
+                    .await
+                    .expect("expected a target torrent peer port"),
+            ));
+
+            // connect the relay torrent to the target torrent
+            let relay_data_pool = relay_torrent.inner.data_pool().await.unwrap();
+            let peer = relay_discovery
+                .dial(
+                    PeerId::new(),
+                    target_addr,
+                    relay_torrent.inner.clone(),
+                    relay_data_pool,
+                    ProtocolExtensionFlags::LTEP,
+                    Duration::from_millis(250),
+                )
+                .await
+                .unwrap();
+            relay_torrent.inner.peer_connected(peer.clone()).await;
+            assert_timeout!(
+                Duration::from_millis(250),
+                relay_torrent.active_peer_connections().await == 1,
+                "expected the relay torrent to have 1 active peer connection"
+            );
+            let peer = match peer {
+                Peer::BitTorrent(e) => e,
+                _ => unreachable!(),
+            };
+            assert_timeout!(
+                Duration::from_millis(550),
+                peer.remote_peer()
+                    .await
+                    .map(|e| e.extended_handshake)
+                    .unwrap_or_default(),
+                "expected the extended handshake to have been exchanged"
+            );
+
+            // send the rendezvous message from the initiating peer to the relay peer
+            let response = initiating_peer.holepunch(target_addr).await;
+            // await the rendezvous response
+            let result = timeout!(
+                Duration::from_secs(1),
+                response,
+                "expected the rendezvous to complete"
+            );
+            match result {
+                Err(e) => match e {
+                    Error::Operation(e) => assert_eq!(e, "holepunch not supported by target peer"),
+                    _ => assert!(false, "expected Error::Operation, but got {:?}", e),
+                },
+                _ => assert!(
+                    false,
+                    "expected the rendezvous to fail, but got {:?}",
+                    result
+                ),
+            }
+        }
+
+        async fn create_torrent(temp_path: &str, discovery: PeerDiscovery) -> Torrent {
+            Torrent::request()
+                .metadata(metadata!("debian-udp.torrent"))
+                .config(TorrentConfig::builder().path(temp_path).build())
+                .protocol_extensions(ProtocolExtensionFlags::LTEP)
+                .extension(|| HolepunchExtension::new().into())
+                .operations(vec![Box::new(TorrentConnectPeersOperation::new(false))])
+                .peer_discovery(discovery)
+                .storage(|_| Box::new(MemoryStorage::new()))
+                .build()
+                .unwrap()
+        }
+
+        async fn create_relay_torrent(temp_path: &str, discoveries: &[PeerDiscovery]) -> Torrent {
+            Torrent::request()
+                .metadata(metadata!("debian-udp.torrent"))
+                .config(TorrentConfig::builder().path(temp_path).build())
+                .protocol_extensions(ProtocolExtensionFlags::LTEP)
+                .extension(|| HolepunchExtension::new().into())
+                .operations(vec![])
+                .peer_discoveries(discoveries.to_vec())
+                .storage(|_| Box::new(MemoryStorage::new()))
+                .build()
+                .unwrap()
         }
     }
 }

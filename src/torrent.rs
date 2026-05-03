@@ -7,8 +7,8 @@ use crate::file::File;
 use crate::operation::{TorrentOperation, TorrentOperationResult, DEFAULT_OPERATIONS};
 use crate::peer::extension::PeerExtension;
 use crate::peer::{
-    BitTorrentPeer, CloseReason, Peer, PeerClientInfo, PeerDiscovery, PeerEntry, PeerHandle,
-    PeerId, ProtocolExtensionFlags,
+    BitTorrentPeer, CloseReason, ConnectionProtocol, Peer, PeerClientInfo, PeerDiscovery,
+    PeerEntry, PeerHandle, PeerId, ProtocolExtensionFlags,
 };
 use crate::peer_pool::PeerPool;
 use crate::storage::{Storage, StorageParams};
@@ -1025,11 +1025,6 @@ impl InnerTorrent {
         self.handle
     }
 
-    /// Returns the channel sender for sending commands to the torrent.
-    pub fn sender(&self) -> &ChannelSender<TorrentCommand> {
-        &self.sender
-    }
-
     /// Returns `true` if the torrent is still valid, else `false` if it has been closed.
     pub fn is_valid(&self) -> bool {
         !self.sender.is_closed()
@@ -1105,6 +1100,22 @@ impl InnerTorrent {
         self.sender
             .fire_and_forget(TorrentCommand::AddPeers { addrs })
             .await;
+    }
+
+    /// Returns the total number of peer addresses known in the peer pool.
+    pub async fn peer_addrs_len(&self) -> usize {
+        self.sender
+            .send(|tx| TorrentCommand::NumOfPeerAddrs { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Notify the torrent that a peer has connected.
+    pub async fn peer_connected(&self, peer: Peer) {
+        self.sender
+            .fire_and_forget(TorrentCommand::PeerConnected { peer })
+            .await
     }
 
     /// Decrease the priority of the given peer addresses in the torrent pool.
@@ -1270,10 +1281,13 @@ impl InnerTorrent {
     }
 
     /// Returns the extensions of the torrent.
-    pub async fn extensions(&self) -> Result<Vec<PeerExtension>> {
+    pub async fn extensions(&self, protocol: ConnectionProtocol) -> Result<Vec<PeerExtension>> {
         Ok(self
             .sender
-            .send(|tx| TorrentCommand::Extensions { response: tx })
+            .send(|tx| TorrentCommand::Extensions {
+                protocol,
+                response: tx,
+            })
             .await
             .await?)
     }
@@ -1515,9 +1529,15 @@ pub enum TorrentCommand {
     NumOfFiles {
         response: Reply<usize>,
     },
+    /// Returns the total number of completed pieces in the torrent.
     NumOfCompletedPieces {
         response: Reply<usize>,
     },
+    /// Returns the total number of known peer addresses in the peer pool.
+    NumOfPeerAddrs {
+        response: Reply<usize>,
+    },
+    /// Returns the total number of active peer connections in the peer pool.
     NumOfActivePeerConnections {
         response: Reply<usize>,
     },
@@ -1630,6 +1650,7 @@ pub enum TorrentCommand {
         response: Reply<ProtocolExtensionFlags>,
     },
     Extensions {
+        protocol: ConnectionProtocol,
         response: Reply<Vec<PeerExtension>>,
     },
     Bitfield {
@@ -1886,10 +1907,14 @@ impl TorrentContext {
         self.protocol_extensions
     }
 
-    /// Returns the active peer extensions of the torrent.
+    /// Returns the peer extensions, enabled within the torrent, that support the given protocol.
     /// These extensions should be activated for each established peer connection of the torrent.
-    pub fn extensions(&self) -> Vec<PeerExtension> {
-        self.extensions.iter().map(|e| e()).collect()
+    pub fn extensions(&self, protocol: ConnectionProtocol) -> Vec<PeerExtension> {
+        self.extensions
+            .iter()
+            .map(|e| e())
+            .filter(|e| e.supports(protocol))
+            .collect()
     }
 
     /// Returns `true` if the specified extension is enabled for the torrent, else `false`.
@@ -2780,6 +2805,7 @@ impl TorrentContext {
             TorrentCommand::NumOfCompletedPieces { response } => {
                 response.send(self.data_pool().num_completed_pieces().await);
             }
+            TorrentCommand::NumOfPeerAddrs { response } => response.send(self.peer_pool.len()),
             TorrentCommand::NumOfActivePeerConnections { response } => {
                 response.send(self.peer_pool.active_peer_connections());
             }
@@ -2885,7 +2911,9 @@ impl TorrentContext {
             TorrentCommand::ProtocolExtensions { response } => {
                 response.send(self.protocol_extensions())
             }
-            TorrentCommand::Extensions { response } => response.send(self.extensions()),
+            TorrentCommand::Extensions { protocol, response } => {
+                response.send(self.extensions(protocol))
+            }
             TorrentCommand::Bitfield { response } => response.send(self.data_pool.bitfield().await),
             TorrentCommand::PendingRequestRejected { piece, begin, peer } => {
                 self.pending_request_rejected(piece, begin, peer).await

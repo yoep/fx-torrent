@@ -49,6 +49,11 @@ impl AppLogger {
                         level: Level::Info,
                     },
                     Logger {
+                        name: "Peer extensions".to_string(),
+                        target: "fx_torrent::peer::extension".to_string(),
+                        level: Level::Info,
+                    },
+                    Logger {
                         name: "Peer protocol".to_string(),
                         target: "fx_torrent::peer::protocol".to_string(),
                         level: Level::Info,

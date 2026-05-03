@@ -713,7 +713,7 @@ impl BitTorrentPeer {
         metrics.client_choked.set(true);
         metrics.remote_choked.set(true);
 
-        let extensions = match torrent.extensions().await {
+        let extensions = match torrent.extensions(connection.protocol()).await {
             Ok(extensions) => extensions,
             Err(_) => return Err(Error::Closed),
         };

@@ -57,6 +57,11 @@ impl PeerPool {
             .map(|conn| conn.peer.clone())
     }
 
+    /// Returns the total number of known peer addresses in the pool.
+    pub fn len(&self) -> usize {
+        self.peers.len()
+    }
+
     /// Returns an existing peer from the pool by the given address.
     /// The returned instance is a weak reference that can be dropped by the pool at any time.
     pub fn get_by_addr(&self, addr: &SocketAddr) -> Option<Peer> {

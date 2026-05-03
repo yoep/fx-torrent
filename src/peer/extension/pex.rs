@@ -1,15 +1,16 @@
 use crate::peer::extension::{Error, ExtensionNumber, Result};
 use crate::peer::protocol::Message;
-use crate::peer::{ConnectionDirection, ConnectionProtocol, PeerClientInfo, PeerContext};
+use crate::peer::{
+    ConnectionDirection, ConnectionProtocol, PeerClientInfo, PeerContext, ProtocolExtensionFlags,
+};
 use crate::{CompactIpv4Addrs, CompactIpv6Addrs, TorrentEvent};
 use bitmask_enum::bitmask;
 use fx_callback::{Callback, Subscription};
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
+use std::hash::Hash;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-
-const PEX_INFORM_INTERVAL: Duration = Duration::from_secs(90);
 
 /// The Peer Exchange message.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -99,20 +100,24 @@ pub struct PexExtension {
     /// The pool which is used to manage the pex peer addresses
     pool: PexPool,
     torrent_event_receiver: Option<Subscription<TorrentEvent>>,
+    interval: Duration,
     last_informed: Instant,
     initialized: bool,
+    pex_supported: bool,
 }
 
 impl PexExtension {
     pub const NAME: &'static str = "ut_pex";
 
-    /// Create a new extension instance.
-    pub fn new() -> Self {
+    /// Create a new pex extension with the given announce interval.
+    pub fn new(interval: Duration) -> Self {
         Self {
             pool: PexPool::new(),
             torrent_event_receiver: None,
+            interval,
             last_informed: Instant::now(),
             initialized: false,
+            pex_supported: false,
         }
     }
 
@@ -120,7 +125,7 @@ impl PexExtension {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn on_message(&self, payload: &[u8], peer: &PeerContext) -> Result<()> {
         let message: PexMessage = serde_bencode::from_bytes(payload)?;
-        debug!("Received PEX message {:?} from peer {}", message, peer);
+        debug!("Peer {} received PEX message {:?}", peer, message);
 
         let discovered_peers = message.discovered_peers();
         if discovered_peers.len() > 0 {
@@ -139,21 +144,45 @@ impl PexExtension {
     /// to process data.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn tick(&mut self, peer: &PeerContext) {
+        if self.initialized && !self.pex_supported {
+            return;
+        }
+
         self.initialize(peer);
         self.process_torrent_events();
         self.inform_peer(peer).await;
     }
 
     fn initialize(&mut self, peer: &PeerContext) {
-        if self.initialized {
+        if self.initialized || peer.remote_peer().is_none() {
+            return;
+        }
+        // early exit if the peer doesn't support LTEP
+        if !peer
+            .remote_peer()
+            .map(|e| e.protocol_extensions.contains(ProtocolExtensionFlags::LTEP))
+            .unwrap_or_default()
+        {
+            self.initialized = true;
+            return;
+        }
+        // wait for the extended handshake to be completed
+        if !peer
+            .remote_peer()
+            .map(|e| e.extended_handshake)
+            .unwrap_or_default()
+        {
             return;
         }
         if !peer.is_extension_supported(Self::NAME) {
+            self.initialized = true;
             return;
         }
 
         self.torrent_event_receiver = Some(peer.torrent().subscribe());
+        self.pex_supported = true;
         self.initialized = true;
+        debug!("Peer {} PEX has been initialized", peer);
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
@@ -169,7 +198,7 @@ impl PexExtension {
     }
 
     async fn inform_peer(&mut self, peer: &PeerContext) {
-        if !self.initialized || self.last_informed.elapsed() < PEX_INFORM_INTERVAL {
+        if !self.initialized || self.last_informed.elapsed() < self.interval {
             return;
         }
         let extension_number = match peer.find_remote_extension_number(Self::NAME) {
@@ -244,10 +273,13 @@ impl PexPool {
             let message_info = format!("{:?}", message);
             match self.try_inform_peer(message, extension_number, peer).await {
                 Ok(_) => {
-                    debug!("Send PEX message {} to peer", message_info);
+                    debug!("Peer {} sent PEX message {}", peer, message_info);
                 }
                 Err(e) => {
-                    debug!("Failed to send PEX message {}, {}", message_info, e);
+                    debug!(
+                        "Peer {} failed to send PEX message {}, {}",
+                        peer, message_info, e
+                    );
                 }
             }
         }
@@ -389,6 +421,10 @@ mod pex_flags {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer::ProtocolExtensionFlags;
+    use crate::storage::MemoryStorage;
+    use crate::{Torrent, TorrentConfig};
+    use tempfile::tempdir;
 
     #[test]
     fn test_pex_flags() {
@@ -397,5 +433,63 @@ mod tests {
 
         let result = serde_bencode::from_bytes::<PexFlag>(&bytes).unwrap();
         assert_eq!(expected_result, result);
+    }
+
+    #[tokio::test]
+    async fn test_on_message() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let source_torrent = create_pex_torrent(temp_path).await;
+        let in_between_torrent = create_pex_torrent(temp_path).await;
+        let target_torrent = create_pex_torrent(temp_path).await;
+
+        // connect the source to the in-between torrent
+        let (source, in_between) = tcp_peer_pair!(
+            &source_torrent,
+            &in_between_torrent,
+            ProtocolExtensionFlags::LTEP
+        );
+        source_torrent.inner.peer_connected(source.into()).await;
+        in_between_torrent
+            .inner
+            .peer_connected(in_between.into())
+            .await;
+        assert_timeout!(
+            Duration::from_millis(500),
+            source_torrent.active_peer_connections().await == 1,
+            "expected the source torrent to be connected to the in-between"
+        );
+
+        // connect the in-between to the target torrent
+        let (in_between, target) = tcp_peer_pair!(
+            &in_between_torrent,
+            &target_torrent,
+            ProtocolExtensionFlags::LTEP
+        );
+        in_between_torrent
+            .inner
+            .peer_connected(in_between.into())
+            .await;
+        target_torrent.inner.peer_connected(target.into()).await;
+
+        // wait for the pex extension to exchange target addr to the source
+        assert_timeout!(
+            Duration::from_secs(2),
+            source_torrent.inner.peer_addrs_len().await == 2,
+            "expected the source torrent to be connected to the target"
+        );
+    }
+
+    async fn create_pex_torrent(temp_path: &str) -> Torrent {
+        Torrent::request()
+            .metadata(metadata!("debian-udp.torrent"))
+            .config(TorrentConfig::builder().path(temp_path).build())
+            .protocol_extensions(ProtocolExtensionFlags::LTEP)
+            .extension(|| PexExtension::new(Duration::from_secs(1)).into())
+            .operations(vec![])
+            .storage(|_| Box::new(MemoryStorage::new()))
+            .build()
+            .unwrap()
     }
 }

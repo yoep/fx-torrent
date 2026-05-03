@@ -5,7 +5,7 @@ use crate::peer::extension::HolepunchExtension;
 use crate::peer::extension::MetadataExtension;
 #[cfg(feature = "extension-pex")]
 use crate::peer::extension::PexExtension;
-use crate::peer::PeerContext;
+use crate::peer::{ConnectionProtocol, PeerContext};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -27,6 +27,9 @@ pub type ExtensionRegistry = HashMap<ExtensionName, ExtensionNumber>;
 pub trait Extension: Debug + Send + Sync {
     /// Returns the unique name of the extension.
     fn name(&self) -> &str;
+
+    /// Returns `true` if the extension supports the given connection protocol.
+    fn supports(&self, protocol: ConnectionProtocol) -> bool;
 
     /// Process an incoming extension message payload for the extension which has been received from the remote peer.
     ///
@@ -74,6 +77,20 @@ impl PeerExtension {
             #[cfg(feature = "extension-pex")]
             PeerExtension::Pex(_) => PexExtension::NAME,
             PeerExtension::Other(e) => e.name(),
+        }
+    }
+
+    /// Returns `true` if the extension supports the given connection protocol.
+    pub fn supports(&self, protocol: ConnectionProtocol) -> bool {
+        match self {
+            #[cfg(feature = "extension-donthave")]
+            PeerExtension::DontHave(_) => protocol != ConnectionProtocol::Http,
+            PeerExtension::Holepunch(_) => protocol == ConnectionProtocol::Utp,
+            #[cfg(feature = "extension-metadata")]
+            PeerExtension::Metadata(_) => protocol != ConnectionProtocol::Http,
+            #[cfg(feature = "extension-pex")]
+            PeerExtension::Pex(_) => protocol != ConnectionProtocol::Http,
+            PeerExtension::Other(e) => e.supports(protocol),
         }
     }
 
@@ -160,6 +177,10 @@ mod tests {
             "test_custom_extension"
         }
 
+        fn supports(&self, _: ConnectionProtocol) -> bool {
+            false
+        }
+
         async fn on_message(
             &mut self,
             _: &[u8],
@@ -175,6 +196,7 @@ mod tests {
 
     mod name {
         use super::*;
+        use std::time::Duration;
 
         #[test]
         fn test_standard_extensions() {
@@ -187,7 +209,7 @@ mod tests {
             let extension: PeerExtension = MetadataExtension::new().into();
             assert_eq!(extension.name(), MetadataExtension::NAME);
 
-            let extension: PeerExtension = PexExtension::new().into();
+            let extension: PeerExtension = PexExtension::new(Duration::from_secs(1)).into();
             assert_eq!(extension.name(), PexExtension::NAME);
         }
 

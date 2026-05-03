@@ -69,10 +69,12 @@ macro_rules! create_utp_stream_pair {
 macro_rules! peer_context_pair {
     ($torrent:expr) => {{
         use crate::peer::extension::PeerExtension;
+        use crate::peer::ConnectionProtocol;
         use crate::InnerTorrent;
 
         let torrent: &InnerTorrent = $torrent;
-        let extensions: Vec<PeerExtension> = torrent.extensions().await.unwrap();
+        let extensions: Vec<PeerExtension> =
+            torrent.extensions(ConnectionProtocol::Tcp).await.unwrap();
 
         peer_context_pair!(
             $torrent,

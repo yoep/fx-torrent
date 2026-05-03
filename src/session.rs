@@ -701,7 +701,8 @@ impl FxTorrentSessionBuilder {
         self.extension_factories
             .push(|| MetadataExtension::new().into());
         #[cfg(feature = "extension-pex")]
-        self.extension_factories.push(|| PexExtension::new().into());
+        self.extension_factories
+            .push(|| PexExtension::new(Duration::from_secs(90)).into());
         #[cfg(feature = "extension-donthave")]
         self.extension_factories
             .push(|| DontHaveExtension::new().into());
