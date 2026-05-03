@@ -25,7 +25,7 @@ DhtTracker::builder()
 
 pub use config::*;
 pub use ed25519::*;
-pub use errors::*;
+pub use error::*;
 use handler::*;
 pub use metrics::*;
 pub use node::*;
@@ -41,7 +41,7 @@ mod test_macros;
 mod compact;
 mod config;
 mod ed25519;
-mod errors;
+mod error;
 mod handler;
 mod krpc;
 mod metrics;

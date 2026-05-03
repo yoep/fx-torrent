@@ -1,7 +1,6 @@
 use crate::config::SessionConfig;
 #[cfg(feature = "dht")]
 use crate::dht::DhtTracker;
-use crate::errors::Result;
 #[cfg(feature = "lsd")]
 use crate::lsd::LocalServiceDiscovery;
 #[cfg(feature = "lsd")]
@@ -26,6 +25,7 @@ use crate::session_cache::{FxSessionCache, SessionCache};
 use crate::storage::{DiskStorage, MemoryStorage, Storage, StorageParams};
 use crate::torrent::Torrent;
 use crate::tracker::TrackerClient;
+use crate::Result;
 use crate::TorrentTracker;
 use crate::{
     ExtensionFactory, InfoHash, Magnet, NoSessionCache, TorrentConfig, TorrentError, TorrentEvent,

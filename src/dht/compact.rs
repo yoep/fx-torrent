@@ -508,6 +508,7 @@ mod tests {
     mod compact_ipv4 {
         use super::*;
 
+        use crate::bencode;
         use std::net::Ipv4Addr;
 
         #[test]
@@ -558,9 +559,9 @@ mod tests {
                 id,
                 addr: CompactIpv4Addr { ip, port },
             };
-            let bytes = serde_bencode::to_bytes(&expected_result).unwrap();
+            let bytes = bencode::to_bytes(&expected_result).unwrap();
 
-            let result = serde_bencode::from_bytes::<CompactIPv4Node>(bytes.as_slice()).unwrap();
+            let result = bencode::from_bytes::<CompactIPv4Node>(bytes.as_slice()).unwrap();
 
             assert_eq!(
                 expected_result, result,

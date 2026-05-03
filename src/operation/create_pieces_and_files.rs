@@ -1,4 +1,4 @@
-use crate::errors::Result;
+use crate::error::Result;
 use crate::operation::{TorrentOperation, TorrentOperationResult};
 use crate::peer::PeerDiscovery;
 use crate::{

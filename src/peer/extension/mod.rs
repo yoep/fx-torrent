@@ -1,6 +1,6 @@
 #[cfg(feature = "extension-donthave")]
 pub use donthave::*;
-pub use errors::*;
+pub use error::*;
 pub use ext::*;
 pub use holepunch::*;
 #[cfg(feature = "extension-metadata")]
@@ -10,7 +10,7 @@ pub use pex::*;
 
 #[cfg(feature = "extension-donthave")]
 mod donthave;
-mod errors;
+mod error;
 mod ext;
 mod holepunch;
 #[cfg(feature = "extension-metadata")]

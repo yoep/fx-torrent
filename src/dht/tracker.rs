@@ -1,3 +1,4 @@
+use crate::bencode::Value;
 use crate::bloom_filter::BloomFilter;
 use crate::channel::{ChannelReceiver, ChannelSender, Reply, Response};
 use crate::dht::compact::{CompactIPv6Nodes, CompactIpNodes};
@@ -18,7 +19,7 @@ use crate::dht::{
 };
 use crate::dht::{DhtNodeHandler, QueryResult};
 use crate::metrics::Metric;
-use crate::{InfoHash, Sha1Hash};
+use crate::{bencode, InfoHash, Sha1Hash};
 use derive_more::Display;
 use ed25519::SignatureBytes;
 use futures::StreamExt;
@@ -27,7 +28,6 @@ use itertools::{Either, Itertools};
 use log::{debug, error, trace, warn};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use serde_bencode::value::Value;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::io;
@@ -601,8 +601,8 @@ impl DhtTracker {
             .send(|tx| TrackerCommand::GoodSearchNodes { response: tx })
             .await
             .await?;
-        let bytes = serde_bencode::to_bytes(value)?;
-        let value = serde_bencode::from_bytes::<Value>(bytes.as_slice())?;
+        let bytes = bencode::to_bytes(value)?;
+        let value = bencode::from_bytes::<Value>(bytes.as_slice())?;
 
         let futures = nodes.iter().map(|node| async {
             let response = self
@@ -652,8 +652,8 @@ impl DhtTracker {
             .send(|tx| TrackerCommand::GoodSearchNodes { response: tx })
             .await
             .await?;
-        let bytes = serde_bencode::to_bytes(value)?;
-        let value = serde_bencode::from_bytes::<Value>(bytes.as_slice())?;
+        let bytes = bencode::to_bytes(value)?;
+        let value = bencode::from_bytes::<Value>(bytes.as_slice())?;
         let (signature, public_key) = self
             .sender
             .send(|tx| TrackerCommand::SignValue {
@@ -699,8 +699,8 @@ impl DhtTracker {
     where
         V: Serialize,
     {
-        let bytes = serde_bencode::to_bytes(value)?;
-        let value = serde_bencode::from_bytes::<Value>(bytes.as_slice())?;
+        let bytes = bencode::to_bytes(value)?;
+        let value = bencode::from_bytes::<Value>(bytes.as_slice())?;
         self.sender
             .send(|tx| TrackerCommand::Put {
                 node: *node,
@@ -748,8 +748,8 @@ impl DhtTracker {
         while let Some(item) = item_stream.next().await {
             match item {
                 Ok(Some(item)) => {
-                    let bytes = serde_bencode::to_bytes(&item)?;
-                    return Ok(Some(serde_bencode::from_bytes::<V>(bytes.as_slice())?));
+                    let bytes = bencode::to_bytes(&item)?;
+                    return Ok(Some(bencode::from_bytes::<V>(bytes.as_slice())?));
                 }
                 Err(e) => {
                     trace!("{} failed to get item, {}", self, e);
@@ -810,8 +810,8 @@ impl DhtTracker {
         while let Some(item) = item_stream.next().await {
             match item {
                 Ok(Some(item)) => {
-                    let bytes = serde_bencode::to_bytes(&item)?;
-                    return Ok(Some(serde_bencode::from_bytes::<V>(bytes.as_slice())?));
+                    let bytes = bencode::to_bytes(&item)?;
+                    return Ok(Some(bencode::from_bytes::<V>(bytes.as_slice())?));
                 }
                 Err(e) => {
                     trace!("{} failed to get item, {}", self, e);
@@ -846,8 +846,8 @@ impl DhtTracker {
             .map(|e: GetResult| e.value)
             .and_then(|e| {
                 if let Some(value) = e {
-                    let bytes = serde_bencode::to_bytes(&value)?;
-                    let item = serde_bencode::from_bytes::<V>(bytes.as_slice())?;
+                    let bytes = bencode::to_bytes(&value)?;
+                    let item = bencode::from_bytes::<V>(bytes.as_slice())?;
                     return Ok(Some(item));
                 }
                 Ok(None)
@@ -2759,7 +2759,7 @@ impl TrackerContext {
             return Err(Error::Closed);
         }
 
-        let bytes = serde_bencode::to_bytes(&message)?;
+        let bytes = bencode::to_bytes(&message)?;
 
         trace!(
             "{} is sending message ({} bytes, transaction {}) to {}, {:?}",
@@ -3109,7 +3109,7 @@ impl NodeReader {
         }
 
         let start_time = Instant::now();
-        let message = serde_bencode::from_bytes::<Message>(bytes).map_err(|e| {
+        let message = bencode::from_bytes::<Message>(bytes).map_err(|e| {
             trace!(
                 "{} failed to parse incoming message, {}\n{}",
                 self,
@@ -3791,7 +3791,7 @@ mod tests {
 
         impl TestItem {
             fn hash(&self) -> Sha1Hash {
-                let bytes = serde_bencode::to_bytes(self).unwrap();
+                let bytes = bencode::to_bytes(self).unwrap();
                 Sha1Hash::try_from(Sha1::digest(bytes.as_slice())).unwrap()
             }
         }
@@ -3937,7 +3937,7 @@ mod tests {
 
         impl TestItem {
             fn hash(&self) -> Sha1Hash {
-                let bytes = serde_bencode::to_bytes(self).unwrap();
+                let bytes = bencode::to_bytes(self).unwrap();
                 Sha1Hash::try_from(Sha1::digest(bytes.as_slice())).unwrap()
             }
         }

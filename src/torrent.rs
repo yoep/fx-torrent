@@ -2,7 +2,6 @@ use crate::channel::{ChannelReceiver, ChannelSender, Reply};
 use crate::config::TorrentConfig;
 #[cfg(feature = "dht")]
 use crate::dht::DhtTracker;
-use crate::errors::Result;
 use crate::file::File;
 use crate::operation::{TorrentOperation, TorrentOperationResult, DEFAULT_OPERATIONS};
 use crate::peer::extension::PeerExtension;
@@ -16,6 +15,7 @@ use crate::torrent_data::DataPool;
 use crate::tracker::{AnnounceEvent, AnnouncementResult, TrackerClient};
 #[cfg(feature = "lsd")]
 use crate::LocalServiceDiscovery;
+use crate::Result;
 use crate::TorrentTracker;
 use crate::{
     FileAttributeFlags, FileIndex, InfoHash, Metrics, Piece, PieceChunkPool, PieceIndex, PiecePart,

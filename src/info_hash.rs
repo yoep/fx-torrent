@@ -1,5 +1,4 @@
-use crate::errors::Result;
-use crate::TorrentError;
+use crate::{Result, TorrentError};
 use base32::Alphabet;
 use hex::FromHex;
 use log::{debug, error, trace, warn};
@@ -588,7 +587,7 @@ impl<'de> Visitor<'de> for InfoHashVisitor {
 mod tests {
     use super::*;
     use crate::tests::read_test_file_to_bytes;
-    use crate::{Magnet, TorrentMetadata};
+    use crate::{bencode, Magnet, TorrentMetadata};
     use rand::{rng, Rng};
 
     #[test]
@@ -763,10 +762,10 @@ mod tests {
         init_logger!();
         let hash = "urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7";
         let info_hash = InfoHash::from_str(hash).unwrap();
-        let bytes = serde_bencode::to_bytes(&info_hash)
-            .expect("expected the info hash to have been serialized");
+        let bytes =
+            bencode::to_bytes(&info_hash).expect("expected the info hash to have been serialized");
 
-        let result = serde_bencode::from_bytes(bytes.as_slice())
+        let result = bencode::from_bytes(bytes.as_slice())
             .expect("Expected the info hash to have been deserialized");
 
         assert_eq!(info_hash, result);

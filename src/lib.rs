@@ -114,7 +114,7 @@ When both features are missing, a [dht::Error::MissingCryptoProvider] error will
 
 pub use compact::*;
 pub use config::*;
-pub use errors::*;
+pub use error::*;
 pub use file::*;
 pub use info_hash::*;
 #[cfg(feature = "lsd")]
@@ -139,12 +139,13 @@ mod test_macros;
 #[macro_use]
 mod channel;
 
+pub mod bencode;
 mod bloom_filter;
 mod compact;
 mod config;
 #[cfg(feature = "dht")]
 pub mod dht;
-mod errors;
+mod error;
 mod file;
 mod info_hash;
 #[cfg(feature = "lsd")]

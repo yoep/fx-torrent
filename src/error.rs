@@ -2,7 +2,7 @@
 use crate::dht;
 use crate::storage::Error;
 use crate::tracker::TrackerError;
-use crate::{peer, storage, TorrentHandle};
+use crate::{bencode, peer, storage, TorrentHandle};
 use std::io;
 use thiserror::Error;
 
@@ -130,8 +130,8 @@ impl From<io::Error> for TorrentError {
     }
 }
 
-impl From<serde_bencode::Error> for TorrentError {
-    fn from(error: serde_bencode::Error) -> Self {
+impl From<bencode::Error> for TorrentError {
+    fn from(error: bencode::Error) -> Self {
         Self::TorrentParse(error.to_string())
     }
 }

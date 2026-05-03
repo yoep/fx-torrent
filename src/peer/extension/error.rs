@@ -1,3 +1,4 @@
+use crate::bencode;
 use std::io;
 use thiserror::Error;
 
@@ -29,8 +30,8 @@ impl PartialEq for Error {
     }
 }
 
-impl From<serde_bencode::error::Error> for Error {
-    fn from(error: serde_bencode::error::Error) -> Self {
+impl From<bencode::Error> for Error {
+    fn from(error: bencode::Error) -> Self {
         Self::Parsing(error.to_string())
     }
 }

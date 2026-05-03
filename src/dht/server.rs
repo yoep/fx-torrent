@@ -11,12 +11,11 @@ use crate::dht::utils::{generate_mutable_item_key, parse_mutable_item_properties
 use crate::dht::{
     DhtEvent, DhtMetrics, Error, Node, NodeId, NodeKey, NodeToken, PeerEntry, PublicKey, Result,
 };
-use crate::{CompactIpAddr, CompactIpv4Addr, CompactIpv6Addr, InfoHash, Sha1Hash};
+use crate::{bencode, CompactIpAddr, CompactIpv4Addr, CompactIpv6Addr, InfoHash, Sha1Hash};
 use derive_more::Display;
 use ed25519::SignatureBytes;
 use fx_callback::MultiThreadedCallback;
 use log::{debug, trace, warn};
-use serde_bencode::value::Value;
 use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -152,7 +151,7 @@ impl ServerNode {
     /// Returns the hash of the stored item, or the error that occurred.
     pub fn store(
         &mut self,
-        value: Value,
+        value: bencode::Value,
         mutable_properties: Option<MutableItemProperties>,
     ) -> Result<Sha1Hash> {
         let key: Sha1Hash = match mutable_properties.as_ref() {
@@ -542,8 +541,8 @@ impl ServerNode {
 
     /// Try to generate the hash key from the given value.
     /// Returns the [Sha1Hash] for the [Value], else an error.
-    fn generate_value_key(value: &Value) -> Result<Sha1Hash> {
-        serde_bencode::to_bytes(&value)
+    fn generate_value_key(value: &bencode::Value) -> Result<Sha1Hash> {
+        bencode::to_bytes(&value)
             .map_err(|e| Error::Parse(e.to_string()))
             .and_then(|bytes| {
                 Sha1Hash::try_from(Sha1::digest(bytes.as_slice()))
@@ -603,7 +602,7 @@ impl ServerNode {
 
 #[derive(Debug, Clone)]
 pub struct ItemEntry {
-    pub value: Value,
+    pub value: bencode::Value,
     pub mutable_properties: Option<MutableItemProperties>,
 }
 
@@ -756,7 +755,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_non_existing() {
-            let expected_result = Value::Int(13);
+            let expected_result = bencode::Value::Int(13);
             let mut node = ServerNode::new(
                 DhtMetrics::new(),
                 SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)),
@@ -776,7 +775,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_existing_immutable_item() {
-            let expected_result = Value::Int(69);
+            let expected_result = bencode::Value::Int(69);
             let mut node = ServerNode::new(
                 DhtMetrics::new(),
                 SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)),
@@ -798,8 +797,8 @@ mod tests {
 
         #[test]
         fn test_existing_mutable_item() {
-            let initial_value = Value::Int(69);
-            let updated_value = Value::Int(70);
+            let initial_value = bencode::Value::Int(69);
+            let updated_value = bencode::Value::Int(70);
             let mut public_key = PublicKey::default();
             rng().fill_bytes(&mut public_key);
             let initial_properties = MutableItemProperties {
@@ -878,9 +877,9 @@ mod tests {
                 hex::decode("e5f96f6f38320f0f33959cb4d3d656452117aadb").unwrap(),
             )
             .unwrap();
-            let bencode = serde_bencode::to_string(&item.to_string())
-                .expect("expected the item to be serialized");
-            let value = serde_bencode::from_str::<Value>(&bencode)
+            let bencode =
+                bencode::to_string(&item.to_string()).expect("expected the item to be serialized");
+            let value = bencode::from_str::<bencode::Value>(&bencode)
                 .expect("expected the item to be deserialized");
 
             let result = ServerNode::generate_value_key(&value)

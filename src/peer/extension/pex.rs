@@ -3,7 +3,7 @@ use crate::peer::protocol::Message;
 use crate::peer::{
     ConnectionDirection, ConnectionProtocol, PeerClientInfo, PeerContext, ProtocolExtensionFlags,
 };
-use crate::{CompactIpv4Addrs, CompactIpv6Addrs, TorrentEvent};
+use crate::{bencode, CompactIpv4Addrs, CompactIpv6Addrs, TorrentEvent};
 use bitmask_enum::bitmask;
 use fx_callback::{Callback, Subscription};
 use log::{debug, warn};
@@ -124,7 +124,7 @@ impl PexExtension {
     /// Process an incoming extension message payload which has been received from the remote peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn on_message(&self, payload: &[u8], peer: &PeerContext) -> Result<()> {
-        let message: PexMessage = serde_bencode::from_bytes(payload)?;
+        let message: PexMessage = bencode::from_bytes(payload)?;
         debug!("Peer {} received PEX message {:?}", peer, message);
 
         let discovered_peers = message.discovered_peers();
@@ -291,7 +291,7 @@ impl PexPool {
         extension_number: &ExtensionNumber,
         peer: &PeerContext,
     ) -> Result<()> {
-        let message_bytes = serde_bencode::to_bytes(&message)?;
+        let message_bytes = bencode::to_bytes(&message)?;
 
         peer.send(Message::ExtendedPayload(
             extension_number.clone(),
@@ -429,9 +429,9 @@ mod tests {
     #[test]
     fn test_pex_flags() {
         let expected_result = PexFlag::UtpSupported | PexFlag::OutgoingConnection;
-        let bytes = serde_bencode::to_bytes(&expected_result).unwrap();
+        let bytes = bencode::to_bytes(&expected_result).unwrap();
 
-        let result = serde_bencode::from_bytes::<PexFlag>(&bytes).unwrap();
+        let result = bencode::from_bytes::<PexFlag>(&bytes).unwrap();
         assert_eq!(expected_result, result);
     }
 

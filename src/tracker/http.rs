@@ -2,7 +2,7 @@ use crate::tracker::{
     AnnounceEntryResponse, AnnounceEvent, Announcement, ConnectionMetrics, Result, ScrapeResult,
     TrackerClientConnection, TrackerError, TrackerHandle,
 };
-use crate::{CompactIpv4Addrs, CompactIpv6Addrs, InfoHash};
+use crate::{bencode, CompactIpv4Addrs, CompactIpv6Addrs, InfoHash};
 use async_trait::async_trait;
 use derive_more::Display;
 use itertools::Itertools;
@@ -178,7 +178,7 @@ impl HttpClient {
             bytes.len(),
             String::from_utf8_lossy(&bytes)
         );
-        let message = serde_bencode::from_bytes::<HttpResponse>(bytes.as_ref())?;
+        let message = bencode::from_bytes::<HttpResponse>(bytes.as_ref())?;
         debug!(
             "Http tracker {} received announce response, {:?}",
             self, message
@@ -203,7 +203,7 @@ impl HttpClient {
             bytes.len(),
             String::from_utf8_lossy(&bytes)
         );
-        let message = serde_bencode::from_bytes::<ScrapeResult>(bytes.as_ref())?;
+        let message = bencode::from_bytes::<ScrapeResult>(bytes.as_ref())?;
         debug!(
             "Http tracker {} received scrape response, {:?}",
             self, message
@@ -444,7 +444,7 @@ mod server {
         where
             T: Serialize,
         {
-            match serde_bencode::to_bytes(&response) {
+            match bencode::to_bytes(&response) {
                 Ok(bytes) => (status_code, bytes),
                 Err(e) => {
                     error!(

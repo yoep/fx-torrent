@@ -1,6 +1,6 @@
 use crate::peer::extension::{ExtensionNumber, ExtensionRegistry};
 use crate::peer::{Error, PeerId, ProtocolExtensionFlags, Result};
-use crate::{CompactIp, InfoHash, PieceIndex, PiecePart};
+use crate::{bencode, CompactIp, InfoHash, PieceIndex, PiecePart};
 use bit_vec::BitVec;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use log::trace;
@@ -393,7 +393,7 @@ impl TryFrom<&[u8]> for Message {
                 // if the extension id = 0, then the incoming message is an extended handshake
                 // otherwise it's an extended payload which should be processed by the peer extensions
                 if extended_id == 0 {
-                    let extended = serde_bencode::from_bytes(&buffer).map_err(|e| {
+                    let extended = bencode::from_bytes(&buffer).map_err(|e| {
                         Error::Parsing(format!("failed to parse extended handshake, {}", e))
                     })?;
                     Ok(Message::ExtendedHandshake(extended))
@@ -459,9 +459,7 @@ impl TryInto<Vec<u8>> for Message {
             Message::ExtendedHandshake(e) => {
                 // the handshake identifier
                 buffer.write_u8(0)?;
-                buffer.write_all(
-                    &*serde_bencode::to_bytes(&e).map_err(|e| Error::Parsing(e.to_string()))?,
-                )?;
+                buffer.write_all(&*bencode::to_bytes(&e)?)?;
             }
             Message::ExtendedPayload(extension_number, bytes) => {
                 buffer.write_u8(extension_number)?;
@@ -524,11 +522,7 @@ pub struct ExtendedHandshake {
     /// The client should ignore any extension names it doesn't recognize.
     pub m: ExtensionRegistry,
     /// Indicates that the peer is partially seeding a multi file torrent.
-    #[serde(
-        default,
-        skip_serializing_if = "is_false",
-        with = "crate::peer::protocol::bt::serde_bool_int"
-    )]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub upload_only: bool,
     /// Client name and version (as an utf-8 string).
     /// This is a much more reliable way of identifying the client than relying on the peer id encoding.
@@ -537,7 +531,7 @@ pub struct ExtendedHandshake {
     /// The number of maximum outstanding requests allowed by the peer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub regg: Option<i32>,
-    #[serde(default, with = "crate::peer::protocol::bt::serde_bool_int")]
+    #[serde(default)]
     pub encryption: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata_size: Option<u32>,
@@ -742,66 +736,6 @@ impl Debug for Hashes {
             .field("proof_layer", &self.proof_layers)
             .field("hashes", &self.hashes.len())
             .finish()
-    }
-}
-
-mod serde_bool_int {
-    use serde::de::Visitor;
-    use serde::Deserializer;
-    use std::fmt::Formatter;
-
-    #[derive(Debug)]
-    struct BoolIntVisitor;
-
-    impl<'de> Visitor<'de> for BoolIntVisitor {
-        type Value = bool;
-
-        fn expecting(&self, f: &mut Formatter) -> std::fmt::Result {
-            write!(f, "expected a boolean or numeric value of 0 or 1")
-        }
-
-        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(v)
-        }
-
-        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(v == 1)
-        }
-
-        fn visit_u8<E>(self, v: u8) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(v == 1)
-        }
-
-        fn visit_none<E>(self) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(false)
-        }
-    }
-
-    pub fn serialize<S>(value: &bool, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let value = if *value { 1 } else { 0 };
-        serde::Serialize::serialize(&value, serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<bool, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        D::deserialize_any(deserializer, BoolIntVisitor {})
     }
 }
 

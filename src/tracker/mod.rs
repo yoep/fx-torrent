@@ -1,5 +1,5 @@
 pub use client::*;
-pub use errors::*;
+pub use error::*;
 pub use http::*;
 pub use metrics::*;
 #[cfg(feature = "tracker-server")]
@@ -12,7 +12,7 @@ pub use udp::*;
 mod test_macros;
 
 mod client;
-mod errors;
+mod error;
 mod http;
 mod metrics;
 #[cfg(feature = "tracker-server")]

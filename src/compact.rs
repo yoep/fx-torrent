@@ -705,6 +705,7 @@ impl From<&CompactIpAddr> for SocketAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bencode;
 
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct TestIpv4List {
@@ -728,9 +729,9 @@ mod tests {
                 ip: Ipv4Addr::new(127, 0, 0, 1),
                 port: 6881,
             };
-            let bytes = serde_bencode::to_bytes(&expected_result).unwrap();
+            let bytes = bencode::to_bytes(&expected_result).unwrap();
 
-            let result = serde_bencode::from_bytes::<CompactIpv4Addr>(&bytes).unwrap();
+            let result = bencode::from_bytes::<CompactIpv4Addr>(&bytes).unwrap();
 
             assert_eq!(expected_result, result);
         }
@@ -760,9 +761,9 @@ mod tests {
                 }]
                 .into(),
             };
-            let bytes = serde_bencode::to_bytes(&expected_result).unwrap();
+            let bytes = bencode::to_bytes(&expected_result).unwrap();
 
-            let result = serde_bencode::from_bytes::<TestIpv4List>(&bytes).unwrap();
+            let result = bencode::from_bytes::<TestIpv4List>(&bytes).unwrap();
 
             assert_eq!(expected_result, result);
         }
@@ -791,9 +792,9 @@ mod tests {
                 ip: Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1),
                 port: 9090,
             };
-            let bytes = serde_bencode::to_bytes(&expected_result).unwrap();
+            let bytes = bencode::to_bytes(&expected_result).unwrap();
 
-            let result = serde_bencode::from_bytes::<CompactIpv6Addr>(&bytes).unwrap();
+            let result = bencode::from_bytes::<CompactIpv6Addr>(&bytes).unwrap();
 
             assert_eq!(expected_result, result);
         }
@@ -808,9 +809,9 @@ mod tests {
                 }]
                 .into(),
             };
-            let bytes = serde_bencode::to_bytes(&expected_result).unwrap();
+            let bytes = bencode::to_bytes(&expected_result).unwrap();
 
-            let result = serde_bencode::from_bytes::<TestIpv6List>(&bytes).unwrap();
+            let result = bencode::from_bytes::<TestIpv6List>(&bytes).unwrap();
 
             assert_eq!(expected_result, result);
         }
@@ -821,15 +822,15 @@ mod tests {
         let expected_result = CompactIp {
             ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         };
-        let bytes = serde_bencode::to_bytes(&expected_result).unwrap();
-        let result = serde_bencode::from_bytes(&bytes).unwrap();
+        let bytes = bencode::to_bytes(&expected_result).unwrap();
+        let result = bencode::from_bytes(&bytes).unwrap();
         assert_eq!(expected_result, result);
 
         let expected_result = CompactIp {
             ip: IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 16)),
         };
-        let bytes = serde_bencode::to_bytes(&expected_result).unwrap();
-        let result = serde_bencode::from_bytes(&bytes).unwrap();
+        let bytes = bencode::to_bytes(&expected_result).unwrap();
+        let result = bencode::from_bytes(&bytes).unwrap();
         assert_eq!(expected_result, result);
     }
 
@@ -839,16 +840,16 @@ mod tests {
             ip: Ipv4Addr::new(127, 0, 0, 1),
             port: 9090,
         });
-        let bytes = serde_bencode::to_bytes(&expected_result).unwrap();
-        let result = serde_bencode::from_bytes::<CompactIpAddr>(&bytes).unwrap();
+        let bytes = bencode::to_bytes(&expected_result).unwrap();
+        let result = bencode::from_bytes::<CompactIpAddr>(&bytes).unwrap();
         assert_eq!(expected_result, result);
 
         let expected_result = CompactIpAddr::IPv6(CompactIpv6Addr {
             ip: Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 16),
             port: 20021,
         });
-        let bytes = serde_bencode::to_bytes(&expected_result).unwrap();
-        let result = serde_bencode::from_bytes::<CompactIpAddr>(&bytes).unwrap();
+        let bytes = bencode::to_bytes(&expected_result).unwrap();
+        let result = bencode::from_bytes::<CompactIpAddr>(&bytes).unwrap();
         assert_eq!(expected_result, result);
     }
 }
