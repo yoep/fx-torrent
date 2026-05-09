@@ -56,10 +56,7 @@ impl Packet {
         // write the acknowledgment number
         buffer.write_u16::<BigEndian>(self.acknowledge_number)?;
         // write the extension bytes right after the header
-        if self.extension != Extension::None {
-            let extension_bytes = self.extension.as_bytes()?;
-            buffer.write_all(&extension_bytes)?;
-        }
+        buffer.write_all(&self.extension.as_bytes()?)?;
         // append the payload
         buffer.write_all(self.payload.as_slice())?;
 
@@ -93,10 +90,7 @@ impl TryFrom<&[u8]> for Packet {
         let sequence_number = cursor.read_u16::<BigEndian>()?;
         let acknowledge_number = cursor.read_u16::<BigEndian>()?;
         // read the extensions, if the extension_number is not 0
-        let extension = match extension_number {
-            0 => Extension::None,
-            _ => Extension::try_from(&mut cursor)?,
-        };
+        let extension = Extension::read(extension_number, &mut cursor)?;
         // read the remaining bytes as payload
         let mut payload = Vec::new();
         cursor.read_to_end(&mut payload)?;
@@ -187,72 +181,103 @@ impl Extension {
 
     /// Returns the extension as bytes.
     pub fn as_bytes(&self) -> Result<Vec<u8>> {
-        let mut bytes = vec![];
         let extension_payload = match self {
-            Extension::None => vec![],
+            Extension::None => return Ok(vec![]),
             Extension::SelectiveAck { bitmask } => bitmask.to_bytes(),
-            Extension::CloseReason { reason } => (*reason as u16).to_be_bytes().to_vec(),
+            Extension::CloseReason { reason } => {
+                let mut bytes = vec![0u8; 4];
+                let reason_bytes: [u8; 2] = (*reason as u16).to_be_bytes();
+                // write the close reason in the last 2 bytes
+                bytes[2] = reason_bytes[0];
+                bytes[3] = reason_bytes[1];
+                bytes
+            }
         };
 
-        // write the extension number
-        bytes.write_u8(self.as_u8())?;
+        let len = extension_payload.len();
+        let mut bytes = vec![0u8; len + 2];
+
+        // as we only support 1 extension (not a list)
+        // write the next extension as the termination byte 0
+        bytes[0] = 0;
 
         if !extension_payload.is_empty() {
             // write the extension payload length
-            bytes.write_u8(extension_payload.len() as u8)?;
+            bytes[1] = len as u8;
             // write the extension payload
-            bytes.write_all(&extension_payload)?;
+            bytes[2..2 + len].copy_from_slice(&extension_payload);
         }
-
-        // terminate the extensions with a 0 byte
-        bytes.write_u8(0)?;
 
         Ok(bytes)
     }
-}
 
-impl TryFrom<&mut Cursor<&[u8]>> for Extension {
-    type Error = Error;
+    /// Try to read an extension from the given cursor being parsed by a [Packet].
+    fn read(mut extension_nr: u8, cursor: &mut Cursor<&[u8]>) -> Result<Self> {
+        let mut extension = Extension::None;
 
-    fn try_from(cursor: &mut Cursor<&[u8]>) -> Result<Self> {
-        // read the extension info right after the uTP header
-        let extension = cursor.read_u8()?;
-        let extension_len = cursor.read_u8()?;
+        // loop until the end of the extension list is reached
+        while extension_nr != 0 {
+            let next_extension = cursor.read_u8().map_err(|_| {
+                Error::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "missing extension byte",
+                ))
+            })?;
+            let extension_len = cursor.read_u8().map_err(|_| {
+                Error::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "missing extension length byte",
+                ))
+            })?;
 
-        let mut bytes = vec![0u8; extension_len as usize];
-        cursor.read_exact(&mut bytes).map_err(|e| {
-            Error::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("failed to read {} extension bytes, {}", extension_len, e),
-            ))
-        })?;
+            // try to read the bytes from the cursor
+            let mut bytes = vec![0u8; extension_len as usize];
+            cursor.read_exact(&mut bytes).map_err(|e| {
+                Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("failed to read {} extension bytes, {}", extension_len, e),
+                ))
+            })?;
 
-        // read the terminating 0 byte
-        cursor.read_u8()?;
+            match extension_nr {
+                1 => {
+                    extension = Extension::SelectiveAck {
+                        bitmask: BitVec::from_bytes(&bytes),
+                    }
+                }
+                3 => {
+                    // check if the len is 4 bytes
+                    if extension_len != 4 {
+                        return Err(Error::Io(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            format!("expected 4 bytes, but got {}", extension_len),
+                        )));
+                    }
+                    // skip the 2 reserved bytes
+                    bytes = bytes.split_off(2);
 
-        match extension {
-            1 => Ok(Extension::SelectiveAck {
-                bitmask: BitVec::from_bytes(&bytes),
-            }),
-            3 => {
-                let bytes: [u8; 2] = bytes.try_into().map_err(|e: Vec<u8>| {
-                    Error::Parsing(format!(
-                        "failed to parse close reason, got {} bytes",
-                        e.len()
-                    ))
-                })?;
-                let reason = u16::from_be_bytes(bytes);
+                    let bytes: [u8; 2] = bytes.try_into().map_err(|e: Vec<u8>| {
+                        Error::Parsing(format!(
+                            "failed to parse close reason, got {} bytes",
+                            e.len()
+                        ))
+                    })?;
+                    let reason = u16::from_be_bytes(bytes);
 
-                Ok(Extension::CloseReason {
-                    reason: CloseReason::try_from(reason)?,
-                })
+                    extension = Extension::CloseReason {
+                        reason: CloseReason::try_from(reason)?,
+                    }
+                }
+                _ => {
+                    // log but ignore the unknown extension number
+                    debug!("Utp extension {} is currently not supported", extension_nr);
+                }
             }
-            _ => {
-                // log but ignore the unknown extension number
-                debug!("Utp extension {} is currently not supported", extension);
-                Ok(Extension::None)
-            }
+
+            extension_nr = next_extension
         }
+
+        Ok(extension)
     }
 }
 
@@ -353,7 +378,7 @@ mod tests {
                 .expect("expected the extension to have been serialized");
             let mut cursor = Cursor::new(bytes.as_slice());
             let result =
-                Extension::try_from(&mut cursor).expect("expected the extension to be valid");
+                Extension::read(1, &mut cursor).expect("expected the extension to be valid");
 
             assert_eq!(extension, result);
         }
@@ -369,7 +394,7 @@ mod tests {
                 .expect("expected the extension to have been serialized");
             let mut cursor = Cursor::new(bytes.as_slice());
             let result =
-                Extension::try_from(&mut cursor).expect("expected the extension to be valid");
+                Extension::read(3, &mut cursor).expect("expected the extension to be valid");
 
             assert_eq!(extension, result);
         }
