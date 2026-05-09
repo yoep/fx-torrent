@@ -540,6 +540,18 @@ pub struct CompactIp {
     pub ip: IpAddr,
 }
 
+impl From<IpAddr> for CompactIp {
+    fn from(value: IpAddr) -> Self {
+        Self { ip: value }
+    }
+}
+
+impl From<CompactIp> for IpAddr {
+    fn from(value: CompactIp) -> Self {
+        value.ip
+    }
+}
+
 impl From<&SocketAddr> for CompactIp {
     fn from(value: &SocketAddr) -> Self {
         Self { ip: value.ip() }
@@ -720,7 +732,7 @@ mod tests {
     }
 
     #[cfg(test)]
-    mod tests_compact_ipv4 {
+    mod compact_ipv4_addr {
         use super::*;
 
         #[test]
@@ -783,7 +795,7 @@ mod tests {
     }
 
     #[cfg(test)]
-    mod tests_compact_ipv6 {
+    mod compact_ipv6_addr {
         use super::*;
 
         #[test]
@@ -817,21 +829,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_compact_ip() {
-        let expected_result = CompactIp {
-            ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        };
-        let bytes = bencode::to_bytes(&expected_result).unwrap();
-        let result = bencode::from_bytes(&bytes).unwrap();
-        assert_eq!(expected_result, result);
+    #[cfg(test)]
+    mod compact_ip {
+        use super::*;
 
-        let expected_result = CompactIp {
-            ip: IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 16)),
-        };
-        let bytes = bencode::to_bytes(&expected_result).unwrap();
-        let result = bencode::from_bytes(&bytes).unwrap();
-        assert_eq!(expected_result, result);
+        #[test]
+        fn test_serialize() {
+            let expected_result = CompactIp {
+                ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            };
+            let bytes = bencode::to_bytes(&expected_result).unwrap();
+            let result = bencode::from_bytes(&bytes).unwrap();
+            assert_eq!(expected_result, result);
+
+            let expected_result = CompactIp {
+                ip: IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 16)),
+            };
+            let bytes = bencode::to_bytes(&expected_result).unwrap();
+            let result = bencode::from_bytes(&bytes).unwrap();
+            assert_eq!(expected_result, result);
+        }
+
+        #[test]
+        fn test_from_ip_addr() {
+            let result = CompactIp::from(IpAddr::from(Ipv4Addr::LOCALHOST));
+            assert_eq!(result.ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+            let result = CompactIp::from(IpAddr::from(Ipv6Addr::LOCALHOST));
+            assert_eq!(result.ip, IpAddr::V6(Ipv6Addr::LOCALHOST));
+        }
     }
 
     #[test]

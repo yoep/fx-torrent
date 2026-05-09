@@ -8,8 +8,6 @@ use crate::tracker::{
 use crate::Result;
 use crate::{InfoHash, TorrentError};
 use std::time::Duration;
-#[cfg(feature = "tracing")]
-use tracing::{instrument, Level};
 
 /// Allows discovering peers in a swarm.
 #[derive(Debug, Clone)]
@@ -23,7 +21,7 @@ pub enum TorrentTracker {
 
 impl TorrentTracker {
     /// Announce the given event for the info hash to the tracker.
-    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub async fn announce(
         &self,
         info_hash: &InfoHash,
@@ -52,7 +50,7 @@ impl TorrentTracker {
     }
 
     /// Scrape the given info hash from the tracker.
-    #[cfg_attr(feature = "tracing", instrument(skip(self), err(level = Level::INFO)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO)))]
     pub async fn scrape(&self, info_hash: &InfoHash) -> Result<ScrapeResult> {
         match self {
             #[cfg(feature = "dht")]

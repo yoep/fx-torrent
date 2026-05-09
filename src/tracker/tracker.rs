@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::Sub;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -102,9 +102,11 @@ pub struct Announcement {
 /// It includes the interval at which the peer should re-announce, the number of leechers and seeders,
 /// and a list of peer addresses.
 #[derive(Debug, Clone)]
-pub struct AnnounceEntryResponse {
+pub struct AnnouncementResponse {
     /// The interval (in seconds) at which the peer should re-announce itself to the tracker.
     pub interval_seconds: u64,
+    /// The external ip address of the torrent detected by the tracker (see BEP24).
+    pub external_ip: Option<IpAddr>,
     /// The number of leechers currently downloading the torrent.
     pub leechers: u64,
     /// The number of seeders currently sharing the torrent.
@@ -150,7 +152,7 @@ pub(crate) trait TrackerClientConnection: Debug + Send + Sync {
     /// # Returns
     ///
     /// It returns the tracker announcement response for the given announcement.
-    async fn announce(&self, announcement: Announcement) -> Result<AnnounceEntryResponse>;
+    async fn announce(&self, announcement: Announcement) -> Result<AnnouncementResponse>;
 
     /// Scrape the tracker for metrics for one or more info hashes.
     ///
@@ -329,7 +331,7 @@ impl Tracker {
     /// # Returns
     ///
     /// The announcement response from the tracker.
-    pub async fn announce(&self, announce: Announcement) -> Result<AnnounceEntryResponse> {
+    pub async fn announce(&self, announce: Announcement) -> Result<AnnouncementResponse> {
         trace!("Tracker {} is announcing {:?}", self, announce);
         match self.inner.connection.announce(announce).await {
             Ok(e) => {

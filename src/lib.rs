@@ -145,10 +145,12 @@ impl Extension for MyPeerExtension {
 ### Storage Extension
 
 To implement your own storage extension, implement the [storage::Extension] trait.
+This trait can be registered directly in a [Torrent] or reused through [FxTorrentSession].
 
 _example storage extension_
 ```rust
 # use fx_torrent::Torrent;
+# use fx_torrent::FxTorrentSession;
 # use fx_torrent::storage::Extension;
 # use fx_torrent::storage::StorageParams;
 
@@ -164,10 +166,16 @@ impl Extension for MyStorageExtension {
 }
 
 # fn example() {
-    Torrent::request()
+    // 1. Storage extension directly in a torrent
+    let torrent = Torrent::request()
         .storage(|params| MyStorageExtension::new(params).into())
         .build()
-        .unwrap()
+        .unwrap();
+
+    // 2. Storage extension in a session
+    let session = FxTorrentSession::builder()
+        .storage(|params| MyStorageExtension::new(params).into())
+        .build().unwrap();
 # }
 ```
 
