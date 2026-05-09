@@ -1,10 +1,9 @@
 use crate::storage::parts_file::PartsFile;
-use crate::storage::{Error, Metrics, Result, Storage};
+use crate::storage::{unavailable, Metrics, Result};
 use crate::torrent_data::DataPool;
 use crate::{
     FileAttributeFlags, FileIndex, FilePriority, InfoHash, PieceIndex, Sha1Hash, Sha256Hash,
 };
-use async_trait::async_trait;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::cmp::min;
@@ -38,134 +37,13 @@ impl DiskStorage {
         }
     }
 
-    /// Get the absolute filepath for the given filepath within the storage.
-    async fn absolute_filepath<P: AsRef<Path>>(&self, filepath: P) -> PathBuf {
-        self.path.read().await.join(filepath.as_ref())
-    }
-
-    /// Get the amount of bytes for the given piece.
-    async fn piece_len(&self, piece: &PieceIndex) -> usize {
-        self.data_pool
-            .piece(piece)
-            .await
-            .map(|e| e.len())
-            .unwrap_or_default()
-    }
-
-    /// Get the amount of bytes within the torrent.
-    async fn torrent_len(&self) -> usize {
-        let last_piece_index = self.data_pool.num_of_pieces().await.saturating_sub(1);
-        self.data_pool
-            .piece(&last_piece_index)
-            .await
-            .map(|piece| piece.offset.saturating_add(piece.len()))
-            .unwrap_or_default()
-    }
-
-    /// Check if the given filepath is valid within the storage.
-    /// If the target filepath leaves the storage path, it returns false.
-    async fn is_valid_filepath<P: AsRef<Path>>(&self, filepath: P) -> bool {
-        let base = Self::canonicalize_unchecked(&*self.path.read().await);
-        let target = Self::canonicalize_unchecked(filepath.as_ref());
-
-        target.starts_with(&base)
-    }
-
-    /// Assert if the given filepath is valid within the storage.
-    /// This prevents file paths from traversing upwards/leaving the storage path.
-    async fn assert_valid_filepath<P: AsRef<Path>>(&self, filepath: P) -> Result<()> {
-        if !self.is_valid_filepath(&filepath).await {
-            return Err(Error::InvalidFilepath(filepath.as_ref().to_path_buf()));
-        }
-
-        Ok(())
-    }
-
-    /// Try to open the given torrent file from the disk storage.
-    async fn open<P: AsRef<Path>>(&self, filepath: P, write: bool) -> Result<File> {
-        let absolute_path = self.absolute_filepath(filepath).await;
-        self.assert_valid_filepath(&absolute_path).await?;
-
-        if write {
-            let base_dir = self.path.read().await.clone();
-            let parent = absolute_path.parent().unwrap_or(base_dir.as_path());
-            create_dir_all(parent).await.map_err(Error::Io)?;
-        }
-
-        OpenOptions::new()
-            .read(true)
-            .write(write)
-            .create(write)
-            .open(absolute_path)
-            .await
-            .map_err(Error::Io)
-    }
-
-    /// The read/write file index and torrent offset to start from for the given piece and offset.
-    async fn readwrite(
+    #[cfg_attr(feature = "tracing", instrument(skip(self, buffer)))]
+    pub async fn read(
         &self,
+        buffer: &mut [u8],
         piece: &PieceIndex,
         offset: usize,
-        buffer_len: usize,
-    ) -> Result<(FileIndex, usize)> {
-        let torrent_piece_start = self
-            .data_pool
-            .piece(piece)
-            .await
-            .map(|piece| piece.offset.saturating_add(offset))
-            .ok_or(Error::Unavailable)?;
-
-        // check if the requested range is still within the torrent range
-        let end = torrent_piece_start
-            .checked_add(buffer_len)
-            .ok_or(Error::OutOfBounds)?;
-        let torrent_len = self.torrent_len().await;
-        if end > torrent_len {
-            return Err(Error::OutOfBounds);
-        }
-
-        let file_index = self
-            .data_pool
-            .file_index_for(&piece)
-            .await
-            .ok_or(Error::Unavailable)?;
-
-        Ok((file_index, torrent_piece_start))
-    }
-
-    /// Get the canonicalized path for the given path.
-    /// Resolves "." and ".." without touching the filesystem (symlinks not resolved).
-    fn canonicalize_unchecked(path: &Path) -> PathBuf {
-        let components = path.components();
-        let mut result = PathBuf::new();
-
-        // Traverse the path components and resolve ".." and "." appropriately
-        for component in components {
-            match component {
-                // Ignore "." (current directory)
-                std::path::Component::CurDir => {}
-                // Remove the last component for ".." (parent directory)
-                std::path::Component::ParentDir => {
-                    result.pop();
-                }
-                // Add other components as normal
-                std::path::Component::Normal(part) => {
-                    result.push(part);
-                }
-                std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                    result.push(component.as_os_str());
-                }
-            }
-        }
-
-        result
-    }
-}
-
-#[async_trait]
-impl Storage for DiskStorage {
-    #[cfg_attr(feature = "tracing", instrument(skip(self, buffer)))]
-    async fn read(&self, buffer: &mut [u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
+    ) -> Result<usize> {
         let mut cursor = 0;
         let buffer_len = buffer.len();
         let (mut file_index, mut torrent_offset) =
@@ -176,7 +54,7 @@ impl Storage for DiskStorage {
                 .data_pool
                 .file(&file_index)
                 .await
-                .ok_or(Error::Unavailable)?;
+                .ok_or(unavailable())?;
             let bytes_remaining = buffer_len.saturating_sub(cursor);
 
             // check if the file is a padding file
@@ -245,7 +123,7 @@ impl Storage for DiskStorage {
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip(self, data)))]
-    async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
+    pub async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         let mut cursor = 0;
         let data_len = data.len();
         let (mut file_index, mut torrent_offset) = self.readwrite(piece, offset, data_len).await?;
@@ -255,7 +133,7 @@ impl Storage for DiskStorage {
                 .data_pool
                 .file(&file_index)
                 .await
-                .ok_or(Error::Unavailable)?;
+                .ok_or(unavailable())?;
             let bytes_remaining = data_len - cursor;
 
             // check if the file is a padding file
@@ -271,7 +149,7 @@ impl Storage for DiskStorage {
             if file.priority == FilePriority::None {
                 let cur_piece = match self.data_pool.find_piece_at_offset(torrent_offset).await {
                     Some(piece) => piece,
-                    None => return Err(Error::Unavailable),
+                    None => return Err(unavailable()),
                 };
                 let piece_offset = torrent_offset.saturating_sub(cur_piece.offset);
                 let parts_len = min(bytes_remaining, file.len());
@@ -309,37 +187,167 @@ impl Storage for DiskStorage {
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
-    async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash> {
+    pub async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash> {
         let len = self.piece_len(piece).await;
         let mut buffer = vec![0u8; len];
         let bytes_read = self.read(&mut buffer, piece, 0).await?;
         if bytes_read != len {
-            return Err(Error::Unavailable);
+            return Err(unavailable());
         }
 
         Sha1Hash::try_from(Sha1::digest(buffer.as_slice()))
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
-    async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash> {
+    pub async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash> {
         let len = self.piece_len(piece).await;
         let mut buffer = vec![0u8; len];
         let bytes_read = self.read(&mut buffer, piece, 0).await?;
         if bytes_read != len {
-            return Err(Error::Unavailable);
+            return Err(unavailable());
         }
 
         Sha256Hash::try_from(Sha256::digest(buffer.as_slice()))
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
-    async fn move_storage(&self, _new_path: &Path) -> Result<()> {
+    /// Move the storage to a new location.
+    pub async fn move_storage(&self, _new_path: &Path) -> Result<()> {
         todo!()
     }
 
-    fn metrics(&self) -> &Metrics {
+    /// Returns the storage metrics.
+    pub fn metrics(&self) -> &Metrics {
         &self.metrics
+    }
+
+    /// Get the absolute filepath for the given filepath within the storage.
+    async fn absolute_filepath<P: AsRef<Path>>(&self, filepath: P) -> PathBuf {
+        self.path.read().await.join(filepath.as_ref())
+    }
+
+    /// Get the amount of bytes for the given piece.
+    async fn piece_len(&self, piece: &PieceIndex) -> usize {
+        self.data_pool
+            .piece(piece)
+            .await
+            .map(|e| e.len())
+            .unwrap_or_default()
+    }
+
+    /// Get the amount of bytes within the torrent.
+    async fn torrent_len(&self) -> usize {
+        let last_piece_index = self.data_pool.num_of_pieces().await.saturating_sub(1);
+        self.data_pool
+            .piece(&last_piece_index)
+            .await
+            .map(|piece| piece.offset.saturating_add(piece.len()))
+            .unwrap_or_default()
+    }
+
+    /// Check if the given filepath is valid within the storage.
+    /// If the target filepath leaves the storage path, it returns false.
+    async fn is_valid_filepath<P: AsRef<Path>>(&self, filepath: P) -> bool {
+        let base = Self::canonicalize_unchecked(&*self.path.read().await);
+        let target = Self::canonicalize_unchecked(filepath.as_ref());
+
+        target.starts_with(&base)
+    }
+
+    /// Assert if the given filepath is valid within the storage.
+    /// This prevents file paths from traversing upwards/leaving the storage path.
+    async fn assert_valid_filepath<P: AsRef<Path>>(&self, filepath: P) -> Result<()> {
+        if !self.is_valid_filepath(&filepath).await {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{:?}", filepath.as_ref()),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Try to open the given torrent file from the disk storage.
+    async fn open<P: AsRef<Path>>(&self, filepath: P, write: bool) -> Result<File> {
+        let absolute_path = self.absolute_filepath(filepath).await;
+        self.assert_valid_filepath(&absolute_path).await?;
+
+        if write {
+            let base_dir = self.path.read().await.clone();
+            let parent = absolute_path.parent().unwrap_or(base_dir.as_path());
+            create_dir_all(parent).await?;
+        }
+
+        OpenOptions::new()
+            .read(true)
+            .write(write)
+            .create(write)
+            .open(absolute_path)
+            .await
+    }
+
+    /// The read/write file index and torrent offset to start from for the given piece and offset.
+    async fn readwrite(
+        &self,
+        piece: &PieceIndex,
+        offset: usize,
+        buffer_len: usize,
+    ) -> Result<(FileIndex, usize)> {
+        let torrent_piece_start = self
+            .data_pool
+            .piece(piece)
+            .await
+            .map(|piece| piece.offset.saturating_add(offset))
+            .ok_or(unavailable())?;
+
+        // check if the requested range is still within the torrent range
+        let end = torrent_piece_start
+            .checked_add(buffer_len)
+            .ok_or(io::Error::new(
+                io::ErrorKind::Other,
+                "buffer length overflow",
+            ))?;
+        let torrent_len = self.torrent_len().await;
+        if end > torrent_len {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "out-of-bounds"));
+        }
+
+        let file_index = self
+            .data_pool
+            .file_index_for(&piece)
+            .await
+            .ok_or(unavailable())?;
+
+        Ok((file_index, torrent_piece_start))
+    }
+
+    /// Get the canonicalized path for the given path.
+    /// Resolves "." and ".." without touching the filesystem (symlinks not resolved).
+    fn canonicalize_unchecked(path: &Path) -> PathBuf {
+        let components = path.components();
+        let mut result = PathBuf::new();
+
+        // Traverse the path components and resolve ".." and "." appropriately
+        for component in components {
+            match component {
+                // Ignore "." (current directory)
+                std::path::Component::CurDir => {}
+                // Remove the last component for ".." (parent directory)
+                std::path::Component::ParentDir => {
+                    result.pop();
+                }
+                // Add other components as normal
+                std::path::Component::Normal(part) => {
+                    result.push(part);
+                }
+                std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                    result.push(component.as_os_str());
+                }
+            }
+        }
+
+        result
     }
 }
 
@@ -381,11 +389,10 @@ mod tests {
         // write the piece data
         {
             let result = storage.write(&data, &0, 0).await;
-            assert_eq!(
-                Ok(data.len()),
-                result,
-                "expected all data to have been written to the storage"
-            );
+            match result {
+                Ok(result) => assert_eq!(data.len(), result, "expected all data to be written"),
+                Err(_) => assert!(false, "expected Ok, but got {:?}", result),
+            }
         }
 
         // read the starting piece with offset
@@ -395,11 +402,10 @@ mod tests {
             let piece_len = context.data_pool().piece(&piece).await.unwrap().length;
             let mut buffer = vec![0u8; piece_len];
             let result = storage.read(&mut buffer, &piece, offset).await;
-            assert_eq!(
-                Ok(piece_len),
-                result,
-                "expected the buffer to have been fully filled"
-            );
+            match result {
+                Ok(result) => assert_eq!(piece_len, result, "expected the buffer to be filled"),
+                Err(_) => assert!(false, "expected Ok, but got {:?}", result),
+            }
             assert_eq!(
                 &data[offset..offset + piece_len],
                 &buffer[..],
@@ -413,11 +419,10 @@ mod tests {
             let piece_len = context.data_pool().piece(&piece).await.unwrap().length;
             let mut buffer = vec![0u8; piece_len];
             let result = storage.read(&mut buffer, &piece, 0).await;
-            assert_eq!(
-                Ok(piece_len),
-                result,
-                "expected the full piece to have been read"
-            );
+            match result {
+                Ok(result) => assert_eq!(piece_len, result, "expected the full piece to be read"),
+                Err(_) => assert!(false, "expected Ok, but got {:?}", result),
+            }
         }
     }
 
@@ -444,11 +449,10 @@ mod tests {
         // write the piece data
         {
             let result = storage.write(&data, &piece, 0).await;
-            assert_eq!(
-                Ok(data.len()),
-                result,
-                "expected all data to have been written to the storage"
-            );
+            match result {
+                Ok(result) => assert_eq!(data.len(), result, "expected all data to be written"),
+                Err(_) => assert!(false, "expected Ok, but got {:?}", result),
+            }
         }
 
         // get the hash result from the piece

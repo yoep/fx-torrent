@@ -630,7 +630,7 @@ mod tests {
                 .extension(|| HolepunchExtension::new().into())
                 .operations(vec![Box::new(TorrentConnectPeersOperation::new(false))])
                 .peer_discovery(discovery)
-                .storage(|_| Box::new(MemoryStorage::new()))
+                .storage(|_| MemoryStorage::new().into())
                 .build()
                 .unwrap()
         }
@@ -643,7 +643,7 @@ mod tests {
                 .extension(|| HolepunchExtension::new().into())
                 .operations(vec![])
                 .peer_discoveries(discoveries.to_vec())
-                .storage(|_| Box::new(MemoryStorage::new()))
+                .storage(|_| MemoryStorage::new().into())
                 .build()
                 .unwrap()
         }

@@ -488,7 +488,7 @@ mod tests {
             .protocol_extensions(ProtocolExtensionFlags::LTEP)
             .extension(|| PexExtension::new(Duration::from_secs(1)).into())
             .operations(vec![])
-            .storage(|_| Box::new(MemoryStorage::new()))
+            .storage(|_| MemoryStorage::new().into())
             .build()
             .unwrap()
     }

@@ -18,11 +18,8 @@ pub type ExtensionNumber = u8;
 pub type ExtensionRegistry = HashMap<ExtensionName, ExtensionNumber>;
 
 /// A peer extension that is used within the BitTorrent protocol.
-/// An extension can only be activated when the remote peer supports **BEP10**.
-///
-/// Extensions are registered at the [crate::Session] level.
-/// An extension is then cloned through the [Extension::clone_boxed] method for each created peer connection in a torrent.
-/// This means that the extension can store peer related information internally for later use.
+/// An extension can only be activated when the remote peer supports **BEP10** and
+/// the same name is used in the [crate::peer::bt_peer::ExtendedHandshake] message.
 #[async_trait]
 pub trait Extension: Debug + Send + Sync {
     /// Returns the unique name of the extension.
@@ -40,7 +37,7 @@ pub trait Extension: Debug + Send + Sync {
     ///
     /// # Returns
     ///
-    /// Return an error when the extension fails to process the payload successfully.
+    /// Returns an error when the extension fails to process the payload successfully.
     async fn on_message(
         &mut self,
         payload: &[u8],

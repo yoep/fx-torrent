@@ -1,8 +1,7 @@
 #[cfg(feature = "dht")]
 use crate::dht;
-use crate::storage::Error;
 use crate::tracker::TrackerError;
-use crate::{bencode, peer, storage, TorrentHandle};
+use crate::{bencode, peer, TorrentHandle};
 use std::io;
 use thiserror::Error;
 
@@ -139,20 +138,6 @@ impl From<bencode::Error> for TorrentError {
 impl From<PieceError> for TorrentError {
     fn from(error: PieceError) -> Self {
         Self::Piece(error)
-    }
-}
-
-impl From<storage::Error> for TorrentError {
-    fn from(err: storage::Error) -> Self {
-        match err {
-            Error::Unavailable | Error::OutOfBounds => {
-                Self::Io(io::Error::new(io::ErrorKind::Other, err.to_string()))
-            }
-            Error::InvalidFilepath(e) => {
-                Self::Io(io::Error::new(io::ErrorKind::NotFound, format!("{:?}", e)))
-            }
-            Error::Io(e) => Self::Io(e),
-        }
     }
 }
 

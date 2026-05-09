@@ -258,7 +258,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![],
             vec![listener.into()],
-            |_| Box::new(MemoryStorage::new()),
+            |_| MemoryStorage::new().into(),
             None
         );
         let listener_port = torrent

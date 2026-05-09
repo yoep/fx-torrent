@@ -108,6 +108,69 @@ When using the `dht` feature, enabled by default, one of the following additiona
 These crypto providers are used within the DHT network to verify mutable items within the network.
 When both features are missing, a [dht::Error::MissingCryptoProvider] error will be returned.
 
+## Extensions
+
+The behavior of components within the `fx_torrent` crate can be modified with your own functionality.
+To achieve this, use one of the following "extension" traits within the modules to update the behavior of that component.
+
+### Peer Extension
+
+To implement your own peer extension, implement the [peer:extension::Extension] trait.
+
+_example peer extension_
+```rust
+# use fx_torrent::Torrent;
+# use fx_torrent::peer::PeerContext;
+# use fx_torrent::peer::extension::Extension;
+# use fx_torrent::peer::extension::Result;
+
+#[derive(Debug)]
+pub struct MyPeerExtension;
+impl Extension for MyPeerExtension {
+    fn name(&self) -> &str {
+        "my-extension"
+    }
+
+    ...
+}
+
+# fn example() {
+    Torrent::request()
+        .extension(|| MyPeerExtension.into())
+        .build()
+        .unwrap()
+# }
+```
+
+### Storage Extension
+
+To implement your own storage extension, implement the [storage::Extension] trait.
+
+_example storage extension_
+```rust
+# use fx_torrent::Torrent;
+# use fx_torrent::storage::Extension;
+# use fx_torrent::storage::StorageParams;
+
+#[derive(Debug)]
+pub struct MyStorageExtension;
+impl MyStorageExtension {
+    pub fn new(_params: StorageParams) -> Self {
+        Self
+    }
+}
+impl Extension for MyStorageExtension {
+    ...
+}
+
+# fn example() {
+    Torrent::request()
+        .storage(|params| MyStorageExtension::new(params).into())
+        .build()
+        .unwrap()
+# }
+```
+
 */
 
 pub use compact::*;

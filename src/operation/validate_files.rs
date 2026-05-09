@@ -117,11 +117,11 @@ impl TorrentFileValidationOperation {
         });
     }
 
-    /// Validate the piece data stored within the [Storage] of the torrent.
+    /// Validate the piece data stored within the [StorageExtension] of the torrent.
     /// Returns the [PieceIndex] when the stored piece data is valid, else [None].
     async fn validate_piece(
         torrent: InnerTorrent,
-        storage: Arc<dyn Storage>,
+        storage: Arc<Storage>,
         piece: Piece,
     ) -> Option<PieceIndex> {
         let expected_v1 = piece.hash.hash_v1();
@@ -163,7 +163,7 @@ impl TorrentFileValidationOperation {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn run_validation(
         torrent: InnerTorrent,
-        storage: Arc<dyn Storage>,
+        storage: Arc<Storage>,
         pieces: Vec<Piece>,
         num_of_files: usize,
         max_parallel: usize,
@@ -318,7 +318,9 @@ mod tests {
             vec![],
             None,
             None,
-            |info_hash, data_pool| Arc::new(DiskStorage::new(info_hash, temp_path, data_pool))
+            |info_hash, data_pool| Arc::new(
+                DiskStorage::new(info_hash, temp_path, data_pool).into()
+            )
         );
         let mut operation = TorrentFileValidationOperation::new();
 

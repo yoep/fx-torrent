@@ -2934,11 +2934,7 @@ mod tests {
                 Box::new(TorrentFileValidationOperation::new()),
             ],
             vec![],
-            |params| Box::new(DiskStorage::new(
-                params.info_hash,
-                params.path,
-                params.data_pool,
-            )),
+            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool,).into(),
             None
         );
         let target = torrent!(
@@ -2948,7 +2944,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())],
             vec![],
-            |_| Box::new(MemoryStorage::new()),
+            |_| MemoryStorage::new().into(),
             None
         );
 
@@ -3000,11 +2996,7 @@ mod tests {
                 Box::new(TorrentFileValidationOperation::new()),
             ],
             vec![],
-            |params| Box::new(DiskStorage::new(
-                params.info_hash,
-                params.path,
-                params.data_pool,
-            )),
+            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool,).into(),
             None
         );
         let target = torrent!(
@@ -3014,7 +3006,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())],
             vec![],
-            |_| Box::new(MemoryStorage::new()),
+            |_| MemoryStorage::new().into(),
             None
         );
 
