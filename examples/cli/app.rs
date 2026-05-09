@@ -11,10 +11,9 @@ use futures::{future, FutureExt};
 use fx_callback::{Callback, Subscription};
 use fx_torrent::dht::{DhtTracker, Mode};
 use fx_torrent::operation::{
-    TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation, TorrentDhtNodesOperation,
-    TorrentDhtPeersOperation, TorrentFileValidationOperation, TorrentLsdPeersOperation,
-    TorrentMetadataOperation, TorrentOperationFactory, TorrentStatsOperation,
-    TorrentTrackerPeersOperation, TorrentTrackersOperation,
+    ConnectPeersOperation, CreatePiecesAndFilesOperation, DhtNodesOperation, DhtPeersOperation,
+    FileValidationOperation, LsdPeersOperation, MetadataOperation, StatsOperation,
+    TorrentOperationFactory, TrackerPeersOperation, TrackersOperation,
 };
 use fx_torrent::{
     FxSessionCache, FxTorrentSession, Session, SessionConfig, SessionEvent, TorrentFlags,
@@ -478,14 +477,14 @@ impl App {
     async fn create_session(settings: &AppSettings) -> io::Result<FxTorrentSession> {
         let webseeds_enabled = settings.webseeds_enabled;
         let mut operations: Vec<TorrentOperationFactory> = vec![
-            TorrentOperationFactory::new(|| Box::new(TorrentStatsOperation::new())),
+            TorrentOperationFactory::new(|| StatsOperation::new().into()),
             TorrentOperationFactory::new(move || {
-                Box::new(TorrentConnectPeersOperation::new(webseeds_enabled))
+                ConnectPeersOperation::new(webseeds_enabled).into()
             }),
-            TorrentOperationFactory::new(|| Box::new(TorrentTrackerPeersOperation::new())),
-            TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new(None))),
-            TorrentOperationFactory::new(|| Box::new(TorrentCreatePiecesAndFilesOperation::new())),
-            TorrentOperationFactory::new(|| Box::new(TorrentFileValidationOperation::new())),
+            TorrentOperationFactory::new(|| TrackerPeersOperation::new().into()),
+            TorrentOperationFactory::new(|| MetadataOperation::new(None).into()),
+            TorrentOperationFactory::new(|| CreatePiecesAndFilesOperation::new().into()),
+            TorrentOperationFactory::new(|| FileValidationOperation::new().into()),
         ];
         let mut operation_index = 0;
         let dht = if settings.dht_enabled {
@@ -512,26 +511,26 @@ impl App {
         if settings.trackers_enabled {
             operations.insert(
                 operation_index,
-                TorrentOperationFactory::new(|| Box::new(TorrentTrackersOperation::new())),
+                TorrentOperationFactory::new(|| TrackersOperation::new().into()),
             );
             operation_index += 1;
         }
         if settings.dht_enabled {
             operations.insert(
                 operation_index,
-                TorrentOperationFactory::new(|| Box::new(TorrentDhtNodesOperation::new())),
+                TorrentOperationFactory::new(|| DhtNodesOperation::new().into()),
             );
             operation_index += 1;
             operations.insert(
                 operation_index,
-                TorrentOperationFactory::new(|| Box::new(TorrentDhtPeersOperation::new())),
+                TorrentOperationFactory::new(|| DhtPeersOperation::new().into()),
             );
             operation_index += 1;
         }
         if settings.lsd_enabled {
             operations.insert(
                 operation_index,
-                TorrentOperationFactory::new(|| Box::new(TorrentLsdPeersOperation::new())),
+                TorrentOperationFactory::new(|| LsdPeersOperation::new().into()),
             );
         }
 

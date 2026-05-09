@@ -165,7 +165,7 @@ macro_rules! torrent {
             $temp_dir,
             $options,
             $config,
-            crate::operation::DEFAULT_OPERATIONS()
+            crate::operation::Operation::default_operations()
         )
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr) => {{
@@ -253,7 +253,7 @@ macro_rules! torrent {
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $operations:expr, $discoveries:expr, $storage:expr, $dht:expr, $tracker_manager:expr, $extensions:expr) => {{
         use crate::dht::DhtTracker;
-        use crate::operation::TorrentOperation;
+        use crate::operation::Operation;
         use crate::peer::PeerDiscovery;
         use crate::ExtensionFactory;
         use crate::{Torrent, TorrentConfig, TorrentFlags};
@@ -261,7 +261,7 @@ macro_rules! torrent {
         let uri: &str = $uri;
         let options: TorrentFlags = $options;
         let config: TorrentConfig = $config;
-        let operations: Vec<Box<dyn TorrentOperation>> = $operations;
+        let operations: Vec<Operation> = $operations;
         let discoveries: Vec<PeerDiscovery> = $discoveries;
         let extensions: Vec<ExtensionFactory> = $extensions;
         let dht: Option<DhtTracker> = $dht;

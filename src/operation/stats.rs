@@ -1,21 +1,20 @@
 use crate::metrics::Metric;
-use crate::operation::{TorrentOperation, TorrentOperationResult};
-use crate::peer::{PeerDiscovery, PeerEvent};
+use crate::operation::TorrentOperationResult;
+use crate::peer::PeerEvent;
 use crate::{TorrentContext, TorrentEvent};
-use async_trait::async_trait;
 use fx_callback::{Callback, Subscription};
 use std::time::{Duration, Instant};
 
 /// The torrent stats operation collects metrics from the torrent peers and publishes them via the [TorrentEvent::Stats] event.
 #[derive(Debug)]
-pub struct TorrentStatsOperation {
+pub struct StatsOperation {
     last_tick: Instant,
     initialized: bool,
     event_receiver: Option<Subscription<TorrentEvent>>,
     peer_receivers: Vec<Subscription<PeerEvent>>,
 }
 
-impl TorrentStatsOperation {
+impl StatsOperation {
     pub fn new() -> Self {
         Self {
             last_tick: Instant::now(),
@@ -23,6 +22,18 @@ impl TorrentStatsOperation {
             event_receiver: None,
             peer_receivers: vec![],
         }
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn execute(&mut self, context: &mut TorrentContext) -> TorrentOperationResult {
+        self.initialize(context);
+
+        // process all pending events
+        self.process_torrent_events(context);
+        self.process_peer_events(context);
+
+        self.tick(context);
+        TorrentOperationResult::Continue
     }
 
     /// Returns `true` if the event invocation is allowed, else `false`.
@@ -98,29 +109,6 @@ impl TorrentStatsOperation {
     }
 }
 
-#[async_trait]
-impl TorrentOperation for TorrentStatsOperation {
-    fn name(&self) -> &str {
-        "torrent stats operation"
-    }
-
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn execute(
-        &mut self,
-        context: &mut TorrentContext,
-        _: &[PeerDiscovery],
-    ) -> TorrentOperationResult {
-        self.initialize(context);
-
-        // process all pending events
-        self.process_torrent_events(context);
-        self.process_peer_events(context);
-
-        self.tick(context);
-        TorrentOperationResult::Continue
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,7 +133,7 @@ mod tests {
             vec![],
             None
         );
-        let mut operation = TorrentStatsOperation::new();
+        let mut operation = StatsOperation::new();
 
         // initialize the operation
         operation.initialize(&context);
@@ -183,11 +171,11 @@ mod tests {
             None
         );
         let (source, _target) = tcp_peer_pair!(&torrent);
-        let mut operation = TorrentStatsOperation::new();
+        let mut operation = StatsOperation::new();
 
         // initialize the operation
         // this makes the operation subscribe to the torrent context events
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
         assert_eq!(
             true, operation.initialized,
@@ -219,7 +207,7 @@ mod tests {
         });
 
         // execute the operation
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
 
         let _ = timeout(Duration::from_millis(100), rx)

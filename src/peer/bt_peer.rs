@@ -2711,7 +2711,7 @@ impl Drop for PeerContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operation::{TorrentCreatePiecesAndFilesOperation, TorrentFileValidationOperation};
+    use crate::operation::{CreatePiecesAndFilesOperation, FileValidationOperation};
     use crate::peer::protocol::UtpPacketCapture;
     use crate::peer::tests::create_utp_peer_pair;
     use crate::storage::{DiskStorage, MemoryStorage};
@@ -2930,8 +2930,8 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![
-                Box::new(TorrentCreatePiecesAndFilesOperation::new()),
-                Box::new(TorrentFileValidationOperation::new()),
+                CreatePiecesAndFilesOperation::new().into(),
+                FileValidationOperation::new().into(),
             ],
             vec![],
             |params| DiskStorage::new(params.info_hash, params.path, params.data_pool,).into(),
@@ -2942,7 +2942,7 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
-            vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())],
+            vec![CreatePiecesAndFilesOperation::new().into()],
             vec![],
             |_| MemoryStorage::new().into(),
             None
@@ -2992,8 +2992,8 @@ mod tests {
             TorrentFlags::UploadMode,
             TorrentConfig::builder().build(),
             vec![
-                Box::new(TorrentCreatePiecesAndFilesOperation::new()),
-                Box::new(TorrentFileValidationOperation::new()),
+                CreatePiecesAndFilesOperation::new().into(),
+                FileValidationOperation::new().into(),
             ],
             vec![],
             |params| DiskStorage::new(params.info_hash, params.path, params.data_pool,).into(),
@@ -3004,7 +3004,7 @@ mod tests {
             temp_dir.path().join("outgoing").to_str().unwrap(),
             TorrentFlags::DownloadMode,
             TorrentConfig::builder().build(),
-            vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())],
+            vec![CreatePiecesAndFilesOperation::new().into()],
             vec![],
             |_| MemoryStorage::new().into(),
             None
@@ -3065,7 +3065,7 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
-            vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())],
+            vec![CreatePiecesAndFilesOperation::new().into()],
             vec![]
         );
         let (outgoing, _incoming) = tcp_peer_pair!(&torrent);

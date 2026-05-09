@@ -101,9 +101,7 @@ impl MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operation::{
-        TorrentCreatePiecesAndFilesOperation, TorrentOperation, TorrentOperationResult,
-    };
+    use crate::operation::{CreatePiecesAndFilesOperation, TorrentOperationResult};
     use crate::tests::read_test_file_to_bytes;
     use tempfile::tempdir;
 
@@ -145,7 +143,7 @@ mod tests {
             TorrentConfig::builder().path(temp_path).build(),
             vec![]
         );
-        let mut operation = TorrentCreatePiecesAndFilesOperation::new();
+        let mut operation = CreatePiecesAndFilesOperation::new();
         let storage = MemoryStorage::new();
 
         // write the piece data
@@ -156,7 +154,7 @@ mod tests {
         }
 
         // create the pieces
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
         assert_eq!(
             TorrentOperationResult::Continue,
             result,

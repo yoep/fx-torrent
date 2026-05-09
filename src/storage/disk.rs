@@ -360,9 +360,7 @@ impl Drop for DiskStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operation::{
-        TorrentCreatePiecesAndFilesOperation, TorrentOperation, TorrentOperationResult,
-    };
+    use crate::operation::{CreatePiecesAndFilesOperation, TorrentOperationResult};
     use crate::tests::read_test_file_to_bytes;
     use crate::torrent::TorrentContext;
     use tempfile::tempdir;
@@ -479,8 +477,8 @@ mod tests {
     }
 
     async fn create_pieces_and_files(context: &mut TorrentContext) {
-        let mut operation = TorrentCreatePiecesAndFilesOperation::new();
-        let result = operation.execute(context, vec![].as_slice()).await;
+        let mut operation = CreatePiecesAndFilesOperation::new();
+        let result = operation.execute(context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
     }
 }

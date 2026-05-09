@@ -4,15 +4,14 @@ use crate::dht::DhtTracker;
 #[cfg(feature = "lsd")]
 use crate::lsd::LocalServiceDiscovery;
 #[cfg(feature = "lsd")]
-use crate::operation::TorrentLsdPeersOperation;
+use crate::operation::LsdPeersOperation;
 use crate::operation::{
-    TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation,
-    TorrentFileValidationOperation, TorrentMetadataOperation, TorrentOperation,
-    TorrentOperationFactory, TorrentStatsOperation, TorrentTrackerPeersOperation,
-    TorrentTrackersOperation,
+    ConnectPeersOperation, CreatePiecesAndFilesOperation, FileValidationOperation,
+    MetadataOperation, Operation, StatsOperation, TorrentOperationFactory, TrackerPeersOperation,
+    TrackersOperation,
 };
 #[cfg(feature = "dht")]
-use crate::operation::{TorrentDhtNodesOperation, TorrentDhtPeersOperation};
+use crate::operation::{DhtNodesOperation, DhtPeersOperation};
 #[cfg(feature = "extension-donthave")]
 use crate::peer::extension::DontHaveExtension;
 use crate::peer::extension::HolepunchExtension;
@@ -505,7 +504,7 @@ impl Session for FxTorrentSession {
                 )
                 .protocol_extensions(self.inner.protocol_extensions)
                 .extensions(self.inner.extensions())
-                .operations(vec![Box::new(TorrentTrackersOperation::new())])
+                .operations(vec![TrackersOperation::new().into()])
                 .storage(|_| MemoryStorage::new().into())
                 .trackers(self.inner.trackers.clone())
                 .build()?,
@@ -800,21 +799,19 @@ impl FxTorrentSessionBuilder {
         let torrent_operations = self.operation_factories.take().unwrap_or_else(|| {
             // FIXME: this is currently a duplicate list, consolidate with the torrent request operations
             vec![
-                TorrentOperationFactory::new(|| Box::new(TorrentStatsOperation::new())),
-                TorrentOperationFactory::new(|| Box::new(TorrentTrackersOperation::new())),
+                TorrentOperationFactory::new(|| StatsOperation::new().into()),
+                TorrentOperationFactory::new(|| TrackersOperation::new().into()),
                 #[cfg(feature = "dht")]
-                TorrentOperationFactory::new(|| Box::new(TorrentDhtNodesOperation::new())),
+                TorrentOperationFactory::new(|| DhtNodesOperation::new().into()),
                 #[cfg(feature = "dht")]
-                TorrentOperationFactory::new(|| Box::new(TorrentDhtPeersOperation::new())),
+                TorrentOperationFactory::new(|| DhtPeersOperation::new().into()),
                 #[cfg(feature = "lsd")]
-                TorrentOperationFactory::new(|| Box::new(TorrentLsdPeersOperation::new())),
-                TorrentOperationFactory::new(|| Box::new(TorrentTrackerPeersOperation::new())),
-                TorrentOperationFactory::new(|| Box::new(TorrentConnectPeersOperation::new(true))),
-                TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new(None))),
-                TorrentOperationFactory::new(|| {
-                    Box::new(TorrentCreatePiecesAndFilesOperation::new())
-                }),
-                TorrentOperationFactory::new(|| Box::new(TorrentFileValidationOperation::new())),
+                TorrentOperationFactory::new(|| LsdPeersOperation::new().into()),
+                TorrentOperationFactory::new(|| TrackerPeersOperation::new().into()),
+                TorrentOperationFactory::new(|| ConnectPeersOperation::new(true).into()),
+                TorrentOperationFactory::new(|| MetadataOperation::new(None).into()),
+                TorrentOperationFactory::new(|| CreatePiecesAndFilesOperation::new().into()),
+                TorrentOperationFactory::new(|| FileValidationOperation::new().into()),
             ]
         });
         let storage = self.storage.take().unwrap_or_else(|| {
@@ -926,7 +923,7 @@ impl InnerSession {
     }
 
     /// Get the torrent processing operation.
-    fn torrent_operations(&self) -> Vec<Box<dyn TorrentOperation>> {
+    fn torrent_operations(&self) -> Vec<Operation> {
         self.torrent_operations.iter().map(|e| e.create()).collect()
     }
 
@@ -1112,11 +1109,9 @@ pub mod tests {
             )
             .default_extensions()
             .operations(vec![
-                TorrentOperationFactory::new(|| Box::new(TorrentConnectPeersOperation::new(false))),
-                TorrentOperationFactory::new(|| Box::new(TorrentMetadataOperation::new(None))),
-                TorrentOperationFactory::new(|| {
-                    Box::new(TorrentCreatePiecesAndFilesOperation::new())
-                }),
+                TorrentOperationFactory::new(|| ConnectPeersOperation::new(false).into()),
+                TorrentOperationFactory::new(|| MetadataOperation::new(None).into()),
+                TorrentOperationFactory::new(|| CreatePiecesAndFilesOperation::new().into()),
             ])
             .build()
             .unwrap();

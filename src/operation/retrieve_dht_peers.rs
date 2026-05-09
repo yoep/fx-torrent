@@ -1,8 +1,6 @@
 use crate::dht::Error;
-use crate::operation::{TorrentOperation, TorrentOperationResult};
-use crate::peer::PeerDiscovery;
+use crate::operation::TorrentOperationResult;
 use crate::{InnerTorrent, TorrentContext};
-use async_trait::async_trait;
 use log::debug;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
@@ -13,14 +11,14 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Retrieve potential peer addresses for the torrent through the DHT network.
 #[derive(Debug)]
-pub struct TorrentDhtPeersOperation {
+pub struct DhtPeersOperation {
     initialized: bool,
     last_executed: Option<Instant>,
     active_tasks: Vec<JoinHandle<()>>,
     retrieve_timeout: Duration,
 }
 
-impl TorrentDhtPeersOperation {
+impl DhtPeersOperation {
     /// Create a new operation for retrieving peers from the DHT network.
     ///
     /// Each queried node will be limited to 8 seconds.
@@ -38,6 +36,18 @@ impl TorrentDhtPeersOperation {
             active_tasks: Default::default(),
             retrieve_timeout: query_timeout,
         }
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn execute(&mut self, context: &mut TorrentContext) -> TorrentOperationResult {
+        self.initialize(context).await;
+        self.cleanup_finished_tasks();
+
+        if self.should_retrieve_peers(context).await {
+            self.retrieve_peers(context);
+        }
+
+        TorrentOperationResult::Continue
     }
 
     /// Periodically remove handles for tasks that have already finished
@@ -117,30 +127,7 @@ impl TorrentDhtPeersOperation {
     }
 }
 
-#[async_trait]
-impl TorrentOperation for TorrentDhtPeersOperation {
-    fn name(&self) -> &str {
-        "retrieve DHT peers operation"
-    }
-
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn execute(
-        &mut self,
-        context: &mut TorrentContext,
-        _: &[PeerDiscovery],
-    ) -> TorrentOperationResult {
-        self.initialize(context).await;
-        self.cleanup_finished_tasks();
-
-        if self.should_retrieve_peers(context).await {
-            self.retrieve_peers(context);
-        }
-
-        TorrentOperationResult::Continue
-    }
-}
-
-impl Drop for TorrentDhtPeersOperation {
+impl Drop for DhtPeersOperation {
     fn drop(&mut self) {
         self.active_tasks
             .drain(..)
@@ -175,10 +162,10 @@ mod tests {
             vec![],
             Some(dht)
         );
-        let mut operation = TorrentDhtPeersOperation::new_with_timeout(Duration::from_millis(100));
+        let mut operation = DhtPeersOperation::new_with_timeout(Duration::from_millis(100));
 
         // execute the operation
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
         assert_eq!(
             true, operation.initialized,
@@ -194,7 +181,7 @@ mod tests {
         assert_eq!(1, result, "expected `active_tasks` to have one operation");
 
         // run the operation again
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
 
         // run till completion
@@ -202,7 +189,7 @@ mod tests {
             Duration::from_millis(250),
             async {
                 loop {
-                    let _ = operation.execute(&mut context, vec![].as_slice()).await;
+                    let _ = operation.execute(&mut context).await;
                     if operation.active_tasks.len() == 0 {
                         break;
                     }
@@ -236,7 +223,7 @@ mod tests {
                 vec![],
                 None
             );
-            let operation = TorrentDhtPeersOperation::new();
+            let operation = DhtPeersOperation::new();
 
             let result = operation.should_retrieve_peers(&context).await;
             assert_eq!(
@@ -265,7 +252,7 @@ mod tests {
                 vec![],
                 Some(dht)
             );
-            let mut operation = TorrentDhtPeersOperation::new();
+            let mut operation = DhtPeersOperation::new();
 
             // when the operation has not been executed yet, it should return true
             operation.last_executed = None;

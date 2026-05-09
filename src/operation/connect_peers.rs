@@ -1,11 +1,10 @@
 use crate::channel::ChannelSender;
-use crate::operation::{TorrentOperation, TorrentOperationResult};
+use crate::operation::TorrentOperationResult;
 use crate::peer::extension::HolepunchExtension;
 use crate::peer::webseed::HttpPeer;
 use crate::peer::{extension, BitTorrentPeer, CloseReason, Peer, PeerDiscovery};
 use crate::torrent::InnerTorrent;
 use crate::{Result, TorrentCommand, TorrentContext, TorrentError};
-use async_trait::async_trait;
 use futures::FutureExt;
 use itertools::Itertools;
 use log::{debug, trace, warn};
@@ -22,7 +21,7 @@ use url::Url;
 const BURST_DURATION: Duration = Duration::from_secs(10);
 
 /// Establishes additional peer connections for the torrent.
-pub struct TorrentConnectPeersOperation {
+pub struct ConnectPeersOperation {
     initialized: bool,
     /// Indicates whether webseed connections are enabled for the torrent
     webseeds_enabled: bool,
@@ -44,7 +43,7 @@ pub struct TorrentConnectPeersOperation {
     holepunch_queue: JoinSet<(SocketAddr, Option<extension::Error>)>,
 }
 
-impl TorrentConnectPeersOperation {
+impl ConnectPeersOperation {
     pub fn new(webseeds_enabled: bool) -> Self {
         let (tx, rx) = channel(32);
         Self {
@@ -59,6 +58,31 @@ impl TorrentConnectPeersOperation {
             holepunch_receiver: rx,
             holepunch_queue: Default::default(),
         }
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn execute(
+        &mut self,
+        context: &mut TorrentContext,
+        peer_discoveries: &[PeerDiscovery],
+    ) -> TorrentOperationResult {
+        self.initialize(context).await;
+        self.poll_in_flight(context);
+        self.poll_holepunches(context);
+
+        let wanted_connections = context.remaining_peer_connections_needed().await;
+        if wanted_connections > 0 {
+            self.update_max_in_flight(context);
+            self.execute_pending_holepunches(context).await;
+
+            // burst the initial connections if needed
+            self.burst(context);
+
+            self.create_additional_peer_connections(wanted_connections, context, peer_discoveries)
+                .await;
+        }
+
+        TorrentOperationResult::Continue
     }
 
     /// Poll the currently in-flight peer connections for completion.
@@ -418,39 +442,7 @@ impl TorrentConnectPeersOperation {
     }
 }
 
-#[async_trait]
-impl TorrentOperation for TorrentConnectPeersOperation {
-    fn name(&self) -> &str {
-        "create peer connections operation"
-    }
-
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn execute(
-        &mut self,
-        context: &mut TorrentContext,
-        peer_discoveries: &[PeerDiscovery],
-    ) -> TorrentOperationResult {
-        self.initialize(context).await;
-        self.poll_in_flight(context);
-        self.poll_holepunches(context);
-
-        let wanted_connections = context.remaining_peer_connections_needed().await;
-        if wanted_connections > 0 {
-            self.update_max_in_flight(context);
-            self.execute_pending_holepunches(context).await;
-
-            // burst the initial connections if needed
-            self.burst(context);
-
-            self.create_additional_peer_connections(wanted_connections, context, peer_discoveries)
-                .await;
-        }
-
-        TorrentOperationResult::Continue
-    }
-}
-
-impl Debug for TorrentConnectPeersOperation {
+impl Debug for ConnectPeersOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TorrentConnectPeersOperation")
             .field("webseeds_enabled", &self.webseeds_enabled)
@@ -461,7 +453,7 @@ impl Debug for TorrentConnectPeersOperation {
     }
 }
 
-impl Drop for TorrentConnectPeersOperation {
+impl Drop for ConnectPeersOperation {
     fn drop(&mut self) {
         self.in_flight.abort_all();
     }
@@ -490,7 +482,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![]
         );
-        let mut operation = TorrentConnectPeersOperation::new(true);
+        let mut operation = ConnectPeersOperation::new(true);
 
         let result = operation.execute(&mut context, vec![].as_slice()).await;
 
@@ -510,7 +502,7 @@ mod tests {
             TorrentConfig::builder().peers_in_flight(35).build(),
             vec![]
         );
-        let mut operation = TorrentConnectPeersOperation::new(true);
+        let mut operation = ConnectPeersOperation::new(true);
 
         // update the permits from the torrent settings
         operation.update_max_in_flight(&context);
@@ -537,7 +529,7 @@ mod tests {
                 .build(),
             vec![]
         );
-        let mut operation = TorrentConnectPeersOperation::new(true);
+        let mut operation = ConnectPeersOperation::new(true);
 
         // update the permits from the torrent settings
         operation.update_max_in_flight(&context);
@@ -580,7 +572,7 @@ mod tests {
             },],
             None
         );
-        let mut operation = TorrentConnectPeersOperation::new(false);
+        let mut operation = ConnectPeersOperation::new(false);
 
         // add an invalid peer address
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 13470));
@@ -637,7 +629,7 @@ mod tests {
                 None,
                 None
             );
-            let mut operation = TorrentConnectPeersOperation::new(false);
+            let mut operation = ConnectPeersOperation::new(false);
 
             // execute the operation
             let dialers = vec![];
@@ -670,7 +662,7 @@ mod tests {
                 None,
                 None
             );
-            let mut operation = TorrentConnectPeersOperation::new(false);
+            let mut operation = ConnectPeersOperation::new(false);
 
             // execute the operation
             let dialers = vec![];
@@ -711,7 +703,7 @@ mod tests {
                 vec![],
                 None
             );
-            let mut operation = TorrentConnectPeersOperation::new(true);
+            let mut operation = ConnectPeersOperation::new(true);
 
             operation.create_webseed_urls(&context);
 
@@ -733,7 +725,7 @@ mod tests {
                 vec![],
                 None
             );
-            let mut operation = TorrentConnectPeersOperation::new(true);
+            let mut operation = ConnectPeersOperation::new(true);
 
             // set the webseed urls
             operation.webseed_urls = vec![

@@ -1,7 +1,5 @@
-use crate::operation::{TorrentOperation, TorrentOperationResult};
-use crate::peer::PeerDiscovery;
+use crate::operation::TorrentOperationResult;
 use crate::TorrentContext;
-use async_trait::async_trait;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use log::{debug, trace};
@@ -9,17 +7,28 @@ use std::fmt::Debug;
 use tokio::net::lookup_host;
 
 /// Connect to the DHT nodes defined within the torrent metadata.
-pub struct TorrentDhtNodesOperation {
+pub struct DhtNodesOperation {
     initialized: bool,
     in_flight: Option<BoxFuture<'static, ()>>,
 }
 
-impl TorrentDhtNodesOperation {
+impl DhtNodesOperation {
     pub fn new() -> Self {
         Self {
             initialized: false,
             in_flight: None,
         }
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn execute(&mut self, context: &mut TorrentContext) -> TorrentOperationResult {
+        self.poll_in_flight();
+
+        if self.should_connect_to_dht_nodes(context) {
+            self.connect_dht_nodes(context).await;
+        }
+
+        TorrentOperationResult::Continue
     }
 
     /// Poll the currently in-flight DHT operation for completion.
@@ -97,29 +106,7 @@ impl TorrentDhtNodesOperation {
     }
 }
 
-#[async_trait]
-impl TorrentOperation for TorrentDhtNodesOperation {
-    fn name(&self) -> &str {
-        "connect torrent DHT nodes operation"
-    }
-
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn execute(
-        &mut self,
-        context: &mut TorrentContext,
-        _: &[PeerDiscovery],
-    ) -> TorrentOperationResult {
-        self.poll_in_flight();
-
-        if self.should_connect_to_dht_nodes(context) {
-            self.connect_dht_nodes(context).await;
-        }
-
-        TorrentOperationResult::Continue
-    }
-}
-
-impl Debug for TorrentDhtNodesOperation {
+impl Debug for DhtNodesOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TorrentDhtNodesOperation")
             .field("initialized", &self.initialized)
@@ -153,10 +140,10 @@ mod tests {
             vec![],
             Some(dht)
         );
-        let mut operation = TorrentDhtNodesOperation::new();
+        let mut operation = DhtNodesOperation::new();
 
         // poll the initial operation
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
         assert_eq!(
             TorrentOperationResult::Continue,
             result,
@@ -170,7 +157,7 @@ mod tests {
         // keep polling till the operation is completed
         timeout!(Duration::from_secs(5), async {
             while !operation.initialized {
-                let _ = operation.execute(&mut context, vec![].as_slice()).await;
+                let _ = operation.execute(&mut context).await;
             }
         });
         let result = operation.initialized;
@@ -195,7 +182,7 @@ mod tests {
                 vec![],
                 None
             );
-            let operation = TorrentDhtNodesOperation::new();
+            let operation = DhtNodesOperation::new();
 
             let result = operation.should_connect_to_dht_nodes(&context);
 
@@ -225,7 +212,7 @@ mod tests {
                 vec![],
                 Some(dht)
             );
-            let mut operation = TorrentDhtNodesOperation::new();
+            let mut operation = DhtNodesOperation::new();
 
             // if we're not yet initialized, we should connect to DHT nodes
             let result = operation.should_connect_to_dht_nodes(&context);

@@ -1,19 +1,16 @@
-use crate::operation::{TorrentOperation, TorrentOperationResult};
-use crate::peer::PeerDiscovery;
+use crate::operation::TorrentOperationResult;
 use crate::{InnerTorrent, TorrentContext, TorrentFlags, TorrentMetadataInfo, TorrentState};
-use async_trait::async_trait;
 use log::{debug, info, trace, warn};
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
-const OPERATION_NAME: &str = "retrieve metadata operation";
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(10);
 const RETRIEVE_INTERVAL: Duration = Duration::from_secs(20);
 const RETRIEVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The torrent metadata operation is responsible for checking if the metadata for a torrent is present and if not, retrieving it from peers.
 #[derive(Debug)]
-pub struct TorrentMetadataOperation {
+pub struct MetadataOperation {
     metadata_present: bool,
     active_tasks: Vec<JoinHandle<()>>,
     last_executed: Option<Instant>,
@@ -21,7 +18,7 @@ pub struct TorrentMetadataOperation {
     retrieve_timeout: Duration,
 }
 
-impl TorrentMetadataOperation {
+impl MetadataOperation {
     /// Create a new torrent metadata operation.
     pub fn new(retrieve_timeout: Option<Duration>) -> Self {
         Self {
@@ -31,6 +28,24 @@ impl TorrentMetadataOperation {
             last_announce: None,
             retrieve_timeout: retrieve_timeout.unwrap_or(RETRIEVE_TIMEOUT),
         }
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn execute(&mut self, torrent: &mut TorrentContext) -> TorrentOperationResult {
+        self.cleanup_finished_tasks();
+        self.update_local_state(torrent);
+        if self.metadata_present {
+            return TorrentOperationResult::Continue;
+        }
+
+        if self.should_retrieve_metadata(torrent) {
+            torrent.update_state(TorrentState::RetrievingMetadata).await;
+            self.retrieve_metadata(torrent).await;
+        }
+
+        // in both cases, we want to stop the operations chain as the torrent cannot continue
+        // until the metadata is known
+        TorrentOperationResult::Stop
     }
 
     /// Returns `true` if the metadata should be retrieved, else `false`.
@@ -142,36 +157,7 @@ impl TorrentMetadataOperation {
     }
 }
 
-#[async_trait]
-impl TorrentOperation for TorrentMetadataOperation {
-    fn name(&self) -> &str {
-        OPERATION_NAME
-    }
-
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn execute(
-        &mut self,
-        torrent: &mut TorrentContext,
-        _: &[PeerDiscovery],
-    ) -> TorrentOperationResult {
-        self.cleanup_finished_tasks();
-        self.update_local_state(torrent);
-        if self.metadata_present {
-            return TorrentOperationResult::Continue;
-        }
-
-        if self.should_retrieve_metadata(torrent) {
-            torrent.update_state(TorrentState::RetrievingMetadata).await;
-            self.retrieve_metadata(torrent).await;
-        }
-
-        // in both cases, we want to stop the operations chain as the torrent cannot continue
-        // until the metadata is known
-        TorrentOperationResult::Stop
-    }
-}
-
-impl Drop for TorrentMetadataOperation {
+impl Drop for MetadataOperation {
     fn drop(&mut self) {
         self.active_tasks
             .drain(..)
@@ -185,12 +171,6 @@ mod tests {
     use crate::dht::DhtTracker;
     use tempfile::tempdir;
     use tokio::time;
-
-    #[test]
-    fn test_name() {
-        let operation = TorrentMetadataOperation::new(None);
-        assert_eq!(OPERATION_NAME, operation.name());
-    }
 
     #[tokio::test]
     async fn test_execute_metadata_known() {
@@ -206,9 +186,9 @@ mod tests {
             vec![],
             None
         );
-        let mut operation = TorrentMetadataOperation::new(None);
+        let mut operation = MetadataOperation::new(None);
 
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
 
         assert_eq!(TorrentOperationResult::Continue, result);
     }
@@ -228,9 +208,9 @@ mod tests {
             vec![],
             None
         );
-        let mut operation = TorrentMetadataOperation::new(None);
+        let mut operation = MetadataOperation::new(None);
 
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
 
         assert_eq!(TorrentOperationResult::Stop, result);
     }
@@ -257,10 +237,10 @@ mod tests {
             vec![],
             Some(dht)
         );
-        let mut operation = TorrentMetadataOperation::new(Some(Duration::from_millis(100)));
+        let mut operation = MetadataOperation::new(Some(Duration::from_millis(100)));
 
         // execute the operation to create a new DHT operation
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
         assert_eq!(TorrentOperationResult::Stop, result);
         assert_ne!(
             None, operation.last_executed,
@@ -273,7 +253,7 @@ mod tests {
         );
 
         // execute it again, the in_flight should not have been updated
-        let _ = operation.execute(&mut context, vec![].as_slice()).await;
+        let _ = operation.execute(&mut context).await;
         assert_eq!(
             1,
             operation.active_tasks.len(),
@@ -285,7 +265,7 @@ mod tests {
             Duration::from_millis(200),
             async {
                 loop {
-                    let _ = operation.execute(&mut context, vec![].as_slice()).await;
+                    let _ = operation.execute(&mut context).await;
                     if operation.active_tasks.is_empty() {
                         break;
                     }
