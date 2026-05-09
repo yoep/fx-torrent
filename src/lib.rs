@@ -51,6 +51,8 @@ async fn main() -> Result<(), io::Error> {
 }
 ```
 
+For more advanced examples, see the [examples](https://github.com/yoep/fx-torrent/tree/master/examples) directory.
+
 ### Working with Magnets and Metadata
 
 #### Magnets
@@ -96,10 +98,6 @@ Metadata can be decoded from bencoded bytes (using `TorrentMetadata::try_from`) 
     println!("{:?}", metadata);
 # }
 ```
-
-### Examples
-
-For more examples, see the [examples](./examples).
 
 ## DHT
 
