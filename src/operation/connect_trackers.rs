@@ -1,26 +1,44 @@
-use crate::operation::{TorrentOperation, TorrentOperationResult};
-use crate::peer::PeerDiscovery;
+use crate::operation::TorrentOperationResult;
 use crate::tracker::{TrackerClient, TrackerClientEvent, TrackerEntry};
 use crate::{InnerTorrent, TorrentContext, TorrentEvent};
-use async_trait::async_trait;
 use fx_callback::{Callback, Subscription};
 use log::{debug, trace, warn};
 
 /// The torrent trackers operation is responsible for adding the known trackers to the torrent.
 /// This operation add the trackers in a "fire-and-forget" mode and only waits for one tracker connection to have been established.
 #[derive(Debug)]
-pub struct TorrentTrackersOperation {
+pub struct TrackersOperation {
     initialized: bool,
     receiver: Option<Subscription<TrackerClientEvent>>,
     cached_tiered_trackers: Vec<TrackerEntry>,
 }
 
-impl TorrentTrackersOperation {
+impl TrackersOperation {
     pub fn new() -> Self {
         Self {
             initialized: Default::default(),
             receiver: None,
             cached_tiered_trackers: Vec::new(),
+        }
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn execute(&mut self, context: &mut TorrentContext) -> TorrentOperationResult {
+        // build the tiered trackers cache if needed
+        if !self.initialized {
+            self.initialize(context).await;
+        }
+
+        self.add_trackers_from_cache(context).await;
+        self.process_tracker_events(context).await;
+
+        // check if the metadata is known or if there are active tracker connections
+        // if not, we wait for at least one tracker connection
+        let is_metadata_known = context.metadata().info.is_some();
+        if is_metadata_known || context.active_tracker_connections().await > 0 {
+            TorrentOperationResult::Continue
+        } else {
+            TorrentOperationResult::Stop
         }
     }
 
@@ -163,37 +181,6 @@ impl TorrentTrackersOperation {
     }
 }
 
-#[async_trait]
-impl TorrentOperation for TorrentTrackersOperation {
-    fn name(&self) -> &str {
-        "connect trackers operation"
-    }
-
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn execute(
-        &mut self,
-        context: &mut TorrentContext,
-        _: &[PeerDiscovery],
-    ) -> TorrentOperationResult {
-        // build the tiered trackers cache if needed
-        if !self.initialized {
-            self.initialize(context).await;
-        }
-
-        self.add_trackers_from_cache(context).await;
-        self.process_tracker_events(context).await;
-
-        // check if the metadata is known or if there are active tracker connections
-        // if not, we wait for at least one tracker connection
-        let is_metadata_known = context.metadata().info.is_some();
-        if is_metadata_known || context.active_tracker_connections().await > 0 {
-            TorrentOperationResult::Continue
-        } else {
-            TorrentOperationResult::Stop
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,7 +215,7 @@ mod tests {
             vec![]
         );
         let (tx, mut rx) = unbounded_channel();
-        let mut operation = TorrentTrackersOperation::new();
+        let mut operation = TrackersOperation::new();
 
         // subscribe to the tracker events
         let mut receiver = context.tracker().unwrap().subscribe();
@@ -244,12 +231,12 @@ mod tests {
         // verify that the chain is stopped if the metadata is unknown and no tracker connections have not yet been established
         // to achieve this, prevent the initial operation execution from creating the tiered trackers cache
         operation.initialized = true;
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
         assert_eq!(TorrentOperationResult::Stop, result, "expected the chain to stop if the metadata is unknown and no tracker connections have yet been established");
 
         // create the tiered trackers
         operation.initialized = false;
-        let _ = operation.execute(&mut context, vec![].as_slice()).await;
+        let _ = operation.execute(&mut context).await;
 
         // wait for a tracker connection to be established
         timeout!(
@@ -259,7 +246,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
     }
 
@@ -276,9 +263,9 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![]
         );
-        let mut operation = TorrentTrackersOperation::new();
+        let mut operation = TrackersOperation::new();
 
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
         assert_eq!(
             TorrentOperationResult::Continue,
             result,

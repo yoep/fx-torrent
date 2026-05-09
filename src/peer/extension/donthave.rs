@@ -41,7 +41,7 @@ impl DontHaveExtension {
 mod tests {
     use super::*;
 
-    use crate::operation::TorrentCreatePiecesAndFilesOperation;
+    use crate::operation::CreatePiecesAndFilesOperation;
     use crate::storage::MemoryStorage;
     use crate::tests::helpers::wait_for_torrent_pieces;
     use tempfile::tempdir;
@@ -56,7 +56,7 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
-            vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())],
+            vec![CreatePiecesAndFilesOperation::new().into()],
             vec![],
             |_| MemoryStorage::new().into(),
             None

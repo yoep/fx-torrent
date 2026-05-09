@@ -11,8 +11,8 @@ It supports most of the Bittorrent protocol specifications, such as multi-file t
 and is based on the `libtorrent` library for functionality and naming convention.
 
 - [Getting Started](#getting-started)
-- [CLI example](#cli-example)
 - [Features](#features)
+- [CLI example](#cli-example)
 - [DHT](#dht)
 - [Extensions](#extensions)
 
@@ -164,6 +164,42 @@ fn example() {
     let session = FxTorrentSession::builder()
         .storage(|params| MyStorageExtension::new(params).into())
         .build().unwrap();
+}
+```
+
+### Operation Extension
+
+Operation extensions are **tick-based** tasks invoked by the `TorrentContext`.
+These operations are executed sequentially in an order-dependent chain,
+meaning the sequence in which you register them determines their execution priority.
+
+_example operation extension_
+```rust
+#[derive(Debug)]
+pub struct MyOperation;
+#[async_trait]
+impl Extension for MyOperation {
+    /// The `tick` method is called periodically by the torrent engine.
+    async fn tick(&self, context: &mut TorrentContext, peer_discoveries: &[PeerDiscovery]) -> TorrentOperationResult {
+        // Logic for your custom operation goes here
+        TorrentOperationResult::Continue
+    }
+
+    // Additional trait methods
+}
+
+fn example() {
+    // 1. Operation extension directly in a torrent
+    let torrent = Torrent::request()
+        .operation(MyOperation.into())
+        .build()
+        .unwrap();
+
+    // 2. Operation extension in a session
+    let session = FxTorrentSession::builder()
+        .operation(|| MyOperation.into())
+        .build()
+        .unwrap();
 }
 ```
 

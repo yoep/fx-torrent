@@ -1,9 +1,7 @@
-use crate::operation::{TorrentOperation, TorrentOperationResult};
-use crate::peer::PeerDiscovery;
+use crate::operation::TorrentOperationResult;
 use crate::storage::Storage;
 use crate::torrent::InnerTorrent;
 use crate::{File, Piece, PieceIndex, TorrentContext, TorrentFlags, TorrentState};
-use async_trait::async_trait;
 use futures::{stream, StreamExt};
 use log::{debug, info};
 use std::fmt::Debug;
@@ -21,17 +19,44 @@ enum ValidationState {
 }
 
 /// The torrent file validation operation validates existing files of the torrent and checks which pieces have been completed before/valid.
-pub struct TorrentFileValidationOperation {
+pub struct FileValidationOperation {
     state: ValidationState,
     ready_signal: Option<oneshot::Receiver<()>>,
 }
 
-impl TorrentFileValidationOperation {
+impl FileValidationOperation {
     pub fn new() -> Self {
         Self {
             state: ValidationState::None,
             ready_signal: None,
         }
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn execute(&mut self, torrent: &mut TorrentContext) -> TorrentOperationResult {
+        // early exit if the torrent is paused or in an error state
+        if !self.should_check_files(torrent) {
+            return TorrentOperationResult::Continue;
+        }
+
+        // poll the in-flight validation future
+        self.poll_future(torrent).await;
+
+        // check the current state of the validator
+        match self.state {
+            ValidationState::Validated => return TorrentOperationResult::Continue,
+            ValidationState::Validating => return TorrentOperationResult::Stop,
+            _ => {}
+        }
+
+        let files = torrent.files().await;
+        if files.len() > 0 {
+            torrent.update_state(TorrentState::CheckingFiles).await;
+            self.validate_files(torrent, files).await;
+            return TorrentOperationResult::Stop;
+        }
+
+        TorrentOperationResult::Continue
     }
 
     /// Poll the in-flight validation future
@@ -202,45 +227,7 @@ impl TorrentFileValidationOperation {
     }
 }
 
-#[async_trait]
-impl TorrentOperation for TorrentFileValidationOperation {
-    fn name(&self) -> &str {
-        "torrent file validation operation"
-    }
-
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn execute(
-        &mut self,
-        torrent: &mut TorrentContext,
-        _: &[PeerDiscovery],
-    ) -> TorrentOperationResult {
-        // early exit if the torrent is paused or in an error state
-        if !self.should_check_files(torrent) {
-            return TorrentOperationResult::Continue;
-        }
-
-        // poll the in-flight validation future
-        self.poll_future(torrent).await;
-
-        // check the current state of the validator
-        match self.state {
-            ValidationState::Validated => return TorrentOperationResult::Continue,
-            ValidationState::Validating => return TorrentOperationResult::Stop,
-            _ => {}
-        }
-
-        let files = torrent.files().await;
-        if files.len() > 0 {
-            torrent.update_state(TorrentState::CheckingFiles).await;
-            self.validate_files(torrent, files).await;
-            return TorrentOperationResult::Stop;
-        }
-
-        TorrentOperationResult::Continue
-    }
-}
-
-impl Debug for TorrentFileValidationOperation {
+impl Debug for FileValidationOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TorrentFileValidationOperation")
             .field("state", &self.state)
@@ -251,7 +238,7 @@ impl Debug for TorrentFileValidationOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operation::TorrentCreatePiecesAndFilesOperation;
+    use crate::operation::CreatePiecesAndFilesOperation;
     use crate::storage::DiskStorage;
     use crate::tests::copy_test_file;
     use crate::TorrentError;
@@ -271,10 +258,10 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![]
         );
-        let mut operation = TorrentFileValidationOperation::new();
+        let mut operation = FileValidationOperation::new();
 
         operation.state = ValidationState::Validating;
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
 
         assert_eq!(TorrentOperationResult::Stop, result);
     }
@@ -291,10 +278,10 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![]
         );
-        let mut operation = TorrentFileValidationOperation::new();
+        let mut operation = FileValidationOperation::new();
 
         operation.state = ValidationState::Validated;
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
 
         assert_eq!(TorrentOperationResult::Continue, result);
     }
@@ -322,7 +309,7 @@ mod tests {
                 DiskStorage::new(info_hash, temp_path, data_pool).into()
             )
         );
-        let mut operation = TorrentFileValidationOperation::new();
+        let mut operation = FileValidationOperation::new();
 
         // create pieces & files
         create_pieces_and_files(&mut context).await;
@@ -333,7 +320,7 @@ mod tests {
                 _ = time::sleep(Duration::from_secs(25)) => break Err(TorrentError::Timeout),
                 _ = async {
                     loop {
-                        if operation.execute(&mut context, vec![].as_slice()).await == TorrentOperationResult::Continue {
+                        if operation.execute(&mut context).await == TorrentOperationResult::Continue {
                             break;
                         }
                         time::sleep(Duration::from_millis(50)).await;
@@ -350,7 +337,7 @@ mod tests {
             result
         );
 
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
 
         let pieces = context.data_pool().pieces().await;
@@ -383,8 +370,8 @@ mod tests {
     }
 
     async fn create_pieces_and_files(context: &mut TorrentContext) {
-        let mut operation = TorrentCreatePiecesAndFilesOperation::new();
-        let result = operation.execute(context, vec![].as_slice()).await;
+        let mut operation = CreatePiecesAndFilesOperation::new();
+        let result = operation.execute(context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
     }
 }

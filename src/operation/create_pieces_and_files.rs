@@ -1,19 +1,36 @@
 use crate::error::Result;
-use crate::operation::{TorrentOperation, TorrentOperationResult};
-use crate::peer::PeerDiscovery;
+use crate::operation::TorrentOperationResult;
 use crate::{
     File, InfoHash, Piece, PieceError, PieceIndex, TorrentContext, TorrentError, TorrentFileInfo,
     TorrentMetadataInfo, TorrentState,
 };
-use async_trait::async_trait;
 use log::{debug, trace, warn};
 
 #[derive(Debug)]
-pub struct TorrentCreatePiecesAndFilesOperation;
+pub struct CreatePiecesAndFilesOperation;
 
-impl TorrentCreatePiecesAndFilesOperation {
+impl CreatePiecesAndFilesOperation {
     pub fn new() -> Self {
         Self {}
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn execute(&mut self, torrent: &mut TorrentContext) -> TorrentOperationResult {
+        // check if the pieces have already been created
+        // if so, continue the chain
+        if torrent.data_pool().num_of_pieces().await > 0 {
+            return TorrentOperationResult::Continue;
+        }
+
+        // try to create the pieces and files
+        if self.create_pieces(torrent).await {
+            if self.create_files(&torrent).await {
+                self.update_state(torrent).await;
+                return TorrentOperationResult::Continue;
+            }
+        }
+
+        TorrentOperationResult::Stop
     }
 
     /// Create the pieces information for the torrent.
@@ -180,36 +197,6 @@ impl TorrentCreatePiecesAndFilesOperation {
     }
 }
 
-#[async_trait]
-impl TorrentOperation for TorrentCreatePiecesAndFilesOperation {
-    fn name(&self) -> &str {
-        "create pieces operation"
-    }
-
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn execute(
-        &mut self,
-        torrent: &mut TorrentContext,
-        _: &[PeerDiscovery],
-    ) -> TorrentOperationResult {
-        // check if the pieces have already been created
-        // if so, continue the chain
-        if torrent.data_pool().num_of_pieces().await > 0 {
-            return TorrentOperationResult::Continue;
-        }
-
-        // try to create the pieces and files
-        if self.create_pieces(torrent).await {
-            if self.create_files(&torrent).await {
-                self.update_state(torrent).await;
-                return TorrentOperationResult::Continue;
-            }
-        }
-
-        TorrentOperationResult::Stop
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,9 +217,9 @@ mod tests {
                 TorrentConfig::builder().build(),
                 vec![]
             );
-            let mut operation = TorrentCreatePiecesAndFilesOperation::new();
+            let mut operation = CreatePiecesAndFilesOperation::new();
 
-            let result = operation.execute(&mut context, vec![].as_slice()).await;
+            let result = operation.execute(&mut context).await;
 
             assert_eq!(TorrentOperationResult::Continue, result);
             assert_eq!(
@@ -255,7 +242,7 @@ mod tests {
                 vec![]
             );
             let info_hash = context.metadata().info_hash.clone();
-            let mut operation = TorrentCreatePiecesAndFilesOperation::new();
+            let mut operation = CreatePiecesAndFilesOperation::new();
 
             // insert the initial data within the pool
             context
@@ -281,7 +268,7 @@ mod tests {
                 .await;
 
             // execute the operation
-            let result = operation.execute(&mut context, vec![].as_slice()).await;
+            let result = operation.execute(&mut context).await;
 
             assert_eq!(TorrentOperationResult::Continue, result);
             assert_eq!(
@@ -307,17 +294,17 @@ mod tests {
                 TorrentConfig::builder().build(),
                 vec![]
             );
-            let mut create_pieces = TorrentCreatePiecesAndFilesOperation::new();
-            let mut operation = TorrentCreatePiecesAndFilesOperation::new();
+            let mut create_pieces = CreatePiecesAndFilesOperation::new();
+            let mut operation = CreatePiecesAndFilesOperation::new();
 
-            let result = create_pieces.execute(&mut context, vec![].as_slice()).await;
+            let result = create_pieces.execute(&mut context).await;
             assert_eq!(
                 TorrentOperationResult::Continue,
                 result,
                 "expected the pieces to have been created"
             );
 
-            let result = operation.execute(&mut context, vec![].as_slice()).await;
+            let result = operation.execute(&mut context).await;
             assert_eq!(
                 TorrentOperationResult::Continue,
                 result,
@@ -343,9 +330,9 @@ mod tests {
                 TorrentConfig::builder().build(),
                 vec![]
             );
-            let mut operation = TorrentCreatePiecesAndFilesOperation::new();
+            let mut operation = CreatePiecesAndFilesOperation::new();
 
-            let result = operation.execute(&mut context, vec![].as_slice()).await;
+            let result = operation.execute(&mut context).await;
 
             assert_eq!(
                 TorrentOperationResult::Stop,
@@ -366,13 +353,11 @@ mod tests {
                 TorrentConfig::builder().build(),
                 vec![]
             );
-            let mut pieces_operation = TorrentCreatePiecesAndFilesOperation::new();
-            let operation = TorrentCreatePiecesAndFilesOperation::new();
+            let mut pieces_operation = CreatePiecesAndFilesOperation::new();
+            let operation = CreatePiecesAndFilesOperation::new();
 
             // create the torrent pieces
-            let result = pieces_operation
-                .execute(&mut context, vec![].as_slice())
-                .await;
+            let result = pieces_operation.execute(&mut context).await;
             assert_eq!(
                 TorrentOperationResult::Continue,
                 result,
@@ -429,7 +414,7 @@ mod tests {
                 .expect("expected the metadata info to be present");
             let metadata_files = metadata_info.files();
 
-            let result = TorrentCreatePiecesAndFilesOperation::create_file(
+            let result = CreatePiecesAndFilesOperation::create_file(
                 metadata_files.get(1).unwrap().clone(),
                 &metadata_info,
                 1,

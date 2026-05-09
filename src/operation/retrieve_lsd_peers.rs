@@ -1,23 +1,31 @@
-use crate::operation::{TorrentOperation, TorrentOperationResult};
-use crate::peer::PeerDiscovery;
+use crate::operation::TorrentOperationResult;
 use crate::{LocalServiceDiscoveryEvent, TorrentContext};
-use async_trait::async_trait;
 use fx_callback::{Callback, Subscription};
 
 /// Retrieve torrent peers from the local service discovery.
 #[derive(Debug)]
-pub struct TorrentLsdPeersOperation {
+pub struct LsdPeersOperation {
     initialized: bool,
     receiver: Option<Subscription<LocalServiceDiscoveryEvent>>,
 }
 
-impl TorrentLsdPeersOperation {
+impl LsdPeersOperation {
     /// Create a new instance for retrieving torrent peers from the local service discovery.
     pub fn new() -> Self {
         Self {
             initialized: false,
             receiver: None,
         }
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn execute(&mut self, context: &mut TorrentContext) -> TorrentOperationResult {
+        if !self.initialized {
+            self.initialize(context);
+        }
+
+        self.process_events(context);
+        TorrentOperationResult::Continue
     }
 
     fn initialize(&mut self, context: &TorrentContext) {
@@ -52,27 +60,6 @@ impl TorrentLsdPeersOperation {
     }
 }
 
-#[async_trait]
-impl TorrentOperation for TorrentLsdPeersOperation {
-    fn name(&self) -> &str {
-        "retrieve lsd peers operation"
-    }
-
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn execute(
-        &mut self,
-        context: &mut TorrentContext,
-        _: &[PeerDiscovery],
-    ) -> TorrentOperationResult {
-        if !self.initialized {
-            self.initialize(context);
-        }
-
-        self.process_events(context);
-        TorrentOperationResult::Continue
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,10 +85,10 @@ mod tests {
             None,
             Some(lsd)
         );
-        let mut operation = TorrentLsdPeersOperation::new();
+        let mut operation = LsdPeersOperation::new();
 
         // execute the operation
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
 
         // verify that the operation subscribed to the events

@@ -1,8 +1,6 @@
-use crate::operation::{TorrentOperation, TorrentOperationResult};
-use crate::peer::PeerDiscovery;
+use crate::operation::TorrentOperationResult;
 use crate::tracker::TrackerClientEvent;
 use crate::TorrentContext;
-use async_trait::async_trait;
 use fx_callback::{Callback, Subscription};
 use log::{debug, warn};
 use std::time::{Duration, Instant};
@@ -11,19 +9,31 @@ const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Retrieve torrent peers from connected trackers.
 #[derive(Debug)]
-pub struct TorrentTrackerPeersOperation {
+pub struct TrackerPeersOperation {
     initialized: bool,
     receiver: Option<Subscription<TrackerClientEvent>>,
     last_peers_discovery: Option<Instant>,
 }
 
-impl TorrentTrackerPeersOperation {
+impl TrackerPeersOperation {
     pub fn new() -> Self {
         Self {
             initialized: false,
             receiver: None,
             last_peers_discovery: None,
         }
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn execute(&mut self, context: &mut TorrentContext) -> TorrentOperationResult {
+        if !self.initialized {
+            self.initialize(context).await;
+        }
+
+        self.process_tracker_events(context);
+        self.retrieve_discovered_peers(context).await;
+
+        TorrentOperationResult::Continue
     }
 
     /// Returns `true` if peer discovery is allowed based on the last time it was scraped.
@@ -105,29 +115,6 @@ impl TorrentTrackerPeersOperation {
     }
 }
 
-#[async_trait]
-impl TorrentOperation for TorrentTrackerPeersOperation {
-    fn name(&self) -> &str {
-        "retrieve tracker peers operation"
-    }
-
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn execute(
-        &mut self,
-        context: &mut TorrentContext,
-        _: &[PeerDiscovery],
-    ) -> TorrentOperationResult {
-        if !self.initialized {
-            self.initialize(context).await;
-        }
-
-        self.process_tracker_events(context);
-        self.retrieve_discovered_peers(context).await;
-
-        TorrentOperationResult::Continue
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,7 +125,7 @@ mod tests {
     #[tokio::test]
     async fn test_is_peer_discovery_allowed() {
         init_logger!();
-        let mut operation = TorrentTrackerPeersOperation::new();
+        let mut operation = TrackerPeersOperation::new();
 
         // get the initial state
         let result = operation.is_peer_discovery_allowed();
@@ -165,10 +152,10 @@ mod tests {
             vec![],
             None
         );
-        let mut operation = TorrentTrackerPeersOperation::new();
+        let mut operation = TrackerPeersOperation::new();
 
         // execute the operation once to initialize
-        let result = operation.execute(&mut context, vec![].as_slice()).await;
+        let result = operation.execute(&mut context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
 
         // verify that a subscription has been made to the tracker client
@@ -199,7 +186,7 @@ mod tests {
             vec![],
             None
         );
-        let mut operation = TorrentTrackerPeersOperation::new();
+        let mut operation = TrackerPeersOperation::new();
 
         // start tracking the torrent with the tracker
         context
@@ -249,7 +236,7 @@ mod tests {
         );
 
         // execute the operation to scrape the cached peers
-        let _ = operation.execute(&mut context, vec![].as_slice()).await;
+        let _ = operation.execute(&mut context).await;
 
         // verify that the peer from the cache was added to the peer pool
         let result = context.peer_pool().num_connect_candidates();

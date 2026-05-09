@@ -412,7 +412,7 @@ mod tests {
 
     mod on_message {
         use super::*;
-        use crate::operation::TorrentConnectPeersOperation;
+        use crate::operation::ConnectPeersOperation;
         use crate::peer::{
             PeerDiscovery, PeerId, ProtocolExtensionFlags, TcpPeerDiscovery, UtpPeerDiscovery,
         };
@@ -628,7 +628,7 @@ mod tests {
                 .config(TorrentConfig::builder().path(temp_path).build())
                 .protocol_extensions(ProtocolExtensionFlags::LTEP)
                 .extension(|| HolepunchExtension::new().into())
-                .operations(vec![Box::new(TorrentConnectPeersOperation::new(false))])
+                .operations(vec![ConnectPeersOperation::new(false).into()])
                 .peer_discovery(discovery)
                 .storage(|_| MemoryStorage::new().into())
                 .build()

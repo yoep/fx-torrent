@@ -3,7 +3,7 @@ use crate::config::TorrentConfig;
 #[cfg(feature = "dht")]
 use crate::dht::DhtTracker;
 use crate::file::File;
-use crate::operation::{TorrentOperation, TorrentOperationResult, DEFAULT_OPERATIONS};
+use crate::operation::{Operation, TorrentOperationResult};
 use crate::peer::extension::PeerExtension;
 use crate::peer::{
     BitTorrentPeer, CloseReason, ConnectionProtocol, Peer, PeerClientInfo, PeerDiscovery,
@@ -54,9 +54,6 @@ const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A unique handle identifier of a [Torrent].
 pub type TorrentHandle = Handle;
-
-/// The chain of torrent operations that are executed for each torrent.
-pub type TorrentOperations = Vec<Box<dyn TorrentOperation>>;
 
 /// A [Torrent] extension factory.
 /// This factory will create a new instance of an [Extension] for each new torrent.
@@ -163,7 +160,7 @@ pub struct TorrentRequest {
     /// The storage strategy to use for the torrent data
     storage: Option<Box<StorageFactory>>,
     /// The operations used by the torrent for processing data
-    operations: Option<Vec<Box<dyn TorrentOperation>>>,
+    operations: Option<Vec<Operation>>,
     /// The trackers of the torrent to use.
     trackers: Vec<TorrentTracker>,
 }
@@ -237,13 +234,13 @@ impl TorrentRequest {
     }
 
     /// Add the operation to the torrent for processing data.
-    pub fn operation(&mut self, operation: Box<dyn TorrentOperation>) -> &mut Self {
+    pub fn operation(&mut self, operation: Operation) -> &mut Self {
         self.operations.get_or_insert(Vec::new()).push(operation);
         self
     }
 
     /// Set the operations used by the torrent for processing data
-    pub fn operations(&mut self, operations: Vec<Box<dyn TorrentOperation>>) -> &mut Self {
+    pub fn operations(&mut self, operations: Vec<Operation>) -> &mut Self {
         self.operations = Some(operations);
         self
     }
@@ -268,8 +265,8 @@ impl TorrentRequest {
     }
 
     /// Get the list of default operations for the torrent.
-    pub fn default_operations() -> Vec<Box<dyn TorrentOperation>> {
-        DEFAULT_OPERATIONS()
+    pub fn default_operations() -> Vec<Operation> {
+        Operation::default_operations()
     }
 }
 
@@ -426,7 +423,7 @@ impl Torrent {
         config: TorrentConfig,
         data_pool: DataPool,
         storage: Arc<Storage>,
-        operations: Vec<Box<dyn TorrentOperation>>,
+        operations: Vec<Operation>,
         trackers: Vec<TorrentTracker>,
     ) -> Self {
         let info_hash = metadata.info_hash.clone();
@@ -1793,7 +1790,7 @@ impl TorrentContext {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub(crate) async fn run(
         &mut self,
-        mut operations: Vec<Box<dyn TorrentOperation>>,
+        mut operations: Vec<Operation>,
         mut command_receiver: ChannelReceiver<TorrentCommand>,
         peer_discoveries: Vec<PeerDiscovery>,
     ) {
@@ -3420,7 +3417,7 @@ impl TorrentContext {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_tick(
         &mut self,
-        operations: &mut Vec<Box<dyn TorrentOperation>>,
+        operations: &mut Vec<Operation>,
         peer_discoveries: &[PeerDiscovery],
     ) {
         self.execute_operations_chain(operations, peer_discoveries)
@@ -3435,7 +3432,7 @@ impl TorrentContext {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn execute_operations_chain(
         &mut self,
-        operations: &mut Vec<Box<dyn TorrentOperation>>,
+        operations: &mut Vec<Operation>,
         peer_discoveries: &[PeerDiscovery],
     ) {
         for operation in operations.iter_mut() {
@@ -3469,8 +3466,8 @@ impl PartialEq for TorrentContext {
 mod tests {
     use super::*;
     use crate::operation::{
-        TorrentConnectPeersOperation, TorrentCreatePiecesAndFilesOperation,
-        TorrentFileValidationOperation, TorrentStatsOperation,
+        ConnectPeersOperation, CreatePiecesAndFilesOperation, FileValidationOperation,
+        StatsOperation,
     };
     use crate::peer::TcpPeerDiscovery;
     use crate::storage::MemoryStorage;
@@ -3620,7 +3617,7 @@ mod tests {
 
     mod metadata {
         use super::*;
-        use crate::operation::TorrentMetadataOperation;
+        use crate::operation::MetadataOperation;
 
         #[tokio::test]
         async fn test_metadata_available() {
@@ -3635,7 +3632,7 @@ mod tests {
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
-                vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())]
+                vec![CreatePiecesAndFilesOperation::new().into()]
             );
 
             let metadata = torrent.metadata().await.unwrap();
@@ -3672,9 +3669,9 @@ mod tests {
                 TorrentFlags::Metadata,
                 TorrentConfig::builder().build(),
                 vec![
-                    Box::new(TorrentStatsOperation::new()),
-                    Box::new(TorrentConnectPeersOperation::new(false)),
-                    Box::new(TorrentMetadataOperation::new(None))
+                    StatsOperation::new().into(),
+                    ConnectPeersOperation::new(false).into(),
+                    MetadataOperation::new(None).into(),
                 ],
                 vec![TcpPeerDiscovery::new().await.unwrap().into()],
                 |_| { MemoryStorage::new().into() },
@@ -3734,7 +3731,7 @@ mod tests {
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
-                vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())]
+                vec![CreatePiecesAndFilesOperation::new().into()]
             );
 
             let result = torrent.info_hash().await.unwrap();
@@ -3756,7 +3753,7 @@ mod tests {
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
-                vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())]
+                vec![CreatePiecesAndFilesOperation::new().into()]
             );
             let (tx, mut rx) = unbounded_channel();
 
@@ -3791,7 +3788,7 @@ mod tests {
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
-                DEFAULT_OPERATIONS(),
+                Operation::default_operations(),
                 vec![],
                 |_| MemoryStorage::new().into(),
                 None
@@ -3826,8 +3823,8 @@ mod tests {
             );
 
             // create the torrent pieces
-            let mut operation = TorrentCreatePiecesAndFilesOperation::new();
-            let result = operation.execute(&mut context, vec![].as_slice()).await;
+            let mut operation = CreatePiecesAndFilesOperation::new();
+            let result = operation.execute(&mut context).await;
             assert_eq!(TorrentOperationResult::Continue, result);
 
             // request an invalid piece part
@@ -3848,7 +3845,7 @@ mod tests {
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
             let expected_result = 75;
-            let mut operation = TorrentCreatePiecesAndFilesOperation::new();
+            let mut operation = CreatePiecesAndFilesOperation::new();
             let (mut context, _) = torrent_context!(
                 "debian-udp.torrent",
                 temp_path,
@@ -3858,7 +3855,7 @@ mod tests {
             );
 
             // create the torrent pieces
-            operation.execute(&mut context, vec![].as_slice()).await;
+            operation.execute(&mut context).await;
 
             // only request the first piece
             let total_pieces = context.data_pool().num_of_pieces().await;
@@ -3893,7 +3890,7 @@ mod tests {
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
-                vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())]
+                vec![CreatePiecesAndFilesOperation::new().into()]
             );
             let (tx, mut rx) = unbounded_channel();
 
@@ -3928,7 +3925,7 @@ mod tests {
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
-                DEFAULT_OPERATIONS(),
+                Operation::default_operations(),
                 vec![],
                 |_| { MemoryStorage::new().into() },
                 None
@@ -3966,8 +3963,8 @@ mod tests {
             TorrentFlags::UploadMode | TorrentFlags::SeedMode,
             TorrentConfig::builder().build(),
             vec![
-                Box::new(TorrentCreatePiecesAndFilesOperation::new()),
-                Box::new(TorrentFileValidationOperation::new())
+                CreatePiecesAndFilesOperation::new().into(),
+                FileValidationOperation::new().into(),
             ],
             vec![TcpPeerDiscovery::new().await.unwrap().into()]
         );
@@ -3977,9 +3974,9 @@ mod tests {
             TorrentFlags::DownloadMode | TorrentFlags::Paused,
             TorrentConfig::builder().build(),
             vec![
-                Box::new(TorrentStatsOperation::new()),
-                Box::new(TorrentConnectPeersOperation::new(false)),
-                Box::new(TorrentCreatePiecesAndFilesOperation::new()),
+                StatsOperation::new().into(),
+                ConnectPeersOperation::new(false).into(),
+                CreatePiecesAndFilesOperation::new().into(),
             ],
             vec![TcpPeerDiscovery::new().await.unwrap().into()]
         );
@@ -4104,8 +4101,8 @@ mod tests {
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![
-                Box::new(TorrentCreatePiecesAndFilesOperation::new()),
-                Box::new(TorrentFileValidationOperation::new()),
+                CreatePiecesAndFilesOperation::new().into(),
+                FileValidationOperation::new().into(),
             ]
         );
         let (tx, mut rx) = unbounded_channel();
@@ -4155,8 +4152,8 @@ mod tests {
         );
 
         // create the pieces and files for the torrent
-        let mut operation = TorrentCreatePiecesAndFilesOperation::new();
-        operation.execute(&mut context, vec![].as_slice()).await;
+        let mut operation = CreatePiecesAndFilesOperation::new();
+        operation.execute(&mut context).await;
 
         let mut receiver = context.subscribe();
 
@@ -4202,12 +4199,12 @@ mod tests {
         );
 
         // create pieces and files for the torrent
-        let mut operation = TorrentCreatePiecesAndFilesOperation::new();
-        operation.execute(&mut context, vec![].as_slice()).await;
+        let mut operation = CreatePiecesAndFilesOperation::new();
+        operation.execute(&mut context).await;
 
         // validate the existing files
-        let mut operation = TorrentFileValidationOperation::new();
-        operation.execute(&mut context, vec![].as_slice()).await;
+        let mut operation = FileValidationOperation::new();
+        operation.execute(&mut context).await;
 
         let result = context.is_upload_allowed();
         assert_eq!(true, result, "expected uploading to be allowed");
@@ -4341,8 +4338,8 @@ mod tests {
         );
 
         // create the torrent pieces
-        let mut operation = TorrentCreatePiecesAndFilesOperation::new();
-        operation.execute(&mut context, vec![].as_slice()).await;
+        let mut operation = CreatePiecesAndFilesOperation::new();
+        operation.execute(&mut context).await;
 
         let total_pieces = context.data_pool().num_of_pieces().await;
         assert_ne!(0, total_pieces, "expected the pieces to have been created");
@@ -4399,8 +4396,8 @@ mod tests {
         );
 
         // wait for pieces
-        let mut operation = TorrentCreatePiecesAndFilesOperation::new();
-        operation.execute(&mut context, vec![].as_slice()).await;
+        let mut operation = CreatePiecesAndFilesOperation::new();
+        operation.execute(&mut context).await;
 
         let total_pieces = context.data_pool.num_of_pieces().await;
         assert_ne!(0, total_pieces, "expected the pieces to have been created");
@@ -4515,7 +4512,7 @@ mod tests {
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
-                vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())]
+                vec![CreatePiecesAndFilesOperation::new().into()]
             );
 
             // create the pieces
@@ -4596,7 +4593,7 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let mut operation = TorrentCreatePiecesAndFilesOperation::new();
+            let mut operation = CreatePiecesAndFilesOperation::new();
             let (mut context, _) = torrent_context!(
                 "debian-udp.torrent",
                 temp_path,
@@ -4613,7 +4610,7 @@ mod tests {
             let range = 0usize..(2 * piece_length);
 
             // create the torrent pieces
-            operation.execute(&mut context, vec![].as_slice()).await;
+            operation.execute(&mut context).await;
 
             // prioritize the first 2 pieces through the bytes
             context.prioritize_bytes(&range, PiecePriority::High).await;
@@ -4634,7 +4631,7 @@ mod tests {
                 temp_path,
                 TorrentFlags::none(),
                 TorrentConfig::builder().build(),
-                vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())]
+                vec![CreatePiecesAndFilesOperation::new().into()]
             );
 
             // create the pieces and files of the torrent
