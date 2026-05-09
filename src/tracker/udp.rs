@@ -1,5 +1,5 @@
 use crate::tracker::{
-    AnnounceEntryResponse, AnnounceEvent, Announcement, ConnectionMetrics, ScrapeResult,
+    AnnounceEvent, Announcement, AnnouncementResponse, ConnectionMetrics, ScrapeResult,
     TrackerClientConnection, TrackerHandle,
 };
 use crate::tracker::{Result, TrackerError};
@@ -161,7 +161,7 @@ impl UdpConnection {
         Ok(message)
     }
 
-    async fn do_announce(&self, announce: Announcement) -> Result<AnnounceEntryResponse> {
+    async fn do_announce(&self, announce: Announcement) -> Result<AnnouncementResponse> {
         let info_hash = announce.info_hash.short_info_hash_bytes();
         let event = announce.event;
         let request = AnnounceRequest {
@@ -190,8 +190,9 @@ impl UdpConnection {
                     "Udp tracker {} received announce response {:?}",
                     self, response
                 );
-                Ok(AnnounceEntryResponse {
+                Ok(AnnouncementResponse {
                     interval_seconds: response.interval as u64,
+                    external_ip: None,
                     leechers: response.leechers as u64,
                     seeders: response.seeders as u64,
                     peers: response.peers,
@@ -260,7 +261,7 @@ impl UdpConnection {
 
 #[async_trait]
 impl TrackerClientConnection for UdpConnection {
-    async fn announce(&self, announce: Announcement) -> Result<AnnounceEntryResponse> {
+    async fn announce(&self, announce: Announcement) -> Result<AnnouncementResponse> {
         self.do_announce(announce).await
     }
 
@@ -1259,8 +1260,9 @@ mod tests {
                     match request {
                         ServerRequest::Announcement { response, .. } => {
                             response
-                                .send(AnnounceEntryResponse {
+                                .send(AnnouncementResponse {
                                     interval_seconds: 90,
+                                    external_ip: None,
                                     leechers: 2,
                                     seeders: 0,
                                     peers: vec![

@@ -1,8 +1,8 @@
 use crate::tracker::{
-    AnnounceEntryResponse, AnnounceEvent, Announcement, ConnectionMetrics, Result, ScrapeResult,
+    AnnounceEvent, Announcement, AnnouncementResponse, ConnectionMetrics, Result, ScrapeResult,
     TrackerClientConnection, TrackerError, TrackerHandle,
 };
-use crate::{bencode, CompactIpv4Addrs, CompactIpv6Addrs, InfoHash};
+use crate::{bencode, CompactIp, CompactIpv4Addrs, CompactIpv6Addrs, InfoHash};
 use async_trait::async_trait;
 use derive_more::Display;
 use itertools::Itertools;
@@ -12,6 +12,7 @@ use reqwest::redirect::Policy;
 use reqwest::{Client, Error, Response};
 use serde::{Deserialize, Serialize};
 use std::io;
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::select;
@@ -43,6 +44,9 @@ pub struct HttpResponse {
     /// The total number of peers which have not yet completed the torrent
     #[serde(default)]
     pub incomplete: Option<u64>,
+    /// The external ip address of the torrent detected by the tracker (see BEP24).
+    #[serde(default, rename = "external ip")]
+    pub external_ip: Option<CompactIp>,
     #[serde(default)]
     pub peers: CompactIpv4Addrs,
     /// The IPv6 peers of the torrent (BEP7).
@@ -50,17 +54,18 @@ pub struct HttpResponse {
     pub peers6: CompactIpv6Addrs,
 }
 
-impl Into<AnnounceEntryResponse> for HttpResponse {
-    fn into(self) -> AnnounceEntryResponse {
-        AnnounceEntryResponse {
-            interval_seconds: self.interval.unwrap_or(0) as u64,
-            leechers: self.incomplete.unwrap_or(0),
-            seeders: self.complete.unwrap_or(0),
-            peers: self
+impl From<HttpResponse> for AnnouncementResponse {
+    fn from(value: HttpResponse) -> Self {
+        Self {
+            interval_seconds: value.interval.unwrap_or(0) as u64,
+            external_ip: value.external_ip.map(IpAddr::from),
+            leechers: value.incomplete.unwrap_or(0),
+            seeders: value.complete.unwrap_or(0),
+            peers: value
                 .peers
                 .into_iter()
                 .map(|e| e.into())
-                .chain(self.peers6.into_iter().map(|e| e.into()))
+                .chain(value.peers6.into_iter().map(|e| e.into()))
                 .collect(),
         }
     }
@@ -148,7 +153,7 @@ impl HttpClient {
     async fn process_announce_response(
         &self,
         response: std::result::Result<Response, Error>,
-    ) -> Result<AnnounceEntryResponse> {
+    ) -> Result<AnnouncementResponse> {
         let response = response?;
         let status_code = response.status();
         let bytes = response.bytes().await?;
@@ -215,7 +220,7 @@ impl HttpClient {
 
 #[async_trait]
 impl TrackerClientConnection for HttpClient {
-    async fn announce(&self, announce: Announcement) -> Result<AnnounceEntryResponse> {
+    async fn announce(&self, announce: Announcement) -> Result<AnnouncementResponse> {
         let url = self.create_announce_url(announce)?;
 
         trace!("Http tracker {} is sending request {}", self, url);
@@ -330,6 +335,7 @@ mod server {
                             tracker_id: None,
                             complete: None,
                             incomplete: None,
+                            external_ip: Some(addr.ip().into()),
                             peers: Default::default(),
                             peers6: Default::default(),
                         },
@@ -347,6 +353,7 @@ mod server {
                             interval: Some(e.interval_seconds as u32),
                             complete: Some(e.seeders),
                             incomplete: Some(e.leechers),
+                            external_ip: Some(addr.ip().into()),
                             peers: e
                                 .peers
                                 .into_iter()
@@ -364,6 +371,7 @@ mod server {
                             tracker_id: None,
                             complete: None,
                             incomplete: None,
+                            external_ip: Some(addr.ip().into()),
                             peers: Vec::with_capacity(0).into(),
                             peers6: Default::default(),
                         }
@@ -381,6 +389,7 @@ mod server {
                         tracker_id: None,
                         complete: None,
                         incomplete: None,
+                        external_ip: Some(addr.ip().into()),
                         peers: Vec::with_capacity(0).into(),
                         peers6: Default::default(),
                     }
@@ -493,7 +502,7 @@ mod server {
             &self,
             addr: SocketAddr,
             params: AnnounceParams,
-        ) -> Result<AnnounceEntryResponse> {
+        ) -> Result<AnnouncementResponse> {
             let info_hash = InfoHash::try_from_bytes(params.info_hash.as_slice())
                 .map_err(|e| TrackerError::Parse(e.to_string()))?;
             let peer_id = PeerId::try_from(params.peer_id.as_bytes())
@@ -737,6 +746,7 @@ mod tests {
             0, result.interval_seconds,
             "expected the interval to be greater than 0"
         );
+        assert_ne!(None, result.external_ip, "expected an external ip");
         assert_eq!(
             2,
             result.peers.len(),

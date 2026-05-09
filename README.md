@@ -117,6 +117,7 @@ fn example() {
 ### Storage Extension
 
 To implement your own storage extension, implement the `storage::Extension` trait.
+This trait can be registered directly in a `Torrent` or reused through `FxTorrentSession`.
 
 _example storage extension_
 ```rust
@@ -131,10 +132,16 @@ impl Extension for MyStorageExtension {
 }
 
 fn example() {
-    Torrent::request()
+    // 1. Storage extension directly in a torrent
+    let torrent = Torrent::request()
         .storage(|params| MyStorageExtension::new(params).into())
         .build()
-        .unwrap()
+        .unwrap();
+
+    // 2. Storage extension in a session
+    let session = FxTorrentSession::builder()
+        .storage(|params| MyStorageExtension::new(params).into())
+        .build().unwrap();
 }
 ```
 
@@ -154,7 +161,7 @@ fn example() {
 - [x] [BEP19](https://www.bittorrent.org/beps/bep_0019.html) - WebSeed - HTTP/FTP Seeding (GetRight style)
 - [x] [BEP20](https://www.bittorrent.org/beps/bep_0020.html) - Peer ID Conventions
 - [x] [BEP21](https://www.bittorrent.org/beps/bep_0021.html) - Extension for partial seeds
-- [ ] [BEP24](https://www.bittorrent.org/beps/bep_0024.html) - Tracker Returns External IP
+- [x] [BEP24](https://www.bittorrent.org/beps/bep_0024.html) - Tracker Returns External IP
 - [x] [BEP29](https://www.bittorrent.org/beps/bep_0029.html) - uTorrent transport protocol
 - [x] [BEP32](https://www.bittorrent.org/beps/bep_0032.html) - BitTorrent DHT Extensions for IPv6
 - [x] [BEP33](https://www.bittorrent.org/beps/bep_0033.html) - DHT scrape

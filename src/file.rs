@@ -10,7 +10,7 @@ pub type FileIndex = usize;
 /// Alias name for the piece priority of a file.
 pub type FilePriority = PiecePriority;
 
-/// The information about a single file within a torrent.
+/// The metadata information about a single file within a torrent.
 ///
 /// ## Ranges
 ///

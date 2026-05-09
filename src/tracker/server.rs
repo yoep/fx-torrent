@@ -2,7 +2,7 @@ use crate::peer::PeerId;
 use crate::tracker::http::HttpServer;
 use crate::tracker::udp::UdpServer;
 use crate::tracker::{
-    AnnounceEntryResponse, AnnounceEvent, Announcement, ConnectionMetrics, Result,
+    AnnounceEvent, Announcement, AnnouncementResponse, ConnectionMetrics, Result,
     ScrapeFileMetrics, ScrapeResult, TrackerError, TrackerHandle,
 };
 use crate::InfoHash;
@@ -29,7 +29,7 @@ pub enum ServerRequest {
     Announcement {
         addr: SocketAddr,
         request: Announcement,
-        response: oneshot::Sender<AnnounceEntryResponse>,
+        response: oneshot::Sender<AnnouncementResponse>,
     },
     Scrape {
         request: Vec<InfoHash>,
@@ -202,7 +202,7 @@ impl InnerServer {
         &self,
         addr: SocketAddr,
         announcement: Announcement,
-    ) -> AnnounceEntryResponse {
+    ) -> AnnouncementResponse {
         let mut torrents = self.torrents.lock().await;
         let torrent_peers = torrents.entry(announcement.info_hash.clone()).or_default();
         let entry = PeerEntry::new(announcement.peer_id, addr.ip());
@@ -241,8 +241,9 @@ impl InnerServer {
             peers.push((entry.ip, torrent_peer.peer_port).into());
         }
 
-        AnnounceEntryResponse {
+        AnnouncementResponse {
             interval_seconds: self.announce_interval.as_secs(),
+            external_ip: None,
             leechers,
             seeders,
             peers,

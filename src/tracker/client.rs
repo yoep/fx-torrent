@@ -2,7 +2,7 @@ use crate::channel::{ChannelReceiver, ChannelSender, Reply};
 use crate::metrics::Metric;
 use crate::peer::PeerId;
 use crate::tracker::{
-    AnnounceEntryResponse, AnnounceEvent, Announcement, Result, ScrapeFileMetrics, ScrapeResult,
+    AnnounceEvent, Announcement, AnnouncementResponse, Result, ScrapeFileMetrics, ScrapeResult,
     Tracker, TrackerClientMetrics, TrackerError, TrackerHandle, TrackerState,
 };
 use crate::{InfoHash, Metrics};
@@ -1107,7 +1107,7 @@ impl InnerClient {
         peer_port: u16,
         bytes_completed: u64,
         bytes_remaining: u64,
-    ) -> Result<AnnounceEntryResponse> {
+    ) -> Result<AnnouncementResponse> {
         trace!("Announcing event {} to tracker {}", event, tracker);
         let announce = Announcement {
             info_hash: info_hash.clone(),
