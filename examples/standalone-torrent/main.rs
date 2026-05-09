@@ -21,7 +21,7 @@ async fn main() -> Result<(), io::Error> {
     let torrent = Torrent::request()
         .metadata(metadata)
         .options(TorrentFlags::AutoManaged | TorrentFlags::Paused)
-        .storage(|_| Box::new(MemoryStorage::new()))
+        .storage(|_| MemoryStorage::new().into())
         .tracker(TrackerClient::new(Duration::from_secs(10)).into())
         .build()
         .map_err(|e| {

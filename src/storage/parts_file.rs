@@ -1,8 +1,9 @@
-use crate::storage::{Error, Result};
+use crate::storage::{unavailable, Result};
 use crate::torrent_data::DataPool;
 use crate::{Piece, PieceIndex};
 use log::trace;
 use std::collections::BTreeMap;
+use std::io;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use tokio::fs::{File, OpenOptions};
@@ -46,24 +47,24 @@ impl PartsFile {
         // early return when the parts file doesn't exist
         let filepath = self.absolute_filepath().await;
         if !filepath.exists() {
-            return Err(Error::Unavailable);
+            return Err(unavailable());
         }
 
         let slot_index = {
             let piece_slots = self.piece_slots.read().await;
             match piece_slots.get(piece).copied() {
-                None => return Err(Error::Unavailable),
+                None => return Err(unavailable()),
                 Some(e) => e,
             }
         };
         let slots = self.slots.read().await;
-        let slot = slots.get(&slot_index).ok_or(Error::Unavailable)?;
+        let slot = slots.get(&slot_index).ok_or(unavailable())?;
 
         let mut file = self.open(false).await?;
         let metadata = file.metadata().await?;
         let file_offset = slot.offset.saturating_add(offset);
         if file_offset > metadata.len() as usize {
-            return Err(Error::OutOfBounds);
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "out-of-bounds"));
         }
 
         file.seek(SeekFrom::Start(file_offset as u64)).await?;
@@ -76,11 +77,7 @@ impl PartsFile {
     pub async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         let mut slots = self.slots.write().await;
         let mut piece_slots = self.piece_slots.write().await;
-        let piece = self
-            .data_pool
-            .piece(piece)
-            .await
-            .ok_or(Error::Unavailable)?;
+        let piece = self.data_pool.piece(piece).await.ok_or(unavailable())?;
         let slot = match piece_slots
             .get(&piece.index)
             .and_then(|slot_index| slots.get(slot_index))
@@ -95,13 +92,13 @@ impl PartsFile {
                     slot_index,
                     piece.index
                 );
-                slots.get(&slot_index).ok_or(Error::Unavailable)?
+                slots.get(&slot_index).ok_or(unavailable())?
             }
         };
 
         // check if the data fits within the slot
         if offset + data.len() > slot.len {
-            return Err(Error::OutOfBounds);
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "out-of-bounds"));
         }
 
         let mut file = self.open(true).await?;
@@ -210,18 +207,24 @@ mod tests {
         let part_file = PartsFile::new(filename, temp_path, pieces.clone());
 
         let result = part_file.write(piece_data, &piece_index, 0).await;
-        assert_eq!(
-            Ok(piece_data.len()),
-            result,
-            "expected the piece data to have been written"
-        );
+        match result {
+            Ok(result) => assert_eq!(
+                piece_data.len(),
+                result,
+                "expected the piece data to have been written"
+            ),
+            Err(_) => assert!(false, "expected Ok, but got {:?}", result),
+        }
 
         let mut buffer = vec![0u8; piece_len];
         let result = part_file.read(&mut buffer, &piece_index, 0).await;
-        assert_eq!(
-            Ok(piece_data.len()),
-            result,
-            "expected the original written data to have been returned"
-        );
+        match result {
+            Ok(result) => assert_eq!(
+                piece_data.len(),
+                result,
+                "expected the piece data to have been read"
+            ),
+            Err(_) => assert!(false, "expected Ok, but got {:?}", result),
+        }
     }
 }

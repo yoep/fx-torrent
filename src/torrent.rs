@@ -62,8 +62,8 @@ pub type TorrentOperations = Vec<Box<dyn TorrentOperation>>;
 /// This factory will create a new instance of an [Extension] for each new torrent.
 pub type ExtensionFactory = fn() -> PeerExtension;
 
-/// Creates a new torrent [Storage] instance.
-pub type StorageFactory = dyn FnOnce(StorageParams) -> Box<dyn Storage> + Send + Sync;
+/// Creates a new torrent [StorageExtension] instance.
+pub type StorageFactory = dyn FnOnce(StorageParams) -> Storage + Send + Sync;
 
 /// The states of the torrent
 #[derive(Debug, Display, Copy, Clone, PartialEq)]
@@ -230,7 +230,7 @@ impl TorrentRequest {
     /// Set the underlying storage for storing the torrent file data.
     pub fn storage<F>(&mut self, storage: F) -> &mut Self
     where
-        F: FnOnce(StorageParams) -> Box<dyn Storage> + Send + Sync + 'static,
+        F: FnOnce(StorageParams) -> Storage + Send + Sync + 'static,
     {
         self.storage = Some(Box::new(storage));
         self
@@ -425,7 +425,7 @@ impl Torrent {
         options: TorrentFlags,
         config: TorrentConfig,
         data_pool: DataPool,
-        storage: Arc<dyn Storage>,
+        storage: Arc<Storage>,
         operations: Vec<Box<dyn TorrentOperation>>,
         trackers: Vec<TorrentTracker>,
     ) -> Self {
@@ -930,7 +930,7 @@ impl Torrent {
     }
 
     /// Try to read the bytes from the given torrent file.
-    /// This reads all available bytes of the file stored within the [Storage].
+    /// This reads all available bytes of the file stored within the [StorageExtension].
     ///
     /// Returns the amount of bytes read and the byte buffer.
     ///
@@ -1724,7 +1724,7 @@ pub struct TorrentContext {
     request_upload_permits: Arc<Semaphore>,
 
     /// The storage interface of the torrent
-    storage: Arc<dyn Storage>,
+    storage: Arc<Storage>,
 
     /// The immutable enabled protocol extensions for this torrent
     protocol_extensions: ProtocolExtensionFlags,
@@ -1758,7 +1758,7 @@ impl TorrentContext {
         options: TorrentFlags,
         data_pool: DataPool,
         trackers: Vec<TorrentTracker>,
-        storage: Arc<dyn Storage>,
+        storage: Arc<Storage>,
         command_sender: ChannelSender<TorrentCommand>,
     ) -> Self {
         let handle = TorrentHandle::new();
@@ -2038,7 +2038,7 @@ impl TorrentContext {
     }
 
     /// Returns a reference to the underlying storage layer of the torrent.
-    pub fn storage(&self) -> &Arc<dyn Storage> {
+    pub fn storage(&self) -> &Arc<Storage> {
         &self.storage
     }
 
@@ -3239,7 +3239,7 @@ impl TorrentContext {
     }
 
     /// Try to read the bytes from the given torrent file.
-    /// This reads all available bytes of the file stored within the [Storage].
+    /// This reads all available bytes of the file stored within the [StorageExtension].
     ///
     /// ## Remarks
     ///
@@ -3312,7 +3312,7 @@ impl TorrentContext {
     }
 
     /// Try to read the given bytes from the torrent.
-    /// This reads all available bytes of one or more files from the torrent stored within the [Storage].
+    /// This reads all available bytes of one or more files from the torrent stored within the [StorageExtension].
     /// The returned bytes will be padded with 0 if the available data is smaller than the requested range.
     ///
     /// # Arguments
@@ -3330,7 +3330,7 @@ impl TorrentContext {
     }
 
     /// Try to read the given bytes from the torrent.
-    /// This reads all bytes of one or more files from the torrent stored within the [Storage].
+    /// This reads all bytes of one or more files from the torrent stored within the [StorageExtension].
     ///
     /// # Arguments
     ///
@@ -3572,7 +3572,7 @@ mod tests {
                 TorrentConfig::builder().build(),
                 vec![],
                 vec![],
-                |_| Box::new(MemoryStorage::new()),
+                |_| MemoryStorage::new().into(),
                 None,
                 tracker_manager.clone()
             );
@@ -3677,7 +3677,7 @@ mod tests {
                     Box::new(TorrentMetadataOperation::new(None))
                 ],
                 vec![TcpPeerDiscovery::new().await.unwrap().into()],
-                |_| { Box::new(MemoryStorage::new()) },
+                |_| { MemoryStorage::new().into() },
                 None
             );
 
@@ -3793,7 +3793,7 @@ mod tests {
                 TorrentConfig::builder().build(),
                 DEFAULT_OPERATIONS(),
                 vec![],
-                |_| Box::new(MemoryStorage::new()),
+                |_| MemoryStorage::new().into(),
                 None
             );
 
@@ -3930,7 +3930,7 @@ mod tests {
                 TorrentConfig::builder().build(),
                 DEFAULT_OPERATIONS(),
                 vec![],
-                |_| { Box::new(MemoryStorage::new()) },
+                |_| { MemoryStorage::new().into() },
                 None
             );
 

@@ -71,7 +71,7 @@ macro_rules! torrent_context {
             $extensions,
             $dht,
             None,
-            |_, _| Arc::new(crate::storage::MemoryStorage::new())
+            |_, _| Arc::new(crate::storage::MemoryStorage::new().into())
         )
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr, $lsd:expr) => {{
@@ -86,7 +86,7 @@ macro_rules! torrent_context {
             $extensions,
             $dht,
             $lsd,
-            |_, _| Arc::new(crate::storage::MemoryStorage::new())
+            |_, _| Arc::new(crate::storage::MemoryStorage::new().into())
         )
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr, $lsd:expr, $storage:expr) => {{
@@ -197,11 +197,8 @@ macro_rules! torrent {
             $operations,
             $discoveries,
             |params| {
-                Box::new(crate::storage::DiskStorage::new(
-                    params.info_hash,
-                    params.path,
-                    params.data_pool,
-                ))
+                crate::storage::DiskStorage::new(params.info_hash, params.path, params.data_pool)
+                    .into()
             }
         )
     }};

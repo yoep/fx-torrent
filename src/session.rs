@@ -56,8 +56,8 @@ const DEFAULT_CACHE_LIMIT: usize = 10;
 /// A unique handle identifier of a [Session].
 pub type SessionHandle = Handle;
 
-/// The [Storage] factory used to create underlying storage for torrents.
-pub type SessionStorageFactory = dyn Fn(StorageParams) -> Box<dyn Storage> + Send + Sync;
+/// The [StorageExtension] factory used to create underlying storage for torrents.
+pub type SessionStorageFactory = dyn Fn(StorageParams) -> Storage + Send + Sync;
 
 /// The events of a torrent session.
 #[derive(Debug, Display, Clone, PartialEq)]
@@ -506,7 +506,7 @@ impl Session for FxTorrentSession {
                 .protocol_extensions(self.inner.protocol_extensions)
                 .extensions(self.inner.extensions())
                 .operations(vec![Box::new(TorrentTrackersOperation::new())])
-                .storage(|_| Box::new(MemoryStorage::new()))
+                .storage(|_| MemoryStorage::new().into())
                 .trackers(self.inner.trackers.clone())
                 .build()?,
         };
@@ -742,7 +742,7 @@ impl FxTorrentSessionBuilder {
     /// Set the storage factory for the session.
     pub fn storage<F>(&mut self, storage: F) -> &mut Self
     where
-        F: Fn(StorageParams) -> Box<dyn Storage> + Send + Sync + 'static,
+        F: Fn(StorageParams) -> Storage + Send + Sync + 'static,
     {
         self.storage = Some(Arc::new(storage));
         self
@@ -819,11 +819,7 @@ impl FxTorrentSessionBuilder {
         });
         let storage = self.storage.take().unwrap_or_else(|| {
             Arc::new(|params| {
-                Box::new(DiskStorage::new(
-                    params.info_hash,
-                    params.path,
-                    params.data_pool,
-                ))
+                DiskStorage::new(params.info_hash, params.path, params.data_pool).into()
             })
         });
         let session_cache = self
@@ -972,6 +968,7 @@ impl InnerSession {
             while let Ok(event) = receiver.recv().await {
                 if let TorrentEvent::MetadataChanged(metadata) = &*event {
                     let _ = command_sender.send(SessionCommand::StoreMetadata(metadata.clone()));
+                    break;
                 }
             }
         });

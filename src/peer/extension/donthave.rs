@@ -58,7 +58,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![Box::new(TorrentCreatePiecesAndFilesOperation::new())],
             vec![],
-            |_| Box::new(MemoryStorage::new()),
+            |_| MemoryStorage::new().into(),
             None
         );
         let (mut incoming, _outgoing) = peer_context_pair!(&torrent.inner);

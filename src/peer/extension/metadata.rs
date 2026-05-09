@@ -428,7 +428,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![],
             vec![],
-            |_| Box::new(MemoryStorage::new()),
+            |_| MemoryStorage::new().into(),
             None
         );
         let target_torrent = torrent!(
@@ -438,7 +438,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![],
             vec![],
-            |_| Box::new(MemoryStorage::new()),
+            |_| MemoryStorage::new().into(),
             None
         );
 

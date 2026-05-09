@@ -34,7 +34,7 @@ impl DataPool {
         let (sender, rx) = channel!(256);
         tokio::spawn(async move {
             let mut inner = InnerDataPool::new(pieces);
-            inner.start(rx).await;
+            inner.run(rx).await;
         });
 
         Self { sender }
@@ -482,7 +482,7 @@ impl InnerDataPool {
         }
     }
 
-    async fn start(&mut self, mut receiver: ChannelReceiver<DataPoolCommand>) {
+    async fn run(&mut self, mut receiver: ChannelReceiver<DataPoolCommand>) {
         while let Some(command) = receiver.recv().await {
             match command {
                 DataPoolCommand::NumOfPieces { response } => {

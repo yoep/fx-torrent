@@ -1,12 +1,10 @@
-use crate::storage::{Error, Metrics, Result, Storage};
+use crate::storage::{unavailable, Metrics, Result};
 use crate::{PieceIndex, Sha1Hash, Sha256Hash};
-use async_trait::async_trait;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::cmp::min;
 use std::collections::BTreeMap;
 use std::io;
-use std::path::Path;
 use tokio::sync::RwLock;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -20,18 +18,21 @@ pub struct MemoryStorage {
 }
 
 impl MemoryStorage {
+    /// Create a new in-memory storage instance.
     pub fn new() -> Self {
         Self {
             pieces: Default::default(),
             metrics: Default::default(),
         }
     }
-}
 
-#[async_trait]
-impl Storage for MemoryStorage {
     #[cfg_attr(feature = "tracing", instrument(skip(self, buffer)))]
-    async fn read(&self, buffer: &mut [u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
+    pub async fn read(
+        &self,
+        buffer: &mut [u8],
+        piece: &PieceIndex,
+        offset: usize,
+    ) -> Result<usize> {
         let mut cursor = 0usize;
         let buffer_len = buffer.len();
         let pieces = self.pieces.read().await;
@@ -56,7 +57,7 @@ impl Storage for MemoryStorage {
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip(self, data)))]
-    async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
+    pub async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         let mut pieces = self.pieces.write().await;
         let piece = if !pieces.contains_key(&piece) {
             pieces.insert(*piece, vec![0u8; data.len() + offset]);
@@ -64,7 +65,7 @@ impl Storage for MemoryStorage {
         } else {
             pieces.get_mut(&piece)
         }
-        .ok_or(Error::Unavailable)?;
+        .ok_or(unavailable())?;
 
         let end = data.len().saturating_add(offset);
         piece[offset..end].copy_from_slice(data);
@@ -74,28 +75,25 @@ impl Storage for MemoryStorage {
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
-    async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash> {
+    pub async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash> {
         let pieces = self.pieces.read().await;
         let bytes = pieces.get(&piece).map(|e| &e[..]).unwrap_or(&[]);
 
         Sha1Hash::try_from(Sha1::digest(bytes))
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
-    async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash> {
+    pub async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash> {
         let pieces = self.pieces.read().await;
         let bytes = pieces.get(&piece).map(|e| &e[..]).unwrap_or(&[]);
 
         Sha256Hash::try_from(Sha256::digest(bytes))
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
-    async fn move_storage(&self, _: &Path) -> Result<()> {
-        Ok(())
-    }
-
-    fn metrics(&self) -> &Metrics {
+    /// Returns the storage metrics.
+    pub fn metrics(&self) -> &Metrics {
         &self.metrics
     }
 }
@@ -118,20 +116,18 @@ mod tests {
 
         // write the piece data
         let result = storage.write(&data, &piece, 0).await;
-        assert_eq!(
-            Ok(data.len()),
-            result,
-            "expected the piece to have been written to memory"
-        );
+        match result {
+            Ok(result) => assert_eq!(data.len(), result, "expected the piece data to be written"),
+            Err(_) => assert!(false, "expected Ok, but got {:?}", result),
+        }
 
         // read the piece data
         let mut buffer = vec![0u8; data.len()];
         let result = storage.read(&mut buffer, &piece, 0).await;
-        assert_eq!(
-            Ok(data.len()),
-            result,
-            "expected the piece to have been read from memory"
-        );
+        match result {
+            Ok(result) => assert_eq!(data.len(), result, "expected the piece data to be read"),
+            Err(_) => assert!(false, "expected Ok, but got {:?}", result),
+        }
         assert_eq!(buffer, data, "expected the piece data to match");
     }
 
@@ -154,11 +150,10 @@ mod tests {
 
         // write the piece data
         let result = storage.write(&data, &piece, 0).await;
-        assert_eq!(
-            Ok(data.len()),
-            result,
-            "expected the piece to have been written to memory"
-        );
+        match result {
+            Ok(result) => assert_eq!(data.len(), result, "expected the piece data to be written"),
+            Err(_) => assert!(false, "expected Ok, but got {:?}", result),
+        }
 
         // create the pieces
         let result = operation.execute(&mut context, vec![].as_slice()).await;
