@@ -89,12 +89,17 @@ When both features are missing, a `Error::MissingCryptoProvider` error will be r
 
 ## Extensions
 
-The behavior of components within the `fx_torrent` crate can be modified with your own functionality.
-To achieve this, use one of the following "extension" traits within the modules to update the behavior of that component.
+The `fx_torrent` crate is designed to be highly extensible.
+You can modify the core behavior of components by implementing and registering "extension" traits.
+These allow for custom logic in peer communication and data persistence.
 
 ### Peer Extension
 
-To implement your own peer extension, implement the `peer:extension::Extension` trait.
+Peer extensions allow you to extend the BitTorrent protocol with custom messaging and handshake
+capabilities, following the **BEP 10** specification.
+
+To modify peer protocol behavior, implement the `peer::extension::Extension` trait.
+Once implemented, these extensions can be attached to individual torrents or globally across a session.
 
 _example peer extension_
 ```rust
@@ -104,20 +109,31 @@ impl Extension for MyPeerExtension {
     fn name(&self) -> &str {
         "my-extension"
     }
+
+    // Additional trait methods
 }
 
 fn example() {
-    Torrent::request()
+    // 1. Peer extension directly in a torrent
+    let torrent = Torrent::request()
         .extension(|| MyPeerExtension.into())
         .build()
-        .unwrap()
+        .unwrap();
+
+    // 2. Peer extension in a session
+    let session = FxTorrentSession::builder()
+        .extension(|| MyPeerExtension.into())
+        .build()
+        .unwrap();
 }
 ```
 
 ### Storage Extension
 
-To implement your own storage extension, implement the `storage::Extension` trait.
-This trait can be registered directly in a `Torrent` or reused through `FxTorrentSession`.
+Storage extensions allow you to customize how data is read from and written to disk (or memory).
+This is useful for implementing custom caching layers, encrypted storage, or cloud-backed persistence.
+
+To create your own storage backend, implement the `storage::Extension` trait.
 
 _example storage extension_
 ```rust
@@ -129,6 +145,12 @@ impl MyStorageExtension {
     }
 }
 impl Extension for MyStorageExtension {
+    async fn read(&self, buffer: &mut [u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
+        // Read piece data from storage
+        Ok(0)
+    }
+
+    // Additional trait methods
 }
 
 fn example() {
