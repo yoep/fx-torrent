@@ -24,15 +24,11 @@ impl TrackersOperation {
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn execute(&mut self, context: &mut TorrentContext) -> TorrentOperationResult {
-        // build the tiered trackers cache if needed
-        if !self.initialized {
-            self.initialize(context).await;
-        }
-
+        self.initialize(context).await;
         self.add_trackers_from_cache(context).await;
         self.process_tracker_events(context).await;
 
-        // check if the metadata is known or if there are active tracker connections
+        // verify if the metadata is known or if there are active tracker connections
         // if not, we wait for at least one tracker connection
         let is_metadata_known = context.metadata().info.is_some();
         if is_metadata_known || context.active_tracker_connections().await > 0 {
@@ -43,12 +39,16 @@ impl TrackersOperation {
     }
 
     async fn initialize(&mut self, context: &mut TorrentContext) {
+        if self.initialized {
+            return;
+        }
+
         self.initialized = true;
         let tracker = match context.tracker() {
             None => return,
             Some(tracker) => tracker,
         };
-        //register to the tracker events
+        // register to the tracker events
         self.receiver = Some(tracker.subscribe());
         // register the torrent with the tracker client
         if let Err(e) = tracker
@@ -93,6 +93,7 @@ impl TrackersOperation {
     }
 
     /// Try to add the trackers from the cache to the torrent.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn add_trackers_from_cache(&mut self, context: &TorrentContext) {
         let take = self.cached_tiered_trackers.len().min(3);
         let entries: Vec<_> = self.cached_tiered_trackers.drain(..take).collect();
@@ -151,6 +152,7 @@ impl TrackersOperation {
             .for_each(|e| debug!("Torrent {} failed to add tracker, {}", torrent, e));
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn process_tracker_events(&mut self, context: &mut TorrentContext) {
         let receiver = match self.receiver.as_mut() {
             None => return,

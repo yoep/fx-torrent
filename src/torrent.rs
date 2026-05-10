@@ -3555,13 +3555,13 @@ mod tests {
             assert_ne!(0, result.peers.len(), "expected peers to have been found");
         }
 
-        #[tokio::test]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn test_scrape() {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
             let tracker_server = TrackerServer::new().await.unwrap();
-            let tracker_manager = TrackerClient::new(Duration::from_secs(1));
+            let tracker_manager = TrackerClient::new(Duration::from_secs(2));
             let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,

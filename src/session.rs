@@ -900,6 +900,7 @@ struct InnerSession {
 
 impl InnerSession {
     /// Run the main loop of the session.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn run(&self, mut command_receiver: UnboundedReceiver<SessionCommand>) {
         loop {
             select! {

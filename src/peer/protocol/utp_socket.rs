@@ -258,6 +258,7 @@ pub(crate) struct UtpSocketContext {
 
 impl UtpSocketContext {
     /// Run the main loop of the utp socket.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn run(&self, context: &Arc<UtpSocketContext>) {
         let mut buffer = [0u8; MAX_PACKET_SIZE];
 

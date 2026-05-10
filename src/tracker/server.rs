@@ -1,6 +1,6 @@
 use crate::peer::PeerId;
-use crate::tracker::http::HttpServer;
-use crate::tracker::udp::UdpServer;
+use crate::tracker::HttpServer;
+use crate::tracker::UdpServer;
 use crate::tracker::{
     AnnounceEvent, Announcement, AnnouncementResponse, ConnectionMetrics, Result,
     ScrapeFileMetrics, ScrapeResult, TrackerError, TrackerHandle,
@@ -167,6 +167,7 @@ struct InnerServer {
 }
 
 impl InnerServer {
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn run(&self, listeners: Vec<Box<dyn TrackerListener>>) {
         loop {
             let mut futures =

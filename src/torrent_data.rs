@@ -482,6 +482,7 @@ impl InnerDataPool {
         }
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn run(&mut self, mut receiver: ChannelReceiver<DataPoolCommand>) {
         while let Some(command) = receiver.recv().await {
             match command {

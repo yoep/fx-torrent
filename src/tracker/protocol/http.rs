@@ -1,6 +1,6 @@
 use crate::tracker::{
     AnnounceEvent, Announcement, AnnouncementResponse, ConnectionMetrics, Result, ScrapeResult,
-    TrackerClientConnection, TrackerError, TrackerHandle,
+    TrackerError, TrackerHandle,
 };
 use crate::{bencode, CompactIp, CompactIpv4Addrs, CompactIpv6Addrs, InfoHash};
 use async_trait::async_trait;
@@ -53,11 +53,12 @@ impl HttpClient {
             .redirect(Policy::limited(3))
             .timeout(timeout)
             .build()
-            .expect("expected a valid http client");
+            .map_err(|e| TrackerError::Connection(e.to_string()))?;
 
         trace!(
-            "Http tracker client {} is trying to connect with the server",
-            handle
+            "Http tracker client {} is trying to connect to {}",
+            handle,
+            url
         );
         client.head(url.clone()).send().await?;
 
@@ -69,6 +70,36 @@ impl HttpClient {
             metrics: Default::default(),
             cancellation_token: Default::default(),
         })
+    }
+
+    /// Announce the given torrent hash to the tracker.
+    /// This will send the known peer info to the tracker with the type of announcement.
+    pub async fn announce(&self, announce: Announcement) -> Result<AnnouncementResponse> {
+        self.make_announcement(announce).await
+    }
+
+    /// Scrape the tracker for metrics for one or more info hashes.
+    pub async fn scrape(&self, hashes: &[InfoHash]) -> Result<ScrapeResult> {
+        let url = self.create_scrape_url(hashes)?;
+
+        trace!("Http tracker {} is sending request to {}", self, url);
+        select! {
+            _ = self.cancellation_token.cancelled() => {
+                self.metrics.timeouts.inc();
+                Err(TrackerError::Io(io::Error::new(io::ErrorKind::TimedOut, "request timed out")))
+            },
+            response = self.client.get(url.clone()).send() => self.process_scrape_response(response).await,
+        }
+    }
+
+    /// Returns the http client metrics.
+    pub fn metrics(&self) -> &ConnectionMetrics {
+        &self.metrics
+    }
+
+    /// Close the http client connection.
+    pub fn close(&self) {
+        self.cancellation_token.cancel()
     }
 
     async fn create_announce_url(&self, announce: Announcement) -> Result<Url> {
@@ -216,34 +247,6 @@ impl HttpClient {
             "received invalid status code {}",
             status_code
         )))
-    }
-}
-
-#[async_trait]
-impl TrackerClientConnection for HttpClient {
-    async fn announce(&self, announce: Announcement) -> Result<AnnouncementResponse> {
-        self.make_announcement(announce).await
-    }
-
-    async fn scrape(&self, hashes: &[InfoHash]) -> Result<ScrapeResult> {
-        let url = self.create_scrape_url(hashes)?;
-
-        trace!("Http tracker {} is sending request to {}", self, url);
-        select! {
-            _ = self.cancellation_token.cancelled() => {
-                self.metrics.timeouts.inc();
-                Err(TrackerError::Io(io::Error::new(io::ErrorKind::TimedOut, "request timed out")))
-            },
-            response = self.client.get(url.clone()).send() => self.process_scrape_response(response).await,
-        }
-    }
-
-    fn metrics(&self) -> &ConnectionMetrics {
-        &self.metrics
-    }
-
-    fn close(&self) {
-        self.cancellation_token.cancel()
     }
 }
 
@@ -821,6 +824,78 @@ mod tests {
                 None => assert!(false, "expected a scrape file result"),
             },
             Err(e) => assert!(false, "expected Result::Ok, got {:?}", e),
+        }
+    }
+
+    mod client {
+        use super::*;
+        use httpmock::MockServer;
+
+        #[tokio::test]
+        async fn test_paused_not_supported() {
+            init_logger!();
+            let info_hash = InfoHash::from_str("A1DFEFEC1A9DD7FA8A041EBEEEA271DB55126D2F").unwrap();
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.path("/announce").query_param("event", "paused");
+                then.status(400).body(
+                    bencode::to_string(&HttpResponse {
+                        failure_reason: Some("invalid event".to_string()),
+                        interval: None,
+                        tracker_id: None,
+                        complete: None,
+                        incomplete: None,
+                        external_ip: None,
+                        peers: Default::default(),
+                        peers6: Default::default(),
+                    })
+                    .unwrap(),
+                );
+            });
+            server.mock(|when, then| {
+                when.path("/announce").query_param("event", "");
+                then.status(200).body(
+                    bencode::to_string(&HttpResponse {
+                        failure_reason: None,
+                        interval: Some(1200),
+                        tracker_id: None,
+                        complete: Some(2),
+                        incomplete: Some(1),
+                        external_ip: Some(CompactIp::from(IpAddr::from(Ipv4Addr::LOCALHOST))),
+                        peers: Default::default(),
+                        peers6: Default::default(),
+                    })
+                    .unwrap(),
+                );
+            });
+            let client = HttpClient::new(
+                TrackerHandle::new(),
+                Url::from_str(server.url("/announce").as_str()).unwrap(),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+
+            // send a pause announcement
+            let result = client
+                .announce(Announcement {
+                    info_hash,
+                    peer_id: PeerId::new(),
+                    peer_port: 6881,
+                    event: AnnounceEvent::Paused,
+                    bytes_completed: 1024,
+                    bytes_remaining: 96000,
+                })
+                .await
+                .expect("expected the announcement to succeed");
+            assert_eq!(1200, result.interval_seconds);
+
+            // verify that the pause event is not supported
+            let result = *client.supports_pause_event.lock().await;
+            assert_eq!(
+                false, result,
+                "expected the pause event support to be disabled"
+            );
         }
     }
 }
