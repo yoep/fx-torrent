@@ -1235,6 +1235,98 @@ mod tests {
         }
     }
 
+    mod interested {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_interested_pieces() {
+            init_logger!();
+            let pieces = vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+                create_piece(3, 512),
+            ];
+            let pool = DataPool::new();
+
+            // set the pieces with priorities in the pool
+            pool.set_pieces(pieces).await;
+            pool.set_piece_priorities(&[(0, PiecePriority::None), (1, PiecePriority::None)])
+                .await;
+
+            let result = pool.interested_pieces().await;
+            assert_eq!(
+                vec![2, 3],
+                result,
+                "expected the interested pieces to match"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_interested_size() {
+            init_logger!();
+            let pieces = vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+                create_piece(3, 512),
+            ];
+            let pool = DataPool::new();
+
+            // set the pieces with priorities in the pool
+            pool.set_pieces(pieces).await;
+            pool.set_piece_priorities(&[(0, PiecePriority::None), (1, PiecePriority::None)])
+                .await;
+
+            let result = pool.interested_size().await;
+            assert_eq!(1_536, result, "expected the interested size to match");
+        }
+    }
+
+    mod completed {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_completed_pieces() {
+            init_logger!();
+            let pieces = vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+                create_piece(3, 512),
+            ];
+            let pool = DataPool::new();
+
+            // set the pieces with priorities in the pool
+            pool.set_pieces(pieces).await;
+            pool.set_completed(&0, true).await;
+            pool.set_completed(&1, true).await;
+
+            let result = pool.completed_pieces().await;
+            assert_eq!(vec![0, 1], result, "expected the completed pieces to match");
+        }
+
+        #[tokio::test]
+        async fn test_completed_size() {
+            init_logger!();
+            let pieces = vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+                create_piece(3, 512),
+            ];
+            let pool = DataPool::new();
+
+            // set the pieces with priorities in the pool
+            pool.set_pieces(pieces).await;
+            pool.set_completed(&1, true).await;
+            pool.set_completed(&3, true).await;
+
+            let result = pool.completed_size().await;
+            assert_eq!(1_536, result, "expected the completed size to match");
+        }
+    }
+
     mod is_end_game {
         use super::*;
 
