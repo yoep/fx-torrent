@@ -14,6 +14,7 @@ use tokio::time::timeout;
 
 const CONNECTION_FAILURE_THRESHOLD: usize = 3;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The failure reason when adding a peer failed.
 #[derive(Debug, Error, PartialEq)]
@@ -35,6 +36,8 @@ pub struct PeerPool {
     peers: HashMap<SocketAddr, PeerInfo>,
     /// The maximum amount of peers allowed in the pool
     limit: usize,
+    /// The last time the peer pool was cleaned.
+    last_cleanup: Instant,
 }
 
 impl PeerPool {
@@ -44,6 +47,7 @@ impl PeerPool {
             handle,
             peers: Default::default(),
             limit: pool_limit,
+            last_cleanup: Instant::now(),
         }
     }
 
@@ -258,6 +262,7 @@ impl PeerPool {
     /// Remove any closed or invalid peers from the pool.
     /// The cleanup tries to close the peer connection within a timely manner if possible.
     pub async fn clean(&mut self) -> Vec<Peer> {
+        trace!("Torrent {} is executing peer cleanup cycle", self);
         let mut total_cleaned_peers = 0;
         let mut removed_peers = vec![];
 
@@ -290,26 +295,24 @@ impl PeerPool {
         }
 
         debug!("Cleaned a total of {} peers", total_cleaned_peers);
+        self.last_cleanup = Instant::now();
         removed_peers
     }
 
     /// Execute a period tick within the peer pool.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn tick(&mut self) {
-        for info in self.peers.values_mut() {
-            let conn = match info.connection.as_mut() {
-                None => continue,
-                Some(conn) => conn,
-            };
-            while let Ok(event) = conn.receiver.try_recv() {
-                match &*event {
-                    PeerEvent::StateChanged(state) => conn.state = *state,
-                    PeerEvent::SeedStateChanged(is_seed) => info.is_seed = *is_seed,
-                    PeerEvent::Closed(_) => conn.state = PeerState::Closed,
-                    _ => {}
-                }
-            }
+        let start_time = Instant::now();
+        self.process_peer_events();
+        if self.last_cleanup.elapsed() >= CLEANUP_INTERVAL {
+            self.clean().await;
         }
+        let elapsed = start_time.elapsed();
+        trace!(
+            "Torrent {} pool tick took {:.3}ms",
+            self,
+            elapsed.as_secs_f64() * 1000.0
+        );
     }
 
     /// Shut down the peer pool, closing all peer connections.
@@ -346,6 +349,24 @@ impl PeerPool {
             })
             .collect_vec();
         futures::future::join_all(futures).await;
+    }
+
+    /// Process the pending peer events for active connections.
+    fn process_peer_events(&mut self) {
+        for info in self.peers.values_mut() {
+            let conn = match info.connection.as_mut() {
+                None => continue,
+                Some(conn) => conn,
+            };
+            while let Ok(event) = conn.receiver.try_recv() {
+                match &*event {
+                    PeerEvent::StateChanged(state) => conn.state = *state,
+                    PeerEvent::SeedStateChanged(is_seed) => info.is_seed = *is_seed,
+                    PeerEvent::Closed(_) => conn.state = PeerState::Closed,
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// Try to find the peer info for the given address.

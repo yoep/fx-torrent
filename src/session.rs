@@ -520,19 +520,23 @@ impl Session for FxTorrentSession {
     }
 
     async fn torrent_health_from_uri(&self, uri: &str) -> Result<TorrentHealth> {
-        trace!("Retrieving torrent health for {:?}", uri);
+        trace!(
+            "Session {} is retrieving torrent health for {:?}",
+            self,
+            uri
+        );
         let torrent_info = self.resolve(uri)?;
         self.torrent_health_from_info(&torrent_info).await
     }
 
     fn resolve(&self, uri: &str) -> Result<TorrentMetadata> {
         if Magnet::has_magnet_scheme(uri) {
-            trace!("Resolving torrent magnet uri {}", uri);
+            trace!("Session {} is resolving torrent magnet uri {}", self, uri);
             Magnet::from_str(uri)
                 .map_err(Into::<TorrentError>::into)
                 .and_then(|e| TorrentMetadata::try_from(e))
         } else {
-            trace!("Resolving torrent path uri {}", uri);
+            trace!("Session {} is resolving torrent path uri {}", self, uri);
             PathBuf::from_str(uri)
                 .map_err(|e| TorrentError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))
                 .and_then(|filepath| {
@@ -555,7 +559,7 @@ impl Session for FxTorrentSession {
     }
 
     async fn fetch_magnet(&self, magnet_uri: &str, timeout: Duration) -> Result<TorrentMetadata> {
-        trace!("Trying to fetch magnet {}", magnet_uri);
+        trace!("Session {} is trying to fetch magnet {}", self, magnet_uri);
         let torrent_info = self.resolve(magnet_uri)?;
 
         {

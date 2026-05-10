@@ -345,9 +345,8 @@ impl TrackerClient {
             .unwrap_or_default();
         let elapsed = start_time.elapsed();
         trace!(
-            "Announced to all trackers in {}.{:03} seconds",
-            elapsed.as_secs(),
-            elapsed.subsec_millis()
+            "Announced to all trackers in {:.3} seconds",
+            elapsed.as_secs_f64()
         );
         result
     }

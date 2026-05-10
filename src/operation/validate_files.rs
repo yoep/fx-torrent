@@ -217,12 +217,11 @@ impl FileValidationOperation {
         let _ = ready_sender.send(());
         let time_taken = start.elapsed();
         info!(
-            "Torrent {} completed {} file validation(s) ({} valid chunks) in {}.{:03} seconds",
+            "Torrent {} completed {} file validation(s) ({} valid chunks) in {:.3} seconds",
             torrent,
             num_of_files,
             valid_pieces.len(),
-            time_taken.as_secs(),
-            time_taken.subsec_millis()
+            time_taken.as_secs_f64()
         );
     }
 }
