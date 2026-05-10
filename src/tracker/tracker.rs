@@ -33,17 +33,26 @@ const DISABLE_TRACKER_AFTER_FAILURES: usize = 6;
 /// parameter in the announce URL.
 #[repr(u8)]
 #[derive(Debug, Display, Copy, Clone, PartialEq)]
+#[display("{}", self.as_str())]
 pub enum AnnounceEvent {
-    #[display("none")]
     None = 0,
-    #[display("completed")]
     Completed = 1,
-    #[display("started")]
     Started = 2,
-    #[display("stopped")]
     Stopped = 3,
-    #[display("paused")]
     Paused = 4,
+}
+
+impl AnnounceEvent {
+    /// Returns the string slice value of the announce event.
+    pub fn as_str(&self) -> &str {
+        match self {
+            AnnounceEvent::None => "none",
+            AnnounceEvent::Completed => "completed",
+            AnnounceEvent::Started => "started",
+            AnnounceEvent::Stopped => "stopped",
+            AnnounceEvent::Paused => "paused",
+        }
+    }
 }
 
 impl FromStr for AnnounceEvent {

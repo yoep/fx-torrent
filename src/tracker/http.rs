@@ -9,13 +9,16 @@ use itertools::Itertools;
 use log::{debug, trace};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
 use reqwest::redirect::Policy;
-use reqwest::{Client, Error, Response};
+use reqwest::{Client, Error, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::io;
 use std::net::IpAddr;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::select;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -28,49 +31,6 @@ const URL_ENCODE_RESERVED: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'~')
     .remove(b'.');
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HttpResponse {
-    #[serde(rename = "failure reason", default)]
-    pub failure_reason: Option<String>,
-    #[serde(default)]
-    pub interval: Option<u32>,
-    /// The tracker id
-    #[allow(dead_code)]
-    #[serde(rename = "tracker id", default)]
-    pub tracker_id: Option<String>,
-    /// The total number of peers which have completed the torrent
-    #[serde(default)]
-    pub complete: Option<u64>,
-    /// The total number of peers which have not yet completed the torrent
-    #[serde(default)]
-    pub incomplete: Option<u64>,
-    /// The external ip address of the torrent detected by the tracker (see BEP24).
-    #[serde(default, rename = "external ip")]
-    pub external_ip: Option<CompactIp>,
-    #[serde(default)]
-    pub peers: CompactIpv4Addrs,
-    /// The IPv6 peers of the torrent (BEP7).
-    #[serde(default, skip_serializing_if = "CompactIpv6Addrs::is_empty")]
-    pub peers6: CompactIpv6Addrs,
-}
-
-impl From<HttpResponse> for AnnouncementResponse {
-    fn from(value: HttpResponse) -> Self {
-        Self {
-            interval_seconds: value.interval.unwrap_or(0) as u64,
-            external_ip: value.external_ip.map(IpAddr::from),
-            leechers: value.incomplete.unwrap_or(0),
-            seeders: value.complete.unwrap_or(0),
-            peers: value
-                .peers
-                .into_iter()
-                .map(|e| e.into())
-                .chain(value.peers6.into_iter().map(|e| e.into()))
-                .collect(),
-        }
-    }
-}
-
 /// The HTTP/HTTPS tracker connection protocol implementation.
 #[derive(Debug, Display)]
 #[display("{} ({})", handle, url)]
@@ -80,6 +40,7 @@ pub struct HttpClient {
     /// The base url of the http tracker
     url: Url,
     client: Client,
+    supports_pause_event: Mutex<bool>,
     metrics: ConnectionMetrics,
     cancellation_token: CancellationToken,
 }
@@ -104,15 +65,21 @@ impl HttpClient {
             handle,
             url,
             client,
+            supports_pause_event: Mutex::new(true),
             metrics: Default::default(),
             cancellation_token: Default::default(),
         })
     }
 
-    fn create_announce_url(&self, announce: Announcement) -> Result<Url> {
+    async fn create_announce_url(&self, announce: Announcement) -> Result<Url> {
         let mut url = self.url.clone();
         let info_hash = announce.info_hash.short_info_hash_bytes();
-        let event = announce.event;
+        let supports_pause = *self.supports_pause_event.lock().await;
+        let event = match announce.event {
+            AnnounceEvent::None => "",
+            AnnounceEvent::Paused if !supports_pause => "",
+            _ => announce.event.as_str(),
+        };
         let url_encoded_hash =
             percent_encoding::percent_encode(info_hash.as_slice(), URL_ENCODE_RESERVED).to_string();
 
@@ -123,7 +90,7 @@ impl HttpClient {
             .append_pair("uploaded", "0")
             .append_pair("downloaded", announce.bytes_completed.to_string().as_str())
             .append_pair("left", announce.bytes_remaining.to_string().as_str())
-            .append_pair("event", event.to_string().as_str())
+            .append_pair("event", event)
             .append_pair("key", "0")
             .append_pair("compact", "1")
             .append_pair("numwant", "200")
@@ -150,53 +117,6 @@ impl HttpClient {
         Ok(Url::parse(url_value.as_str())?)
     }
 
-    async fn process_announce_response(
-        &self,
-        response: std::result::Result<Response, Error>,
-    ) -> Result<AnnouncementResponse> {
-        let response = response?;
-        let status_code = response.status();
-        let bytes = response.bytes().await?;
-        self.metrics.bytes_in.inc_by(bytes.len() as u64);
-
-        // check the response status code from the http tracker
-        // if it's unsuccessful, we don't try to parse the response body
-        if !status_code.is_success() {
-            debug!(
-                "Http tracker {} received invalid status code {}",
-                self, status_code
-            );
-            trace!(
-                "Http tracker {} response: {}",
-                self,
-                String::from_utf8_lossy(bytes.as_ref())
-            );
-            return Err(TrackerError::AnnounceError(format!(
-                "received invalid status code {}",
-                status_code
-            )));
-        }
-
-        trace!(
-            "Http tracker {} received {} bytes, {}",
-            self,
-            bytes.len(),
-            String::from_utf8_lossy(&bytes)
-        );
-        let message = bencode::from_bytes::<HttpResponse>(bytes.as_ref())?;
-        debug!(
-            "Http tracker {} received announce response, {:?}",
-            self, message
-        );
-
-        // check if the response message contains an error
-        if let Some(failure) = message.failure_reason {
-            return Err(TrackerError::AnnounceError(failure));
-        }
-
-        Ok(message.into())
-    }
-
     async fn process_scrape_response(
         &self,
         response: std::result::Result<Response, Error>,
@@ -216,21 +136,93 @@ impl HttpClient {
 
         Ok(message)
     }
+
+    fn make_announcement<'a>(
+        &'a self,
+        announce: Announcement,
+    ) -> Pin<Box<dyn Future<Output = Result<AnnouncementResponse>> + Send + 'a>> {
+        Box::pin(async move {
+            let url = self.create_announce_url(announce.clone()).await?;
+
+            trace!("Http tracker {} is sending request {}", self, url);
+            let response = select! {
+                _ = self.cancellation_token.cancelled() => {
+                    self.metrics.timeouts.inc();
+                    return Err(TrackerError::Io(io::Error::new(io::ErrorKind::TimedOut, "request timed out")));
+                },
+                response = self.client.get(url.clone()).send() => response,
+            }?;
+
+            let status_code = response.status();
+            let bytes = response.bytes().await?;
+            self.metrics.bytes_in.inc_by(bytes.len() as u64);
+
+            // check the response status code from the http tracker
+            // if it's unsuccessful, we don't try to parse the response body
+            if !status_code.is_success() {
+                debug!(
+                    "Http tracker {} received invalid status code {}",
+                    self, status_code
+                );
+                trace!(
+                    "Http tracker {} response: {}",
+                    self,
+                    String::from_utf8_lossy(bytes.as_ref())
+                );
+                return self.on_announce_error(announce, status_code).await;
+            }
+
+            trace!(
+                "Http tracker {} received {} bytes, {}",
+                self,
+                bytes.len(),
+                String::from_utf8_lossy(&bytes)
+            );
+            let message = bencode::from_bytes::<HttpResponse>(bytes.as_ref())?;
+            debug!(
+                "Http tracker {} received announce response, {:?}",
+                self, message
+            );
+
+            // check if the response message contains an error
+            if let Some(failure) = message.failure_reason {
+                return Err(TrackerError::AnnounceError(failure));
+            }
+
+            Ok(message.into())
+        })
+    }
+
+    async fn on_announce_error(
+        &self,
+        announce: Announcement,
+        status_code: StatusCode,
+    ) -> Result<AnnouncementResponse> {
+        // not all trackers support the `paused` event value
+        // if this is the case, we disable the support for it (it will be sent as empty value instead)
+        {
+            let mut supports_pause_event = self.supports_pause_event.lock().await;
+            if announce.event == AnnounceEvent::Paused
+                && status_code == StatusCode::BAD_REQUEST
+                && *supports_pause_event
+            {
+                *supports_pause_event = false;
+                drop(supports_pause_event);
+                return self.make_announcement(announce).await;
+            }
+        }
+
+        Err(TrackerError::AnnounceError(format!(
+            "received invalid status code {}",
+            status_code
+        )))
+    }
 }
 
 #[async_trait]
 impl TrackerClientConnection for HttpClient {
     async fn announce(&self, announce: Announcement) -> Result<AnnouncementResponse> {
-        let url = self.create_announce_url(announce)?;
-
-        trace!("Http tracker {} is sending request {}", self, url);
-        select! {
-            _ = self.cancellation_token.cancelled() => {
-                self.metrics.timeouts.inc();
-                Err(TrackerError::Io(io::Error::new(io::ErrorKind::TimedOut, "request timed out")))
-            },
-            response = self.client.get(url.clone()).send() => self.process_announce_response(response).await,
-        }
+        self.make_announcement(announce).await
     }
 
     async fn scrape(&self, hashes: &[InfoHash]) -> Result<ScrapeResult> {
@@ -636,6 +628,49 @@ impl FromStr for AnnounceParams {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HttpResponse {
+    #[serde(rename = "failure reason", default)]
+    pub failure_reason: Option<String>,
+    #[serde(default)]
+    pub interval: Option<u32>,
+    /// The tracker id
+    #[allow(dead_code)]
+    #[serde(rename = "tracker id", default)]
+    pub tracker_id: Option<String>,
+    /// The total number of peers which have completed the torrent
+    #[serde(default)]
+    pub complete: Option<u64>,
+    /// The total number of peers which have not yet completed the torrent
+    #[serde(default)]
+    pub incomplete: Option<u64>,
+    /// The external ip address of the torrent detected by the tracker (see BEP24).
+    #[serde(default, rename = "external ip")]
+    pub external_ip: Option<CompactIp>,
+    #[serde(default)]
+    pub peers: CompactIpv4Addrs,
+    /// The IPv6 peers of the torrent (BEP7).
+    #[serde(default, skip_serializing_if = "CompactIpv6Addrs::is_empty")]
+    pub peers6: CompactIpv6Addrs,
+}
+
+impl From<HttpResponse> for AnnouncementResponse {
+    fn from(value: HttpResponse) -> Self {
+        Self {
+            interval_seconds: value.interval.unwrap_or(0) as u64,
+            external_ip: value.external_ip.map(IpAddr::from),
+            leechers: value.incomplete.unwrap_or(0),
+            seeders: value.complete.unwrap_or(0),
+            peers: value
+                .peers
+                .into_iter()
+                .map(|e| e.into())
+                .chain(value.peers6.into_iter().map(|e| e.into()))
+                .collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,7 +720,7 @@ mod tests {
         .await
         .unwrap();
 
-        let url = connection.create_announce_url(announce).unwrap();
+        let url = connection.create_announce_url(announce).await.unwrap();
         let result = url.query().unwrap();
 
         info!("Got url parameters {}", result);
