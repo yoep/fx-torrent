@@ -287,6 +287,7 @@ where
     }
 
     /// Run the main loop of the reader.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn run(&mut self) {
         // as initial message, try to read the handshake
         let cancellation_token = self.cancellation_token.clone();

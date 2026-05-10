@@ -1,6 +1,6 @@
 use crate::tracker::{
     AnnounceEvent, Announcement, AnnouncementResponse, ConnectionMetrics, ScrapeResult,
-    TrackerClientConnection, TrackerHandle,
+    TrackerHandle,
 };
 use crate::tracker::{Result, TrackerError};
 use crate::InfoHash;
@@ -32,14 +32,16 @@ const PACKET_SIZE: usize = 16 * 1024;
 pub struct UdpConnection {
     handle: TrackerHandle,
     session: UdpConnectionSession,
-    timeout: Duration,
     metrics: ConnectionMetrics,
     cancellation_token: CancellationToken,
 }
 
 impl UdpConnection {
     /// Create a new udp tracker client connection.
-    /// It returns an error when the connection could not be established.
+    /// It returns an error when no connection could be established to any of the given addresses.
+    ///
+    /// The `timeout` is applied to each address when trying to establish a new connection.
+    /// This means that the total amount of time spent trying to connect to all addresses is `timeout * addrs.len()`.
     pub async fn new(
         handle: TrackerHandle,
         addrs: &[SocketAddr],
@@ -64,7 +66,6 @@ impl UdpConnection {
                 transaction_id: Self::generate_transaction_id(),
                 socket,
             },
-            timeout,
             metrics: Default::default(),
             cancellation_token: Default::default(),
         };
@@ -93,6 +94,67 @@ impl UdpConnection {
         }
 
         Ok(instance)
+    }
+
+    /// Announce the given torrent hash to the tracker.
+    /// This will send the known peer info to the tracker with the type of announcement.
+    pub async fn announce(&self, announce: Announcement) -> Result<AnnouncementResponse> {
+        self.do_announce(announce).await
+    }
+
+    /// Scrape the tracker for metrics for one or more info hashes.
+    pub async fn scrape(&self, hashes: &[InfoHash]) -> Result<ScrapeResult> {
+        self.send(RequestPayload::Scrape(ScrapeRequest {
+            hashes: hashes.to_vec(),
+        }))
+        .await?;
+        let response = self.read().await?;
+        match response.payload {
+            ResponsePayload::Scrape(response) => {
+                trace!(
+                    "Udp tracker {} is parsing scrape response {:?}",
+                    self,
+                    response
+                );
+                let mut result = ScrapeResult::default();
+                for (index, response) in response.metrics.into_iter().enumerate() {
+                    if let Some(hash) = hashes.get(index) {
+                        result.files.insert(
+                            hash.clone(),
+                            crate::tracker::tracker::ScrapeFileMetrics {
+                                complete: response.seeders,
+                                incomplete: response.leechers,
+                                downloaded: response.completed,
+                            },
+                        );
+                    } else {
+                        return Err(TrackerError::Parse(format!(
+                            "Udp tracker {} scrape response exceeded {}/{} expected hashes",
+                            self,
+                            index,
+                            hashes.len()
+                        )));
+                    }
+                }
+                Ok(result)
+            }
+            ResponsePayload::Error(e) => Err(TrackerError::AnnounceError(e)),
+            _ => Err(TrackerError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                format!("expected Response::Scrape, but got {:?} instead", response),
+            ))),
+        }
+    }
+
+    /// Returns the connection metrics.
+    pub fn metrics(&self) -> &ConnectionMetrics {
+        &self.metrics
+    }
+
+    /// Close the tracker connection and cancel any pending tasks.
+    pub fn close(&self) {
+        trace!("Closing udp connection");
+        self.cancellation_token.cancel();
     }
 
     /// Try to send the given request message to the tracker.
@@ -132,12 +194,15 @@ impl UdpConnection {
             self.session.socket.peer_addr()?
         );
         let mut buffer = vec![0; PACKET_SIZE];
-        let buffer_size = tokio::time::timeout(self.timeout, self.session.socket.recv(&mut buffer))
-            .await?
-            .map_err(|e| {
-                self.metrics.timeouts.inc();
-                TrackerError::from(e)
-            })?;
+        let buffer_size = tokio::time::timeout(
+            Duration::from_secs(3),
+            self.session.socket.recv(&mut buffer),
+        )
+        .await?
+        .map_err(|e| {
+            self.metrics.timeouts.inc();
+            TrackerError::from(e)
+        })?;
 
         // make sure we shrink the buffer to the expected size before returning
         self.metrics.bytes_in.inc_by(buffer_size as u64);
@@ -256,65 +321,6 @@ impl UdpConnection {
             io::ErrorKind::ConnectionRefused,
             format!("failed to connect to {:?}", addrs),
         )))
-    }
-}
-
-#[async_trait]
-impl TrackerClientConnection for UdpConnection {
-    async fn announce(&self, announce: Announcement) -> Result<AnnouncementResponse> {
-        self.do_announce(announce).await
-    }
-
-    async fn scrape(&self, hashes: &[InfoHash]) -> Result<ScrapeResult> {
-        self.send(RequestPayload::Scrape(ScrapeRequest {
-            hashes: hashes.to_vec(),
-        }))
-        .await?;
-        let response = self.read().await?;
-        match response.payload {
-            ResponsePayload::Scrape(response) => {
-                trace!(
-                    "Udp tracker {} is parsing scrape response {:?}",
-                    self,
-                    response
-                );
-                let mut result = ScrapeResult::default();
-                for (index, response) in response.metrics.into_iter().enumerate() {
-                    if let Some(hash) = hashes.get(index) {
-                        result.files.insert(
-                            hash.clone(),
-                            crate::tracker::tracker::ScrapeFileMetrics {
-                                complete: response.seeders,
-                                incomplete: response.leechers,
-                                downloaded: response.completed,
-                            },
-                        );
-                    } else {
-                        return Err(TrackerError::Parse(format!(
-                            "Udp tracker {} scrape response exceeded {}/{} expected hashes",
-                            self,
-                            index,
-                            hashes.len()
-                        )));
-                    }
-                }
-                Ok(result)
-            }
-            ResponsePayload::Error(e) => Err(TrackerError::AnnounceError(e)),
-            _ => Err(TrackerError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                format!("expected Response::Scrape, but got {:?} instead", response),
-            ))),
-        }
-    }
-
-    fn metrics(&self) -> &ConnectionMetrics {
-        &self.metrics
-    }
-
-    fn close(&self) {
-        trace!("Closing udp connection");
-        self.cancellation_token.cancel();
     }
 }
 

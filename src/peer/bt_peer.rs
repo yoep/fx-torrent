@@ -1351,10 +1351,9 @@ impl PeerContext {
         }
         let elapsed = start.elapsed();
         trace!(
-            "Peer {} tick completed in {}.{:03}ms",
+            "Peer {} tick completed in {:.3}ms",
             self,
-            elapsed.as_millis(),
-            elapsed.subsec_micros()
+            elapsed.as_secs_f64() * 1000.0
         );
     }
 
@@ -2636,11 +2635,10 @@ impl PeerContext {
             let elapsed = start.elapsed();
             if elapsed > interval {
                 debug!(
-                    "Peer {} detected long extension {} tick, tick took {}.{:03}ms",
+                    "Peer {} detected long extension {} tick, tick took {:.3}ms",
                     self,
                     extension.name(),
-                    elapsed.as_millis(),
-                    elapsed.subsec_micros()
+                    elapsed.as_secs_f64() * 1000.0
                 );
             }
         }

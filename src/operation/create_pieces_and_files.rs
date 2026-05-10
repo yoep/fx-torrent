@@ -4,7 +4,8 @@ use crate::{
     File, InfoHash, Piece, PieceError, PieceIndex, TorrentContext, TorrentError, TorrentFileInfo,
     TorrentMetadataInfo, TorrentState,
 };
-use log::{debug, trace, warn};
+use log::{trace, warn};
+use std::time::Instant;
 
 #[derive(Debug)]
 pub struct CreatePiecesAndFilesOperation;
@@ -37,12 +38,15 @@ impl CreatePiecesAndFilesOperation {
     /// This operation can only be done when the metadata of the torrent is known.
     async fn create_pieces(&self, torrent: &mut TorrentContext) -> bool {
         torrent.update_state(TorrentState::Initializing).await;
+        let start_time = Instant::now();
         match self.try_create_pieces(torrent).await {
             Ok(pieces) => {
+                let elapsed = start_time.elapsed();
                 trace!(
-                    "Torrent {} created a total of {} pieces",
+                    "Torrent {} created a total of {} pieces in {:.3}ms",
                     torrent,
-                    pieces.len()
+                    pieces.len(),
+                    elapsed.as_secs_f64() * 1000.0,
                 );
                 torrent.update_pieces(pieces).await;
                 true
@@ -120,13 +124,17 @@ impl CreatePiecesAndFilesOperation {
     /// Create the torrent files information.
     /// This can only be executed when the torrent metadata is known.
     async fn create_files(&self, torrent: &TorrentContext) -> bool {
+        let start_time = Instant::now();
         match self.try_create_files(torrent).await {
             Ok(files) => {
                 let total_files = files.len();
+                let elapsed = start_time.elapsed();
                 torrent.update_files(files).await;
-                debug!(
-                    "Torrent {} created a total of {} file(s)",
-                    torrent, total_files
+                trace!(
+                    "Torrent {} created a total of {} file(s) in {:.3}ms",
+                    torrent,
+                    total_files,
+                    elapsed.as_secs_f64() * 1000.0
                 );
                 true
             }

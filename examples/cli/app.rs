@@ -18,7 +18,7 @@ use fx_torrent::operation::{
 use fx_torrent::{
     FxSessionCache, FxTorrentSession, Session, SessionConfig, SessionEvent, TorrentFlags,
 };
-use log::{error, warn};
+use log::{error, trace, warn};
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::layout::{Alignment, Layout, Rect};
 use ratatui::text::Line;
@@ -28,7 +28,7 @@ use std::fmt::Debug;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
@@ -295,6 +295,7 @@ impl App {
     }
 
     async fn add_torrent_uri(&mut self, uri: &str) {
+        let start_time = Instant::now();
         match self
             .session
             .add_torrent_from_uri(uri, self.settings.torrent_flags)
@@ -302,6 +303,12 @@ impl App {
         {
             Ok(torrent) => match torrent.metadata().await {
                 Ok(metadata) => {
+                    let elapsed = start_time.elapsed();
+                    trace!(
+                        "App created torrent {} in {:.3}ms",
+                        torrent,
+                        elapsed.as_secs_f64() * 1000.0
+                    );
                     let name = metadata
                         .info
                         .as_ref()

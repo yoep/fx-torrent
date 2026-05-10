@@ -1795,7 +1795,6 @@ impl TorrentContext {
         peer_discoveries: Vec<PeerDiscovery>,
     ) {
         let mut operations_tick = time::interval(TICK_INTERVAL);
-        let mut cleanup_interval = time::interval(Duration::from_secs(30));
 
         let mut peer_connections: FuturesUnordered<BoxFuture<'_, (usize, Option<PeerEntry>)>> =
             FuturesUnordered::new();
@@ -1824,9 +1823,6 @@ impl TorrentContext {
                     }
                 },
                 _ = operations_tick.tick() => self.on_tick(&mut operations, peer_discoveries.as_slice()).await,
-                _ = cleanup_interval.tick() => {
-                    self.clean_peers().await;
-                },
             }
         }
 
@@ -2554,6 +2550,7 @@ impl TorrentContext {
 
     /// Set the pieces of the torrent.
     pub(crate) async fn update_pieces(&self, pieces: Vec<Piece>) {
+        let start_time = Instant::now();
         let total_pieces = pieces.len();
         self.data_pool.set_pieces(pieces).await;
 
@@ -2590,7 +2587,13 @@ impl TorrentContext {
             );
         }
 
-        debug!("Torrent {} updated {} pieces", self, total_pieces);
+        let elapsed = start_time.elapsed();
+        debug!(
+            "Torrent {} updated {} pieces in {:.3}ms",
+            self,
+            total_pieces,
+            elapsed.as_secs_f64() * 1000.0
+        );
         self.update_interested_pieces_stats().await;
         self.invoke_event(TorrentEvent::PiecesChanged(total_pieces));
     }
@@ -2672,34 +2675,47 @@ impl TorrentContext {
     }
 
     /// Update the stats info of all interested pieces by the torrent.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn update_interested_pieces_stats(&self) {
-        let mut wanted_pieces = 0;
-        let mut wanted_completed_pieces = 0;
-        let mut wanted_size = 0;
-        let mut wanted_completed_size = 0;
+        let start_time = Instant::now();
+        let interested_pieces = self.data_pool.interested_pieces().await;
+        let len = interested_pieces.len() as u64;
 
-        {
-            for piece_index in self.data_pool.interested_pieces().await {
-                if let Some(piece) = self.data_pool.piece(&piece_index).await {
-                    wanted_pieces += 1;
-                    wanted_size += piece.length;
+        // calculate the wanted metrics
+        self.metrics.wanted_pieces.set(len);
+        let wanted_size = self.data_pool.interested_size().await as u64;
+        self.metrics.wanted_size.set(wanted_size);
 
-                    if piece.is_completed() {
-                        wanted_completed_pieces += 1;
-                        wanted_completed_size += piece.length;
-                    }
-                }
-            }
-        }
-
-        self.metrics.wanted_pieces.set(wanted_pieces);
+        // calculate the completed metrics
+        let wanted_completed_pieces = self
+            .data_pool
+            .completed_pieces()
+            .await
+            .into_iter()
+            .filter(|piece| interested_pieces.contains(piece))
+            .count() as u64;
         self.metrics
             .wanted_completed_pieces
             .set(wanted_completed_pieces);
-        self.metrics.wanted_size.set(wanted_size as u64);
+        let remaining_size = self
+            .data_pool
+            .wanted_pieces()
+            .await
+            .into_iter()
+            .map(|e| e.length as u64)
+            .sum();
+        // calculate the wanted completed size,
+        // by subtracting the remaining size from the wanted size
         self.metrics
             .wanted_completed_size
-            .set(wanted_completed_size as u64);
+            .set(wanted_size.saturating_sub(remaining_size));
+
+        let elapsed = start_time.elapsed();
+        trace!(
+            "Torrent {} updated interested pieces stats in {:.3}ms",
+            self,
+            elapsed.as_secs_f64() * 1000.0
+        );
     }
 
     /// Cancel all currently queued pending requests of the torrent.
@@ -2745,6 +2761,7 @@ impl TorrentContext {
     /// It returns `true` when the main loop of the context needs to be stopped, else `false`.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub(crate) async fn on_command(&mut self, command: TorrentCommand) {
+        trace!("Torrent {} is executing {:?}", self, command);
         match command {
             TorrentCommand::PeerPort { response } => {
                 response.send(self.peer_port);
@@ -3375,16 +3392,6 @@ impl TorrentContext {
         Ok(buffer)
     }
 
-    /// Cleanup the peer resources which have been closed or are no longer valid.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn clean_peers(&mut self) {
-        trace!("Torrent {} is executing peer cleanup cycle", self);
-        for peer in self.peer_pool.clean().await {
-            self.callbacks
-                .invoke(TorrentEvent::PeerDisconnected(peer.client_info().clone()));
-        }
-    }
-
     /// Invoke the given torrent event for all registered callbacks.
     pub(crate) fn invoke_event(&self, event: TorrentEvent) {
         self.callbacks.invoke(event)
@@ -3436,7 +3443,15 @@ impl TorrentContext {
         peer_discoveries: &[PeerDiscovery],
     ) {
         for operation in operations.iter_mut() {
+            let start_time = Instant::now();
             let execution_result = operation.execute(self, peer_discoveries).await;
+            let elapsed_time = start_time.elapsed();
+            trace!(
+                "Torrent {} \"{}\" took {:.3}ms",
+                self,
+                operation.name(),
+                elapsed_time.as_secs_f64() * 1000.0
+            );
             if execution_result == TorrentOperationResult::Stop {
                 break;
             }
@@ -3555,13 +3570,13 @@ mod tests {
             assert_ne!(0, result.peers.len(), "expected peers to have been found");
         }
 
-        #[tokio::test]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn test_scrape() {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
             let tracker_server = TrackerServer::new().await.unwrap();
-            let tracker_manager = TrackerClient::new(Duration::from_secs(1));
+            let tracker_manager = TrackerClient::new(Duration::from_secs(2));
             let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,

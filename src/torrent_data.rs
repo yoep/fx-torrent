@@ -275,32 +275,52 @@ impl DataPool {
     /// Returns the piece indexes in which the torrent is interested.
     /// These are the pieces that don't have [PiecePriority::None] as a priority.
     pub async fn interested_pieces(&self) -> Vec<PieceIndex> {
-        let rx = self
-            .sender
+        self.sender
             .send(|tx| DataPoolCommand::InterestedPieces { response: tx })
-            .await;
-        rx.await.unwrap_or_default()
+            .await
+            .await
+            .unwrap_or_default()
     }
 
     /// Returns the amount of bytes in which the torrent is interested.
     pub async fn interested_size(&self) -> usize {
-        let rx = self
-            .sender
+        self.sender
             .send(|tx| DataPoolCommand::InterestedSize { response: tx })
-            .await;
-        rx.await.unwrap_or_default()
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Returns the piece indexes which have completed downloading.
+    /// This might include pieces with [PiecePriority::None], if they've been downloaded in the past.
+    pub async fn completed_pieces(&self) -> Vec<PieceIndex> {
+        self.sender
+            .send(|tx| DataPoolCommand::CompletedPieces { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Returns the amount of bytes which have completed downloading.
+    /// This might include pieces with [PiecePriority::None], if they've been downloaded in the past.
+    pub async fn completed_size(&self) -> usize {
+        self.sender
+            .send(|tx| DataPoolCommand::CompletedSize { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
     }
 
     /// Returns `true` if the given piece index is wanted by the torrent and not yet completed, else `false`.
     pub async fn is_piece_wanted(&self, piece_index: &PieceIndex) -> bool {
-        let rx = self
-            .sender
+        self.sender
             .send(|tx| DataPoolCommand::IsPieceWanted {
                 index: *piece_index,
                 response: tx,
             })
-            .await;
-        rx.await.unwrap_or_default()
+            .await
+            .await
+            .unwrap_or_default()
     }
 
     /// Returns the pieces which are still wanted (need to be downloaded) by the torrent.
@@ -432,6 +452,12 @@ enum DataPoolCommand {
     InterestedSize {
         response: Reply<usize>,
     },
+    CompletedPieces {
+        response: Reply<Vec<PieceIndex>>,
+    },
+    CompletedSize {
+        response: Reply<usize>,
+    },
     IsPieceWanted {
         index: PieceIndex,
         response: Reply<bool>,
@@ -482,6 +508,7 @@ impl InnerDataPool {
         }
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn run(&mut self, mut receiver: ChannelReceiver<DataPoolCommand>) {
         while let Some(command) = receiver.recv().await {
             match command {
@@ -565,6 +592,12 @@ impl InnerDataPool {
                 }
                 DataPoolCommand::InterestedSize { response } => {
                     response.send(self.interested_size());
+                }
+                DataPoolCommand::CompletedPieces { response } => {
+                    response.send(self.completed_pieces());
+                }
+                DataPoolCommand::CompletedSize { response } => {
+                    response.send(self.completed_size());
                 }
                 DataPoolCommand::IsPieceWanted { index, response } => {
                     response.send(self.is_piece_wanted(&index));
@@ -722,6 +755,25 @@ impl InnerDataPool {
             .iter()
             .filter(|(_, piece)| piece.priority != PiecePriority::None)
             .map(|(_, piece)| piece.len())
+            .sum()
+    }
+
+    fn completed_pieces(&self) -> Vec<PieceIndex> {
+        self.completed_pieces
+            .iter()
+            .enumerate()
+            .filter(|(_, completed)| *completed)
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn completed_size(&self) -> usize {
+        self.completed_pieces
+            .iter()
+            .enumerate()
+            .filter(|(_, completed)| *completed)
+            .filter_map(|(index, _)| self.pieces.get(&index))
+            .map(|piece| piece.len())
             .sum()
     }
 
@@ -1180,6 +1232,98 @@ mod tests {
                     (i, priority)
                 })
                 .collect()
+        }
+    }
+
+    mod interested {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_interested_pieces() {
+            init_logger!();
+            let pieces = vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+                create_piece(3, 512),
+            ];
+            let pool = DataPool::new();
+
+            // set the pieces with priorities in the pool
+            pool.set_pieces(pieces).await;
+            pool.set_piece_priorities(&[(0, PiecePriority::None), (1, PiecePriority::None)])
+                .await;
+
+            let result = pool.interested_pieces().await;
+            assert_eq!(
+                vec![2, 3],
+                result,
+                "expected the interested pieces to match"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_interested_size() {
+            init_logger!();
+            let pieces = vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+                create_piece(3, 512),
+            ];
+            let pool = DataPool::new();
+
+            // set the pieces with priorities in the pool
+            pool.set_pieces(pieces).await;
+            pool.set_piece_priorities(&[(0, PiecePriority::None), (1, PiecePriority::None)])
+                .await;
+
+            let result = pool.interested_size().await;
+            assert_eq!(1_536, result, "expected the interested size to match");
+        }
+    }
+
+    mod completed {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_completed_pieces() {
+            init_logger!();
+            let pieces = vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+                create_piece(3, 512),
+            ];
+            let pool = DataPool::new();
+
+            // set the pieces with priorities in the pool
+            pool.set_pieces(pieces).await;
+            pool.set_completed(&0, true).await;
+            pool.set_completed(&1, true).await;
+
+            let result = pool.completed_pieces().await;
+            assert_eq!(vec![0, 1], result, "expected the completed pieces to match");
+        }
+
+        #[tokio::test]
+        async fn test_completed_size() {
+            init_logger!();
+            let pieces = vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+                create_piece(3, 512),
+            ];
+            let pool = DataPool::new();
+
+            // set the pieces with priorities in the pool
+            pool.set_pieces(pieces).await;
+            pool.set_completed(&1, true).await;
+            pool.set_completed(&3, true).await;
+
+            let result = pool.completed_size().await;
+            assert_eq!(1_536, result, "expected the completed size to match");
         }
     }
 

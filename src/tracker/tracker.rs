@@ -1,18 +1,16 @@
 use crate::metrics::Metric;
 use crate::peer::PeerId;
-use crate::tracker::http::HttpClient;
-use crate::tracker::udp::UdpConnection;
-use crate::tracker::{ConnectionMetrics, Result, TrackerError, TrackerMetrics};
+use crate::tracker::HttpClient;
+use crate::tracker::UdpConnection;
+use crate::tracker::{Connection, Result, TrackerError, TrackerMetrics};
 use crate::InfoHash;
-use async_trait::async_trait;
 use derive_more::Display;
 use fx_handle::Handle;
-use itertools::Either;
+use itertools::Itertools;
 use log::{debug, trace};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Sub;
 use std::str::FromStr;
@@ -20,12 +18,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::lookup_host;
 use tokio::sync::{Mutex, RwLock};
-use tokio::{select, time};
 use url::Url;
 
-const DEFAULT_CONNECTION_TIMEOUT_SECONDS: u64 = 10;
+/// The timeout for each url connection attempt.
+const URL_CONNECTION_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_ANNOUNCEMENT_INTERVAL_SECONDS: u64 = 120;
 const DISABLE_TRACKER_AFTER_FAILURES: usize = 6;
+
+/// The tracker identifier handle
+pub type TrackerHandle = Handle;
 
 /// Kinds of tracker announce events.
 ///
@@ -33,17 +34,26 @@ const DISABLE_TRACKER_AFTER_FAILURES: usize = 6;
 /// parameter in the announce URL.
 #[repr(u8)]
 #[derive(Debug, Display, Copy, Clone, PartialEq)]
+#[display("{}", self.as_str())]
 pub enum AnnounceEvent {
-    #[display("none")]
     None = 0,
-    #[display("completed")]
     Completed = 1,
-    #[display("started")]
     Started = 2,
-    #[display("stopped")]
     Stopped = 3,
-    #[display("paused")]
     Paused = 4,
+}
+
+impl AnnounceEvent {
+    /// Returns the string slice value of the announce event.
+    pub fn as_str(&self) -> &str {
+        match self {
+            AnnounceEvent::None => "none",
+            AnnounceEvent::Completed => "completed",
+            AnnounceEvent::Started => "started",
+            AnnounceEvent::Stopped => "stopped",
+            AnnounceEvent::Paused => "paused",
+        }
+    }
 }
 
 impl FromStr for AnnounceEvent {
@@ -80,7 +90,7 @@ impl TryFrom<u8> for AnnounceEvent {
 ///
 /// This represents the most recent torrent state that should be shared with
 /// the tracker when making an announce request.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Announcement {
     /// The info hash of the torrent
     pub info_hash: InfoHash,
@@ -133,50 +143,6 @@ pub struct ScrapeFileMetrics {
     pub downloaded: u32,
 }
 
-/// Trait that defines the underlying tracker connection protocol.
-///
-/// This trait defines the methods required to interact with a tracker, including connecting to the tracker,
-/// announcing a peer and closing the connection.
-///
-/// Implementations of this trait will provide specific logic for different tracker connection protocols or types.
-#[async_trait]
-pub(crate) trait TrackerClientConnection: Debug + Send + Sync {
-    /// Announce the given torrent hash to the tracker.
-    /// This will send the known peer info to the tracker with the type of announcement.
-    ///
-    /// # Arguments
-    ///
-    /// * `info_hash` - The `InfoHash` of the torrent to announce.
-    /// * `event` - The announcement event type to announce.
-    ///
-    /// # Returns
-    ///
-    /// It returns the tracker announcement response for the given announcement.
-    async fn announce(&self, announcement: Announcement) -> Result<AnnouncementResponse>;
-
-    /// Scrape the tracker for metrics for one or more info hashes.
-    ///
-    /// # Arguments
-    ///
-    /// * `hashes` - The info hashes to retrieve the metrics from.
-    ///
-    /// # Returns
-    ///
-    /// It returns the scrape result from the tracker for the given hashes.  
-    async fn scrape(&self, hashes: &[InfoHash]) -> Result<ScrapeResult>;
-
-    /// Get the metric stats of the tracker connection.
-    fn metrics(&self) -> &ConnectionMetrics;
-
-    /// Close the tracker connection and cancel any pending tasks.
-    ///
-    /// This method should gracefully shut down the connection to the tracker and cancel any ongoing operations.
-    fn close(&self);
-}
-
-/// The tracker identifier handle
-pub type TrackerHandle = Handle;
-
 /// The state of a tracker.
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum TrackerState {
@@ -225,39 +191,18 @@ impl Tracker {
         TrackerBuilder::builder()
     }
 
-    pub async fn new(
-        url: Url,
-        tier: u8,
-        timeout: Duration,
-        announcement_interval_seconds: u64,
-    ) -> Result<Self> {
+    pub async fn new(url: Url, tier: u8, announcement_interval_seconds: u64) -> Result<Self> {
         trace!("Trying to create new tracker for {}", url);
         let handle = TrackerHandle::new();
-        let host = url
-            .host_str()
-            .ok_or(TrackerError::InvalidUrl("host is missing".to_string()))?;
-        let port = match url.port() {
-            Some(p) => p,
-            None => match url.scheme() {
-                "http" => 80,
-                "https" => 443,
-                _ => return Err(TrackerError::InvalidUrl("udp port is missing".to_string())),
-            },
-        };
-        let endpoints = lookup_host(format!("{}:{}", host, port))
-            .await?
-            .collect::<Vec<_>>();
-        let connection = Self::create_connection(handle, &url, &endpoints, timeout.clone()).await?;
+        let connection = Self::create_connection(handle, &url).await?;
 
-        trace!("Resolved tracker {} to {:?}", url, endpoints);
+        trace!("Tracker {} connection established to {}", handle, url);
         Ok(Self {
             inner: Arc::new(InnerTracker {
                 handle,
                 url,
                 tier,
-                endpoints,
                 connection,
-                timeout,
                 announcement_interval_seconds: RwLock::new(announcement_interval_seconds),
                 last_announcement: RwLock::new(
                     Instant::now().sub(Duration::from_secs(DEFAULT_ANNOUNCEMENT_INTERVAL_SECONDS)),
@@ -397,7 +342,7 @@ impl Tracker {
 
     /// Close the tracker connection.
     pub(crate) async fn close(&self) {
-        self.inner.connection.close();
+        self.inner.connection.close().await;
         *self.inner.state.lock().await = TrackerState::Closed;
     }
 
@@ -420,38 +365,47 @@ impl Tracker {
         }
     }
 
-    async fn create_connection(
-        handle: TrackerHandle,
-        url: &Url,
-        addrs: &[SocketAddr],
-        timeout: Duration,
-    ) -> Result<Box<dyn TrackerClientConnection>> {
-        trace!("Trying to connect to tracker at {}", url);
+    async fn create_connection(handle: TrackerHandle, url: &Url) -> Result<Connection> {
+        trace!(
+            "Tracker {} is trying to establish connection with {}",
+            handle,
+            url
+        );
         let scheme = url.scheme();
 
-        let future = match scheme {
-            "udp" => Either::Left(async {
-                match UdpConnection::new(handle, addrs, timeout).await {
-                    Ok(conn) => Ok(Box::new(conn) as Box<dyn TrackerClientConnection>),
-                    Err(err) => Err(err),
-                }
-            }),
-            "http" | "https" => Either::Right(async {
-                match HttpClient::new(handle, url.clone(), timeout).await {
-                    Ok(client) => Ok(Box::new(client) as Box<dyn TrackerClientConnection>),
-                    Err(err) => Err(err),
-                }
-            }),
-            _ => return Err(TrackerError::UnsupportedScheme(scheme.to_string())),
-        };
+        match scheme {
+            "udp" => {
+                let host = url
+                    .host_str()
+                    .ok_or(TrackerError::InvalidUrl("host is missing".to_string()))?;
+                let port = match url.port() {
+                    Some(p) => p,
+                    None => match url.scheme() {
+                        "http" => 80,
+                        "https" => 443,
+                        _ => {
+                            return Err(TrackerError::InvalidUrl("udp port is missing".to_string()))
+                        }
+                    },
+                };
+                trace!(
+                    "Tracker {} is performing DNS resolution for {}",
+                    handle,
+                    url
+                );
+                let addrs = lookup_host(format!("{}:{}", host, port))
+                    .await?
+                    .collect_vec();
 
-        let connection = select! {
-            _ = time::sleep(timeout) => return Err(TrackerError::Io(io::Error::new(io::ErrorKind::TimedOut, "connection timed out"))),
-            conn = future => conn,
-        }?;
-
-        debug!("Tracker {} connection established", url);
-        Ok(connection)
+                UdpConnection::new(handle, addrs.as_slice(), URL_CONNECTION_TIMEOUT)
+                    .await
+                    .map(|c| c.into())
+            }
+            "http" | "https" => HttpClient::new(handle, url.clone(), URL_CONNECTION_TIMEOUT)
+                .await
+                .map(|c| c.into()),
+            _ => Err(TrackerError::UnsupportedScheme(scheme.to_string())),
+        }
     }
 }
 
@@ -459,7 +413,6 @@ impl Tracker {
 pub struct TrackerBuilder {
     url: Option<Url>,
     tier: Option<u8>,
-    timeout: Option<Duration>,
     default_announcement_interval_seconds: Option<u64>,
 }
 
@@ -480,12 +433,6 @@ impl TrackerBuilder {
         self
     }
 
-    /// Set the query timeout of the tracker.
-    pub fn timeout(&mut self, timeout: Duration) -> &mut Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
     /// Try to create a new [Tracker] instance from this builder.
     ///
     /// Returns an error when the [TrackerBuilder::url] has not been set.
@@ -495,16 +442,12 @@ impl TrackerBuilder {
             .take()
             .ok_or(TrackerError::InvalidUrl("url is missing".to_string()))?;
         let tier = self.tier.take().unwrap_or(0);
-        let timeout = self
-            .timeout
-            .take()
-            .unwrap_or(Duration::from_secs(DEFAULT_CONNECTION_TIMEOUT_SECONDS));
         let default_announcement_interval_seconds = self
             .default_announcement_interval_seconds
             .take()
             .unwrap_or(DEFAULT_ANNOUNCEMENT_INTERVAL_SECONDS);
 
-        Tracker::new(url, tier, timeout, default_announcement_interval_seconds).await
+        Tracker::new(url, tier, default_announcement_interval_seconds).await
     }
 }
 
@@ -517,12 +460,8 @@ struct InnerTracker {
     url: Url,
     /// The tier of the tracker
     tier: u8,
-    /// The known addresses of the tracker
-    endpoints: Vec<SocketAddr>,
     /// The underlying communication connection
-    connection: Box<dyn TrackerClientConnection>,
-    /// The timeout for tracker connections before failing
-    timeout: Duration,
+    connection: Connection,
     /// The interval in seconds to do another announcement to the tracker
     announcement_interval_seconds: RwLock<u64>,
     /// The last time an announcement was made by this tracker
@@ -536,28 +475,33 @@ struct InnerTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracker::http::HttpServer;
-    use crate::tracker::udp::UdpServer;
+    use crate::tracker::HttpServer;
     use crate::tracker::TrackerServer;
+    use crate::tracker::UdpServer;
     use std::net::Ipv4Addr;
 
     mod new {
         use super::*;
-        use crate::tracker::udp::UdpServer;
 
         #[tokio::test]
         async fn test_new_valid_udp_url() {
             init_logger!();
             let udp_server = UdpServer::with_port(0).await.unwrap();
             let server = TrackerServer::with_listeners(vec![Box::new(udp_server)]).unwrap();
+            let url = server.url().clone();
 
             let result = Tracker::builder()
-                .url(server.url().clone())
+                .url(url.clone())
                 .build()
                 .await
                 .expect("expected the tracker to be created");
 
-            assert_eq!(1, result.inner.endpoints.len());
+            assert_eq!(&url, result.url(), "expected the tracker url to match");
+            assert_eq!(
+                TrackerState::Active,
+                result.state().await,
+                "expected the tracker to be active"
+            );
         }
 
         #[tokio::test]
@@ -570,13 +514,17 @@ mod tests {
                     .unwrap();
 
             let result = Tracker::builder()
-                .url(url)
+                .url(url.clone())
                 .build()
                 .await
                 .expect("expected the tracker to be created");
 
-            let endpoints_len = result.inner.endpoints.len();
-            assert!(endpoints_len > 0, "expected the tracker to be created");
+            assert_eq!(&url, result.url(), "expected the tracker url to match");
+            assert_eq!(
+                TrackerState::Active,
+                result.state().await,
+                "expected the tracker to be active"
+            );
         }
 
         #[tokio::test]

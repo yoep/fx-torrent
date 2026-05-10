@@ -141,6 +141,7 @@ struct InnerLocalServiceDiscovery {
 
 impl InnerLocalServiceDiscovery {
     /// Run the main loop of the local service discovery.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn run(&self) {
         loop {
             let mut buffer = [0u8; 1500];

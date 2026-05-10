@@ -4,10 +4,10 @@ macro_rules! udp_connection_pair {
         udp_connection_pair!(std::time::Duration::from_secs(1))
     }};
     ($timeout:expr) => {{
-        use crate::tracker::udp::UdpConnection;
-        use crate::tracker::udp::UdpServer;
         use crate::tracker::TrackerHandle;
         use crate::tracker::TrackerListener;
+        use crate::tracker::UdpConnection;
+        use crate::tracker::UdpServer;
         use std::net::{Ipv4Addr, SocketAddr};
         use std::time::Duration;
 
@@ -28,10 +28,10 @@ macro_rules! udp_tracker_pair {
         udp_tracker_pair!(std::time::Duration::from_secs(1))
     }};
     ($timeout:expr) => {{
-        use crate::tracker::udp::UdpServer;
         use crate::tracker::TrackerClient;
         use crate::tracker::TrackerEntry;
         use crate::tracker::TrackerServer;
+        use crate::tracker::UdpServer;
         use std::time::Duration;
 
         let udp_server = UdpServer::with_port(0).await.unwrap();

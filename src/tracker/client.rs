@@ -13,8 +13,10 @@ use itertools::Itertools;
 use log::{debug, info, trace, warn};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
+use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
+use tokio::task::JoinSet;
 use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -112,15 +114,8 @@ pub struct TrackerClient {
 }
 
 impl TrackerClient {
-    /// Creates a new [`TrackerClient`] instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `connection_timeout` - The timeout for tracker connections.
-    ///
-    /// # Returns
-    ///
-    /// A [`TrackerClient`] instance with its internal event loop spawned.
+    /// Creates a new instance for managing one or more client trackers.
+    /// Clients scrape data from servers rather than collecting data received from clients.
     pub fn new(connection_timeout: Duration) -> Self {
         let (command_sender, command_receiver) = channel!(128);
         let mut inner = InnerClient::new(connection_timeout);
@@ -350,9 +345,8 @@ impl TrackerClient {
             .unwrap_or_default();
         let elapsed = start_time.elapsed();
         trace!(
-            "Announced to all trackers in {}.{:03} seconds",
-            elapsed.as_secs(),
-            elapsed.subsec_millis()
+            "Announced to all trackers in {:.3} seconds",
+            elapsed.as_secs_f64()
         );
         result
     }
@@ -615,6 +609,8 @@ struct InnerClient {
     torrents: HashMap<InfoHash, TrackerTorrent>,
     /// The timeout for tracker connections.
     connection_timeout: Duration,
+    /// The pending outgoing connections to trackers.
+    pending_connections: JoinSet<Option<Tracker>>,
     /// Callback dispatcher used to notify subscribers of client events.
     callbacks: MultiThreadedCallback<TrackerClientEvent>,
     /// Aggregated tracker client metrics.
@@ -630,6 +626,7 @@ impl InnerClient {
             trackers: Default::default(),
             torrents: Default::default(),
             connection_timeout,
+            pending_connections: Default::default(),
             callbacks: MultiThreadedCallback::new(),
             metrics: Default::default(),
             cancellation_token: Default::default(),
@@ -640,6 +637,7 @@ impl InnerClient {
     ///
     /// This loop processes commands, performs automatic announcements, and updates stats
     /// until the cancellation token is triggered.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn run(&mut self, mut command_receiver: ChannelReceiver<TrackerClientCommand>) {
         let mut announcement_tick = time::interval(DEFAULT_ANNOUNCEMENT_INTERVAL);
         let mut stats_interval = time::interval(STATS_INTERVAL);
@@ -648,6 +646,11 @@ impl InnerClient {
             select! {
                 _ = self.cancellation_token.cancelled() => break,
                 Some(command) = command_receiver.recv() => self.on_command(command).await,
+                resp = self.pending_connections.join_next(), if !self.pending_connections.is_empty() => {
+                    if let Some(tracker) = resp.and_then(|e| e.ok()).flatten() {
+                        self.add_tracker(tracker);
+                    }
+                },
                 _ = announcement_tick.tick() => self.do_automatic_announcements().await,
                 _ = stats_interval.tick() => self.update_stats().await,
             }
@@ -675,7 +678,7 @@ impl InnerClient {
             TrackerClientCommand::GetTrackers { response } => response.send(self.trackers.clone()),
             TrackerClientCommand::GetTrackersLen { response } => response.send(self.trackers.len()),
             TrackerClientCommand::AddTracker { entry, response } => {
-                response.send(self.create_tracker_from_entry(entry).await)
+                self.create_tracker_from_entry(entry, response).await;
             }
             TrackerClientCommand::IsUrlKnown { url, response } => {
                 response.send(self.is_tracker_url_known(&url))
@@ -824,46 +827,61 @@ impl InnerClient {
     ///
     /// The URL of the entry must not already be known. On success,
     /// the created tracker is added to the client.
-    ///
-    /// # Returns
-    ///
-    /// Returns the created tracker handle on success, otherwise a [`TrackerError`].
-    async fn create_tracker_from_entry(&mut self, entry: TrackerEntry) -> Result<TrackerHandle> {
+    async fn create_tracker_from_entry(
+        &mut self,
+        entry: TrackerEntry,
+        response: Reply<Result<TrackerHandle>>,
+    ) {
         // if the url is already known, reject the request to create the tracker
         let url_already_exists = self.is_tracker_url_known(&entry.url);
         if url_already_exists {
-            return Err(TrackerError::DuplicateUrl(entry.url));
+            response.send(Err(TrackerError::DuplicateUrl(entry.url)));
+            return;
         }
 
-        match Tracker::builder()
-            .url(entry.url)
-            .tier(entry.tier)
-            .timeout(self.connection_timeout.clone())
-            .build()
-            .await
-        {
-            Ok(tracker) => self.add_tracker(tracker),
-            Err(e) => {
-                debug!("Failed to create new tracker, {}", e);
-                Err(e)
+        let handle = self.handle;
+        let timeout = self.connection_timeout.clone();
+        self.pending_connections.spawn(async move {
+            let mut builder = Tracker::builder();
+            let result = select! {
+                _ = time::sleep(timeout) => Err(TrackerError::Io(io::Error::new(io::ErrorKind::TimedOut, "connection timed out"))),
+                tracker = builder
+                    .url(entry.url)
+                    .tier(entry.tier)
+                    .build() => tracker,
+            };
+
+            match result {
+                Ok(tracker) => {
+                    response.send(Ok(tracker.handle()));
+                    Some(tracker)
+                }
+                Err(e) => {
+                    debug!(
+                        "Tracker client {} failed to create tracker from entry, {}",
+                        handle, e
+                    );
+                    response.send(Err(e));
+                    None
+                }
             }
-        }
+        });
     }
 
     /// Adds the given tracker to the tracker's pool.
-    ///
-    /// # Returns
-    ///
-    /// Returns a unique tracker handle for the added tracker.
-    fn add_tracker(&mut self, tracker: Tracker) -> Result<TrackerHandle> {
+    fn add_tracker(&mut self, tracker: Tracker) {
+        // drop the tracker if it already exists
+        // this can happen if the tracker was added twice concurrently
+        if self.trackers.iter().any(|e| e.url() == tracker.url()) {
+            return;
+        }
+
         let handle = tracker.handle();
         let tracker_info = tracker.to_string();
-
         self.trackers.push(tracker);
         debug!("Tracker {} has been added to {}", tracker_info, self);
         self.callbacks
             .invoke(TrackerClientEvent::TrackerAdded(handle));
-        Ok(handle)
     }
 
     async fn announce(
@@ -1055,9 +1073,23 @@ impl InnerClient {
 
     /// Closes all tracker connections managed by this client.
     async fn close(&mut self) {
-        for tracker in self.trackers.drain(..) {
-            tracker.close().await;
-        }
+        let futures = self
+            .trackers
+            .drain(..)
+            .map(|tracker| {
+                let timeout = self.connection_timeout.clone();
+                async move {
+                    select! {
+                        _ = time::sleep(timeout) => {
+                            debug!("Tracker {} failed to close connection, time-out", tracker.handle());
+                        },
+                        _ = tracker.close() => {},
+                    }
+                }
+            })
+            .collect_vec();
+
+        futures::future::join_all(futures).await;
     }
 
     /// Adds one or more discovered peers to the tracker client.
@@ -1156,8 +1188,8 @@ struct TrackerTorrent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracker::udp::UdpServer;
     use crate::tracker::TrackerServer;
+    use crate::tracker::UdpServer;
     use std::net::Ipv4Addr;
     use std::str::FromStr;
     use tokio::sync::mpsc::unbounded_channel;

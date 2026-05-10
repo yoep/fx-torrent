@@ -459,6 +459,7 @@ macro_rules! init_logger {
                     .build())))
                 .logger(Logger::builder().build("axum", LevelFilter::Info))
                 .logger(Logger::builder().build("fx_callback", LevelFilter::Info))
+                .logger(Logger::builder().build("httpmock", LevelFilter::Debug))
                 .logger(Logger::builder().build("hyper_util", LevelFilter::Info))
                 .logger(Logger::builder().build("mio", LevelFilter::Info))
                 .logger(Logger::builder().build("reqwest", LevelFilter::Info))
