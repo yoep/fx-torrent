@@ -33,7 +33,7 @@ bitmask-enum = "2.2"
 byteorder = "1.5"
 crc = "3.4"
 derive_more = { version = "2.1", features = ["display"] }
-ed25519 = { version = "2.2", optional = true }
+ed25519 = { version = "3.0", optional = true }
 ed25519-dalek = { version = "2.2", optional = true }
 futures = "0.3"
 fx-callback = "2.0"
