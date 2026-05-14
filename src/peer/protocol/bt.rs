@@ -1,7 +1,6 @@
 use crate::peer::extension::{ExtensionNumber, ExtensionRegistry};
 use crate::peer::{Error, PeerId, ProtocolExtensionFlags, Result};
-use crate::{bencode, CompactIp, InfoHash, PieceIndex, PiecePart};
-use bit_vec::BitVec;
+use crate::{bencode, BitVec, CompactIp, InfoHash, PieceIndex, PiecePart};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use log::trace;
 use serde::{Deserialize, Serialize};
@@ -362,7 +361,7 @@ impl TryFrom<&[u8]> for Message {
                     Error::Parsing(format!("failed to read bitfield payload, {}", e))
                 })?;
 
-                Ok(Message::Bitfield(BitVec::from_bytes(&buffer)))
+                Ok(Message::Bitfield(BitVec::from_vec(buffer)))
             }
             MessageType::Request => {
                 let request = Request::try_from(cursor)?;
@@ -443,8 +442,7 @@ impl TryInto<Vec<u8>> for Message {
                 buffer.write_u32::<BigEndian>(e)?;
             }
             Message::Bitfield(bitfield) => {
-                let bytes = bitfield.to_bytes();
-                buffer.extend_from_slice(bytes.as_slice());
+                buffer.extend_from_slice(bitfield.as_raw_slice());
             }
             Message::Request(e) | Message::RejectRequest(e) | Message::Cancel(e) => {
                 buffer.write_u32::<BigEndian>(e.index as u32)?;
@@ -879,11 +877,11 @@ mod tests {
 
     #[test]
     fn test_message_bitfield_to_bytes() {
-        let mut bitfield = BitVec::from_elem(32, true);
+        let mut bitfield = BitVec::repeat(true, 32);
         bitfield.set(13, false);
         bitfield.set(27, false);
         let mut expected_result = vec![MessageType::Bitfield as u8];
-        expected_result.extend_from_slice(&bitfield.to_bytes());
+        expected_result.extend_from_slice(bitfield.as_raw_slice());
         let message = Message::Bitfield(bitfield);
 
         let result = message.to_bytes().unwrap();

@@ -15,20 +15,19 @@ use crate::torrent_data::DataPool;
 use crate::tracker::{AnnounceEvent, AnnouncementResult, TrackerClient};
 #[cfg(feature = "lsd")]
 use crate::LocalServiceDiscovery;
-use crate::Result;
+pub use crate::TorrentHandle;
 use crate::TorrentTracker;
+use crate::{BitVec, Result};
 use crate::{
     FileAttributeFlags, FileIndex, InfoHash, Metrics, Piece, PieceChunkPool, PieceIndex, PiecePart,
     PiecePriority, Sha1Hash, Sha256Hash, TorrentError, TorrentFlags, TorrentMetadata,
     TorrentMetadataInfo, DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
 };
-use bit_vec::BitVec;
 use derive_more::Display;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
-use fx_handle::Handle;
 use itertools::Itertools;
 use log::{debug, error, info, trace, warn};
 use sha1::Sha1;
@@ -51,9 +50,6 @@ use url::Url;
 
 const PEER_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const TICK_INTERVAL: Duration = Duration::from_secs(1);
-
-/// A unique handle identifier of a [Torrent].
-pub type TorrentHandle = Handle;
 
 /// A [Torrent] extension factory.
 /// This factory will create a new instance of an [Extension] for each new torrent.
@@ -2348,7 +2344,7 @@ impl TorrentContext {
         match timeout(Duration::from_millis(200), peer.remote_piece_bitfield()).await {
             Ok(bitfield) => {
                 // decrease the availability of the pieces that the peer had
-                for (piece_index, _) in bitfield.iter().enumerate().filter(|(_, value)| *value) {
+                for (piece_index, _) in bitfield.iter().enumerate().filter(|(_, value)| **value) {
                     self.data_pool.update_availability(&piece_index, -1).await;
                 }
             }
@@ -4075,7 +4071,7 @@ mod tests {
             );
             assert_eq!(
                 Some(true),
-                pieces_bitfield.get(piece_index),
+                pieces_bitfield.get(piece_index).map(|e| *e),
                 "expected piece bitfield bit {} to be set",
                 piece_index
             );

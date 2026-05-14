@@ -1,7 +1,7 @@
 use crate::peer::webseed::HttpPeer;
 use crate::peer::{BitTorrentPeer, Metrics, PeerClientInfo, PeerEvent, PeerState};
+use crate::BitVec;
 use async_trait::async_trait;
-use bit_vec::BitVec;
 use crc::{Crc, CRC_32_ISCSI};
 use fx_callback::{Callback, Subscription};
 use fx_handle::Handle;

@@ -18,40 +18,45 @@ and is based on the `libtorrent` library for functionality and naming convention
 
 ## Getting Started
 
-Create a new `FxTorrentSession` which manages one or more torrents.
+Create a new `FxSession` which manages one or more torrents.
 A `Torrent` can be created from a magnet link, torrent file, or passing the raw `TorrentMetadata`.
 
 _create a new session with torrent_
 ```rust
-use std::io;
-use fx_torrent::{FxTorrentSession, Session, SessionConfig, TorrentFlags, TorrentMetadata};
-
 // The fx-torrent crate makes use of async tokio runtimes
-// this requires that new sessions and torrents need to be created within an async context
+// this requires that new sessions and torrents need to be created within a tokio runtime
 #[tokio::main]
-async fn main() -> Result<(), io::Error> {
-    let session = FxTorrentSession::builder()
+async fn main() -> Result<(), std::io::Error> {
+    let session = FxSession::builder()
         .config(
             SessionConfig::builder()
-                .base_path("/torrent/location/directory")
+                .base_path("/downloads")
                 .client_name("MyClient")
                 .build(),
         )
         .default_extensions()
-        .build()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .dht(DhtTracker::builder()
+            .default_routing_nodes()
+            .build()
+            .await?)
+        .build()?;
 
-    // Create a torrent from a magnet link
-    let magnet_torrent = session.add_torrent_from_uri("magnet:?XXX", TorrentFlags::default()).await;
+    // 1. Add a torrent via Magnet URI
+    let magnet_torrent = session
+        .add_torrent_from_uri("magnet:?xt=urn:btih:...", TorrentFlags::default())
+        .await;
 
-    // Create a torrent from a torrent file
-    let file_torrent = session.add_torrent_from_uri("/tmp/example.torrent", TorrentFlags::default()).await;
+    // 2. Add a torrent from a local .torrent file
+    let file_torrent = session
+        .add_torrent_from_uri("/path/to/file.torrent", TorrentFlags::default())
+        .await;
 
-    // Create a torrent from metadata info
-    let data: &[u8] = &[0; 1024];
-    let metadata: TorrentMetadata = TorrentMetadata::try_from(data)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let metadata_torrent = session.add_torrent_from_metadata(metadata, TorrentFlags::Paused).await;
+    // 3. Add a torrent from raw metadata bytes
+    let data: &[u8] = &[0; 1024]; // Replace with actual bencoded bytes
+    let metadata = TorrentMetadata::try_from(data)?;
+    let metadata_torrent = session
+        .add_torrent_from_metadata(metadata, TorrentFlags::Paused)
+        .await;
 
     Ok(())
 }
@@ -121,7 +126,7 @@ fn example() {
         .unwrap();
 
     // 2. Peer extension in a session
-    let session = FxTorrentSession::builder()
+    let session = FxSession::builder()
         .extension(|| MyPeerExtension.into())
         .build()
         .unwrap();
@@ -161,7 +166,7 @@ fn example() {
         .unwrap();
 
     // 2. Storage extension in a session
-    let session = FxTorrentSession::builder()
+    let session = FxSession::builder()
         .storage(|params| MyStorageExtension::new(params).into())
         .build().unwrap();
 }
@@ -196,7 +201,7 @@ fn example() {
         .unwrap();
 
     // 2. Operation extension in a session
-    let session = FxTorrentSession::builder()
+    let session = FxSession::builder()
         .operation(|| MyOperation.into())
         .build()
         .unwrap();

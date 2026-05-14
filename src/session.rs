@@ -25,6 +25,7 @@ use crate::storage::{DiskStorage, MemoryStorage, Storage, StorageParams};
 use crate::torrent::Torrent;
 use crate::tracker::TrackerClient;
 use crate::Result;
+pub use crate::SessionHandle;
 use crate::TorrentTracker;
 use crate::{
     ExtensionFactory, InfoHash, Magnet, NoSessionCache, TorrentConfig, TorrentError, TorrentEvent,
@@ -34,7 +35,6 @@ use crate::{
 use async_trait::async_trait;
 use derive_more::Display;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
-use fx_handle::Handle;
 use log::{debug, trace};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -52,11 +52,15 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_TRACKER_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_CACHE_LIMIT: usize = 10;
 
-/// A unique handle identifier of a [Session].
-pub type SessionHandle = Handle;
-
 /// The [StorageExtension] factory used to create underlying storage for torrents.
 pub type SessionStorageFactory = dyn Fn(StorageParams) -> Storage + Send + Sync;
+
+#[deprecated(since = "0.9.2", note = "Use [FxSession] instead")]
+#[doc(hidden)]
+pub type FxTorrentSession = FxSession;
+#[deprecated(since = "0.9.2", note = "Use [FxSessionBuilder] instead")]
+#[doc(hidden)]
+pub type FxTorrentSessionBuilder = FxSessionBuilder;
 
 /// The events of a torrent session.
 #[derive(Debug, Display, Clone, PartialEq)]
@@ -73,7 +77,14 @@ pub enum SessionEvent {
 /// A [Session] can process and manage torrents from multiple sources.
 ///
 /// The session is always the owner of a [Torrent], meaning that it's able to drop a torrent at any time.
+///
+/// # Deprecated
+///
+/// Use [FxSession] struct instead of the [Session] trait.
+/// This trait will be removed near future.
 #[async_trait]
+#[doc(hidden)]
+#[deprecated(since = "0.9.2", note = "Use [FxTorrentSession] instead")]
 pub trait Session: Debug + Callback<SessionEvent> + Send + Sync {
     /// Retrieve the unique session identifier for this session.
     /// This handle can be used to identify a session.
@@ -239,60 +250,44 @@ pub trait Session: Debug + Callback<SessionEvent> + Send + Sync {
     async fn total_connections(&self) -> usize;
 }
 
-/// The default Fx torrent session.
-/// This is the standard [Session] implementation with default functionality for working with torrents.
+/// The torrent session manager, which managed multiple torrents with shared resources.
 ///
-/// See [FxTorrentSession::builder] for more information.
+/// # Example Usage
 ///
-/// # Example
-///
-/// ```rust,no_run
-/// use fx_torrent::torrent::{FxTorrentSession, CompactResult};
-/// use fx_torrent::torrent::peer::extension::metadata::MetadataExtension;
-/// use fx_torrent::torrent::peer::ProtocolExtensionFlags;
-///
-/// fn getting_started() -> CompactResult<FxTorrentSession> {
-///     FxTorrentSession::builder()
-///         .path("/torrent/location/directory")
-///         .client_name("MyClient")
-///         .build()
-/// }
+/// ```rust
+/// # use fx_torrent::prelude::*;
+/// let session = FxSession::builder()
+///   .config(
+///       SessionConfig::builder()
+///           .client_name("MyClient")
+///           .base_path("/downloads")
+///           .build(),
+///   )
+///   .default_extensions()
+///   .dht(DhtTracker::builder()
+///       .default_routing_nodes()
+///       .build()
+///       .await?)
+///   .build()?;
 /// ```
 #[derive(Debug, Display, Clone)]
 #[display("{}", inner)]
-pub struct FxTorrentSession {
+pub struct FxSession {
     inner: Arc<InnerSession>,
 }
 
-impl FxTorrentSession {
+impl FxSession {
     /// Create a new torrent session builder.
     /// The builder always requires a `base_path` to be set, all other fields are optional and will use defaults if not set.
     ///
     /// This allows for easy setup of a torrent session, while still allow some flexibility in customization at runtime.
     ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use fx_torrent::torrent::{FxTorrentSession, CompactResult};
-    /// use fx_torrent::torrent::peer::extension::metadata::MetadataExtension;
-    /// use fx_torrent::torrent::peer::ProtocolExtensionFlags;
-    ///
-    /// fn new_torrent_session() -> CompactResult<FxTorrentSession> {
-    ///     FxTorrentSession::builder()
-    ///         .path("/torrent/location/directory")
-    ///         .client_name("MyClient")
-    ///         .protocol_extensions(ProtocolExtensionFlags::LTEP | ProtocolExtensionFlags::Fast)
-    ///         .extensions(vec![|| Box::new(MetadataExtension::new())])
-    ///         .build()
-    /// }
-    /// ```
-    ///
     /// # Panics
     ///
     /// The `build` function of the builder will panic if the `base path` or `client name` is not set.
     /// Everything else is optional and uses default settings if not set.
-    pub fn builder() -> FxTorrentSessionBuilder {
-        FxTorrentSessionBuilder::new()
+    pub fn builder() -> FxSessionBuilder {
+        FxSessionBuilder::new()
     }
 
     /// Create a new torrent session instance.
@@ -336,6 +331,288 @@ impl FxTorrentSession {
 
         debug!("Created new torrent session {}", inner.handle);
         Self { inner }
+    }
+
+    /// Returns the unique session handle.
+    fn handle(&self) -> SessionHandle {
+        self.inner.handle
+    }
+
+    /// Returns the DHT tracker reference used by the session, if one is present.
+    #[cfg(feature = "dht")]
+    pub fn dht(&self) -> Option<&DhtTracker> {
+        self.inner.trackers.iter().find_map(|tracker| {
+            if let TorrentTracker::Dht(dht) = tracker {
+                Some(dht)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Returns the local service discovery tracker reference used by the session, if one is present.
+    #[cfg(feature = "lsd")]
+    pub fn local_service_discovery(&self) -> Option<&LocalServiceDiscovery> {
+        self.inner.trackers.iter().find_map(|tracker| {
+            if let TorrentTracker::Lsd(lsd) = tracker {
+                Some(lsd)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Returns the tracker client reference used by the session, if one is present.
+    pub fn tracker(&self) -> Option<&TrackerClient> {
+        self.inner.trackers.iter().find_map(|tracker| {
+            if let TorrentTracker::TrackerClient(tracker) = tracker {
+                Some(tracker)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Returns the path to the storage location of the torrents for this session.
+    pub async fn base_path(&self) -> PathBuf {
+        self.inner.config.read().await.path().to_path_buf()
+    }
+
+    /// Set a new location path for the storage of the torrents within this session.
+    /// This will only be applicable to new torrents, existing torrents will still use the old location.
+    pub async fn set_base_path(&self, location: PathBuf) {
+        self.inner.config.write().await.torrent.set_path(location);
+    }
+
+    /// Returns the torrent based on the given handle.
+    /// It returns a weak reference to the torrent, which can be invalidated at any moment.
+    /// To check if a torrent is still valid, use the [Torrent::is_valid] method.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - The handle of the torrent to retrieve.
+    pub async fn find_torrent_by_handle(&self, handle: &TorrentHandle) -> Option<Torrent> {
+        self.inner.find_torrent_by_handle(handle).await
+    }
+
+    /// Returns the torrent based on the given info hash.
+    ///
+    /// # Arguments
+    ///
+    /// * `info_hash` - The info hash of the torrent to retrieve.
+    pub async fn find_torrent_by_info_hash(&self, info_hash: &InfoHash) -> Option<Torrent> {
+        self.inner.find_torrent_by_info_hash(info_hash).await
+    }
+
+    /// Returns the calculated torrent health based on the given torrent metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `torrent_info` - The metadata information of the torrent to check.
+    pub async fn torrent_health_from_info(
+        &self,
+        torrent_info: &TorrentMetadata,
+    ) -> Result<TorrentHealth> {
+        trace!("Retrieving torrent health for {:?}", torrent_info);
+        // try to retrieve the existing torrent based on its info hash
+        // otherwise, we'll create a new torrent
+        let torrent = match self
+            .inner
+            .find_torrent_by_info_hash(&torrent_info.info_hash)
+            .await
+        {
+            Some(e) => e,
+            None => Torrent::request()
+                .metadata(torrent_info.clone())
+                .options(TorrentFlags::none())
+                .config(
+                    TorrentConfig::builder()
+                        .client_name(self.inner.config.read().await.client_name())
+                        .peers_lower_limit(0)
+                        .peers_upper_limit(0)
+                        .peer_connection_timeout(Duration::from_secs(0))
+                        .build(),
+                )
+                .protocol_extensions(self.inner.protocol_extensions)
+                .extensions(self.inner.extensions())
+                .operations(vec![TrackersOperation::new().into()])
+                .storage(|_| MemoryStorage::new().into())
+                .trackers(self.inner.trackers.clone())
+                .build()?,
+        };
+
+        let metrics = torrent.scrape().await?;
+
+        debug!(
+            "Converting announcement to torrent health for {:?}",
+            metrics
+        );
+        Ok(TorrentHealth::from(metrics.complete, metrics.incomplete))
+    }
+
+    /// Returns the torrent health information for the given uri.
+    /// The uri can either be a magnet uri or a filepath to a torrent file.
+    ///
+    /// If the uri points to a valid resolvable torrent information, than the seeders and leechers will be requested from the trackers.
+    ///
+    /// # Arguments
+    ///
+    /// * `uri` - The uri of the torrent to check.
+    pub async fn torrent_health_from_uri(&self, uri: &str) -> Result<TorrentHealth> {
+        trace!(
+            "Session {} is retrieving torrent health for {:?}",
+            self,
+            uri
+        );
+        let torrent_info = self.resolve(uri)?;
+        self.torrent_health_from_info(&torrent_info).await
+    }
+
+    /// Resolve the given uri into torrent metadata information.
+    /// The uri can either be a magnet uri or a filepath to a torrent file.
+    ///
+    /// This doesn't create any underlying [Torrent] neither does it retrieve the metadata if it's incomplete.
+    /// It's just a simple conversion of a `.torrent` file or magnet uri into [TorrentMetadata].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use fx_torrent::torrent::Session;
+    ///
+    /// fn example(session: impl Session) {
+    ///     let magnet_uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
+    ///     let info = session.resolve(magnet_uri);
+    ///
+    ///     let filepath = "/my/path/example.torrent";
+    ///     let info = session.resolve(magnet_uri);
+    /// }
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `uri` - The uri to resolve.
+    pub fn resolve(&self, uri: &str) -> Result<TorrentMetadata> {
+        if Magnet::has_magnet_scheme(uri) {
+            trace!("Session {} is resolving torrent magnet uri {}", self, uri);
+            Magnet::from_str(uri)
+                .map_err(Into::<TorrentError>::into)
+                .and_then(|e| TorrentMetadata::try_from(e))
+        } else {
+            trace!("Session {} is resolving torrent path uri {}", self, uri);
+            PathBuf::from_str(uri)
+                .map_err(|e| TorrentError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))
+                .and_then(|filepath| {
+                    std::fs::OpenOptions::new()
+                        .create(false)
+                        .read(true)
+                        .open(filepath)
+                        .map_err(|e| TorrentError::Io(e))
+                })
+                .and_then(|mut file| {
+                    let mut buffer = vec![];
+                    if let Err(e) = file.read_to_end(&mut buffer) {
+                        return Err(TorrentError::Io(e));
+                    }
+
+                    Ok(buffer)
+                })
+                .and_then(|bytes| TorrentMetadata::try_from(bytes.as_slice()))
+        }
+    }
+
+    /// Returns the torrent metadata information for the given magnet URI.
+    ///
+    /// # Arguments
+    ///
+    /// * `magnet_uri` - The magnet URI of the torrent to fetch.
+    /// * `timeout` - The timeout to use when fetching the torrent information.
+    pub async fn fetch_magnet(
+        &self,
+        magnet_uri: &str,
+        timeout: Duration,
+    ) -> Result<TorrentMetadata> {
+        trace!("Session {} is trying to fetch magnet {}", self, magnet_uri);
+        let torrent_info = self.resolve(magnet_uri)?;
+
+        {
+            // check if we've already cached the metadata in the past
+            let session_cache = self.inner.session_cache.lock().await;
+            if let Some(metadata) = session_cache.find_metadata(&torrent_info.info_hash) {
+                if metadata.info.is_some() {
+                    return Ok(metadata.clone());
+                }
+            }
+        }
+
+        let torrent = self
+            .find_or_add_torrent(torrent_info, TorrentFlags::Metadata, false)
+            .await?;
+
+        // check if the torrent metadata needs to be fetched, or is already known
+        if torrent.metadata().await?.info.is_none() {
+            // make sure the torrent tries to download the metadata
+            torrent.add_options(TorrentFlags::Metadata).await;
+
+            trace!("Trying to fetch metadata for {}", magnet_uri);
+            select! {
+                _ = time::sleep(timeout) => Err(TorrentError::Timeout),
+                _ = Self::wait_for_metadata(&torrent) => Ok(()),
+            }?;
+        }
+
+        // store the metadata within the session cache
+        let metadata = torrent.metadata().await?;
+        self.inner.add_torrent_metadata(&metadata).await;
+
+        Ok(metadata)
+    }
+
+    /// Add a new torrent to this session for the given uri.
+    /// The uri can either be a path to a torrent file or a magnet link.
+    ///
+    /// # Arguments
+    ///
+    /// * `uri` - The uri of the torrent to add.
+    /// * `options` - The torrent options to use when adding the torrent.
+    pub async fn add_torrent_from_uri(&self, uri: &str, options: TorrentFlags) -> Result<Torrent> {
+        let torrent_info = self.resolve(uri)?;
+        self.add_torrent_from_info(torrent_info, options).await
+    }
+
+    /// Add a new torrent to this session for the given metadata information.
+    ///
+    /// # Arguments
+    ///
+    /// * `torrent_info` - The metadata information of the torrent to add.
+    /// * `options` - The torrent options to use when adding the torrent.
+    pub async fn add_torrent_from_info(
+        &self,
+        torrent_info: TorrentMetadata,
+        options: TorrentFlags,
+    ) -> Result<Torrent> {
+        self.find_or_add_torrent(torrent_info, options, true).await
+    }
+
+    /// Remove a torrent from this session.
+    /// The handle will be ignored if it does not exist in this session.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - The handle of the torrent to remove.
+    pub async fn remove_torrent(&self, handle: &TorrentHandle) {
+        self.inner.remove_torrent(handle).await
+    }
+
+    /// Returns the total number of active connections within this session.
+    pub async fn total_connections(&self) -> usize {
+        let torrents = self.inner.torrents.read().await;
+        let mut total_connections = 0;
+
+        for torrent in torrents.values() {
+            total_connections += torrent.active_peer_connections().await;
+        }
+
+        total_connections
     }
 
     /// Try to find an existing torrent within the session based on the info hash,
@@ -425,179 +702,62 @@ impl FxTorrentSession {
 }
 
 #[async_trait]
-impl Session for FxTorrentSession {
+impl Session for FxSession {
     fn handle(&self) -> SessionHandle {
-        self.inner.handle
+        self.handle()
     }
 
     #[cfg(feature = "dht")]
     fn dht(&self) -> Option<&DhtTracker> {
-        self.inner.trackers.iter().find_map(|tracker| {
-            if let TorrentTracker::Dht(dht) = tracker {
-                Some(dht)
-            } else {
-                None
-            }
-        })
+        self.dht()
     }
 
     #[cfg(feature = "lsd")]
     fn local_service_discovery(&self) -> Option<&LocalServiceDiscovery> {
-        self.inner.trackers.iter().find_map(|tracker| {
-            if let TorrentTracker::Lsd(lsd) = tracker {
-                Some(lsd)
-            } else {
-                None
-            }
-        })
+        self.local_service_discovery()
     }
 
     fn tracker(&self) -> Option<&TrackerClient> {
-        self.inner.trackers.iter().find_map(|tracker| {
-            if let TorrentTracker::TrackerClient(tracker) = tracker {
-                Some(tracker)
-            } else {
-                None
-            }
-        })
+        self.tracker()
     }
 
     async fn base_path(&self) -> PathBuf {
-        self.inner.config.read().await.path().to_path_buf()
+        self.base_path().await
     }
 
     async fn set_base_path(&self, location: PathBuf) {
-        self.inner.config.write().await.torrent.set_path(location);
+        self.set_base_path(location).await;
     }
 
     async fn find_torrent_by_handle(&self, handle: &TorrentHandle) -> Option<Torrent> {
-        self.inner.find_torrent_by_handle(handle).await
+        self.find_torrent_by_handle(handle).await
     }
 
     async fn find_torrent_by_info_hash(&self, info_hash: &InfoHash) -> Option<Torrent> {
-        self.inner.find_torrent_by_info_hash(info_hash).await
+        self.find_torrent_by_info_hash(info_hash).await
     }
 
     async fn torrent_health_from_info(
         &self,
         torrent_info: &TorrentMetadata,
     ) -> Result<TorrentHealth> {
-        trace!("Retrieving torrent health for {:?}", torrent_info);
-        // try to retrieve the existing torrent based on its info hash
-        // otherwise, we'll create a new torrent
-        let torrent = match self
-            .inner
-            .find_torrent_by_info_hash(&torrent_info.info_hash)
-            .await
-        {
-            Some(e) => e,
-            None => Torrent::request()
-                .metadata(torrent_info.clone())
-                .options(TorrentFlags::none())
-                .config(
-                    TorrentConfig::builder()
-                        .client_name(self.inner.config.read().await.client_name())
-                        .peers_lower_limit(0)
-                        .peers_upper_limit(0)
-                        .peer_connection_timeout(Duration::from_secs(0))
-                        .build(),
-                )
-                .protocol_extensions(self.inner.protocol_extensions)
-                .extensions(self.inner.extensions())
-                .operations(vec![TrackersOperation::new().into()])
-                .storage(|_| MemoryStorage::new().into())
-                .trackers(self.inner.trackers.clone())
-                .build()?,
-        };
-
-        let metrics = torrent.scrape().await?;
-
-        debug!(
-            "Converting announcement to torrent health for {:?}",
-            metrics
-        );
-        Ok(TorrentHealth::from(metrics.complete, metrics.incomplete))
+        self.torrent_health_from_info(torrent_info).await
     }
 
     async fn torrent_health_from_uri(&self, uri: &str) -> Result<TorrentHealth> {
-        trace!(
-            "Session {} is retrieving torrent health for {:?}",
-            self,
-            uri
-        );
-        let torrent_info = self.resolve(uri)?;
-        self.torrent_health_from_info(&torrent_info).await
+        self.torrent_health_from_uri(uri).await
     }
 
     fn resolve(&self, uri: &str) -> Result<TorrentMetadata> {
-        if Magnet::has_magnet_scheme(uri) {
-            trace!("Session {} is resolving torrent magnet uri {}", self, uri);
-            Magnet::from_str(uri)
-                .map_err(Into::<TorrentError>::into)
-                .and_then(|e| TorrentMetadata::try_from(e))
-        } else {
-            trace!("Session {} is resolving torrent path uri {}", self, uri);
-            PathBuf::from_str(uri)
-                .map_err(|e| TorrentError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))
-                .and_then(|filepath| {
-                    std::fs::OpenOptions::new()
-                        .create(false)
-                        .read(true)
-                        .open(filepath)
-                        .map_err(|e| TorrentError::Io(e))
-                })
-                .and_then(|mut file| {
-                    let mut buffer = vec![];
-                    if let Err(e) = file.read_to_end(&mut buffer) {
-                        return Err(TorrentError::Io(e));
-                    }
-
-                    Ok(buffer)
-                })
-                .and_then(|bytes| TorrentMetadata::try_from(bytes.as_slice()))
-        }
+        self.resolve(uri)
     }
 
     async fn fetch_magnet(&self, magnet_uri: &str, timeout: Duration) -> Result<TorrentMetadata> {
-        trace!("Session {} is trying to fetch magnet {}", self, magnet_uri);
-        let torrent_info = self.resolve(magnet_uri)?;
-
-        {
-            // check if we've already cached the metadata in the past
-            let session_cache = self.inner.session_cache.lock().await;
-            if let Some(metadata) = session_cache.find_metadata(&torrent_info.info_hash) {
-                if metadata.info.is_some() {
-                    return Ok(metadata.clone());
-                }
-            }
-        }
-
-        let torrent = self
-            .find_or_add_torrent(torrent_info, TorrentFlags::Metadata, false)
-            .await?;
-
-        // check if the torrent metadata needs to be fetched, or is already known
-        if torrent.metadata().await?.info.is_none() {
-            // make sure the torrent tries to download the metadata
-            torrent.add_options(TorrentFlags::Metadata).await;
-
-            trace!("Trying to fetch metadata for {}", magnet_uri);
-            select! {
-                _ = time::sleep(timeout) => Err(TorrentError::Timeout),
-                _ = Self::wait_for_metadata(&torrent) => Ok(()),
-            }?;
-        }
-
-        // store the metadata within the session cache
-        let metadata = torrent.metadata().await?;
-        self.inner.add_torrent_metadata(&metadata).await;
-
-        Ok(metadata)
+        self.fetch_magnet(magnet_uri, timeout).await
     }
 
     async fn add_torrent_from_uri(&self, uri: &str, options: TorrentFlags) -> Result<Torrent> {
-        let torrent_info = self.resolve(uri)?;
-        self.add_torrent_from_info(torrent_info, options).await
+        self.add_torrent_from_uri(uri, options).await
     }
 
     async fn add_torrent_from_info(
@@ -605,32 +765,25 @@ impl Session for FxTorrentSession {
         torrent_info: TorrentMetadata,
         options: TorrentFlags,
     ) -> Result<Torrent> {
-        self.find_or_add_torrent(torrent_info, options, true).await
+        self.add_torrent_from_info(torrent_info, options).await
     }
 
     async fn remove_torrent(&self, handle: &TorrentHandle) {
-        self.inner.remove_torrent(handle).await
+        self.remove_torrent(handle).await;
     }
 
     async fn total_connections(&self) -> usize {
-        let torrents = self.inner.torrents.read().await;
-        let mut total_connections = 0;
-
-        for torrent in torrents.values() {
-            total_connections += torrent.active_peer_connections().await;
-        }
-
-        total_connections
+        self.total_connections().await
     }
 }
 
-impl Callback<SessionEvent> for FxTorrentSession {
+impl Callback<SessionEvent> for FxSession {
     fn subscribe(&self) -> Subscription<SessionEvent> {
         self.inner.callbacks.subscribe()
     }
 }
 
-impl Drop for FxTorrentSession {
+impl Drop for FxSession {
     fn drop(&mut self) {
         // check if we're the last 2 references to the session
         // if so, terminate the main loop of the session
@@ -641,7 +794,7 @@ impl Drop for FxTorrentSession {
     }
 }
 
-/// The torrent session builder for configuring a new [FxTorrentSession].
+/// The torrent session builder for configuring a new [FxSession].
 ///
 /// # Required fields
 ///
@@ -655,16 +808,16 @@ impl Drop for FxTorrentSession {
 /// # Example
 ///
 /// ```rust,no_run
-/// use fx_torrent::torrent::FxTorrentSession;
+/// use fx_torrent::prelude::*;
 ///
-/// FxTorrentSession::builder()
+/// FxSession::builder()
 ///     .client_name("MyClientName")
 ///     .path("/tmp/fx-torrent")
 ///     .build()
 ///     .unwrap()
 /// ```
 #[derive(Default)]
-pub struct FxTorrentSessionBuilder {
+pub struct FxSessionBuilder {
     config: Option<SessionConfig>,
     protocol_extensions: Option<ProtocolExtensionFlags>,
     extension_factories: Vec<ExtensionFactory>,
@@ -677,8 +830,8 @@ pub struct FxTorrentSessionBuilder {
     lsd: Option<LocalServiceDiscovery>,
 }
 
-impl FxTorrentSessionBuilder {
-    /// Create a new builder instance to construct a [FxTorrentSession].
+impl FxSessionBuilder {
+    /// Create a new builder instance to construct a [FxSession].
     pub fn new() -> Self {
         Self::default()
     }
@@ -791,7 +944,7 @@ impl FxTorrentSessionBuilder {
     /// # Returns
     ///
     /// It returns an error when one of the required is not set.
-    pub fn build(&mut self) -> Result<FxTorrentSession> {
+    pub fn build(&mut self) -> Result<FxSession> {
         let config = self
             .config
             .take()
@@ -842,7 +995,7 @@ impl FxTorrentSessionBuilder {
             }
         }
 
-        Ok(FxTorrentSession::new(
+        Ok(FxSession::new(
             config,
             protocol_extensions,
             extensions,
@@ -854,9 +1007,9 @@ impl FxTorrentSessionBuilder {
     }
 }
 
-impl Debug for FxTorrentSessionBuilder {
+impl Debug for FxSessionBuilder {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let mut d = f.debug_struct("FxTorrentSessionBuilder");
+        let mut d = f.debug_struct("FxSessionBuilder");
         d.field("config", &self.config)
             .field("protocol_extensions", &self.protocol_extensions)
             .field("extensions", &self.extension_factories)
@@ -1104,7 +1257,7 @@ pub mod tests {
             vec![]
         );
         let source_port = source_torrent.peer_port().await.unwrap();
-        let session = FxTorrentSession::builder()
+        let session = FxSession::builder()
             .config(
                 SessionConfig::builder()
                     .client_name("fetch magnet test")
@@ -1290,7 +1443,7 @@ pub mod tests {
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
             let dht = DhtTracker::builder().build().await.unwrap();
-            let session = FxTorrentSession::builder()
+            let session = FxSession::builder()
                 .config(
                     SessionConfig::builder()
                         .client_name("test")
@@ -1313,7 +1466,7 @@ pub mod tests {
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
             let dht = DhtTracker::builder().build().await.unwrap();
-            let session = FxTorrentSession::builder()
+            let session = FxSession::builder()
                 .config(
                     SessionConfig::builder()
                         .client_name("test")
@@ -1339,7 +1492,7 @@ pub mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let session = FxTorrentSession::builder()
+            let session = FxSession::builder()
                 .config(
                     SessionConfig::builder()
                         .client_name("test")
@@ -1369,7 +1522,7 @@ pub mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let session = FxTorrentSession::builder()
+            let session = FxSession::builder()
                 .config(
                     SessionConfig::builder()
                         .client_name("test")
@@ -1386,8 +1539,8 @@ pub mod tests {
         }
     }
 
-    async fn create_session(temp_path: &str) -> FxTorrentSession {
-        FxTorrentSession::builder()
+    async fn create_session(temp_path: &str) -> FxSession {
+        FxSession::builder()
             .config(
                 SessionConfig::builder()
                     .client_name("test")

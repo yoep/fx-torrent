@@ -30,9 +30,8 @@ pub mod tests {
     use super::*;
     use crate::peer::protocol::UtpSocket;
     use crate::peer::TorrentPeer;
-    use crate::Torrent;
+    use crate::{BitVec, Torrent};
     use async_trait::async_trait;
-    use bit_vec::BitVec;
     use fx_callback::{Callback, Subscription};
     use mockall::mock;
     use std::fmt::{Display, Formatter};

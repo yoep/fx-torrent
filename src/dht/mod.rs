@@ -55,6 +55,18 @@ mod tracker;
 mod traversal;
 mod utils;
 
+/// A prelude for conveniently using the DHT module in your application.
+pub mod prelude {
+    pub use crate::dht::DhtEvent;
+    pub use crate::dht::DhtMetrics;
+    pub use crate::dht::DhtTracker;
+    pub use crate::dht::DhtTrackerBuilder;
+    pub use crate::dht::Mode;
+    pub use crate::dht::Node;
+    pub use crate::dht::NodeState;
+    pub use crate::dht::PeerEntry;
+}
+
 const DEFAULT_ROUTING_NODE_SERVERS: fn() -> Vec<&'static str> = || {
     vec![
         "router.utorrent.com:6881",

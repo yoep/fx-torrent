@@ -1,6 +1,6 @@
 use crate::peer::protocol::{CloseReason, ConnectionId};
 use crate::peer::{Error, Result};
-use bit_vec::BitVec;
+use crate::BitVec;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use log::debug;
 use std::fmt::{Debug, Formatter};
@@ -183,7 +183,7 @@ impl Extension {
     pub fn as_bytes(&self) -> Result<Vec<u8>> {
         let extension_payload = match self {
             Extension::None => return Ok(vec![]),
-            Extension::SelectiveAck { bitmask } => bitmask.to_bytes(),
+            Extension::SelectiveAck { bitmask } => bitmask.clone().into_vec(),
             Extension::CloseReason { reason } => {
                 let mut bytes = vec![0u8; 4];
                 let reason_bytes: [u8; 2] = (*reason as u16).to_be_bytes();
@@ -242,7 +242,7 @@ impl Extension {
             match extension_nr {
                 1 => {
                     extension = Extension::SelectiveAck {
-                        bitmask: BitVec::from_bytes(&bytes),
+                        bitmask: BitVec::from_slice(bytes.as_slice()),
                     }
                 }
                 3 => {
@@ -343,7 +343,7 @@ mod tests {
             let packet = Packet {
                 state_type: StateType::Data,
                 extension: Extension::SelectiveAck {
-                    bitmask: BitVec::from_bytes(&[0b10100011]),
+                    bitmask: BitVec::from_slice(&[0b10100011]),
                 },
                 connection_id: 1,
                 timestamp_microseconds: 2,
@@ -370,7 +370,7 @@ mod tests {
         #[test]
         fn test_deserialize() {
             let extension = Extension::SelectiveAck {
-                bitmask: BitVec::from_bytes(&[0b10100000]),
+                bitmask: BitVec::from_slice(&[0b10100000]),
             };
 
             let bytes = extension

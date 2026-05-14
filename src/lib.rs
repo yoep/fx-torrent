@@ -7,49 +7,53 @@ and is based on the `libtorrent` library for functionality and naming convention
 
 ## Getting Started
 
-The entry point for the `fx_torrent` crate is the [`FxTorrentSession`].
+The entry point for the `fx_torrent` crate is the [`FxSession`].
 A session manages the lifecycle of multiple torrents.
 
 ### Basic Usage
 
 ```rust
-use std::io;
-use fx_torrent::{FxTorrentSession, Session, SessionConfig, TorrentFlags, TorrentMetadata};
-
-// The fx-torrent crate makes use of async tokio runtimes
-// this requires that new sessions and torrents need to be created within an async context
-#[tokio::main]
-async fn main() -> Result<(), io::Error> {
-    let session = FxTorrentSession::builder()
-        .config(
-            SessionConfig::builder()
-                .base_path("/downloads")
-                .client_name("MyClient")
-                .build(),
-        )
-        .default_extensions()
-        .build()?;
-
-    // 1. Add a torrent via Magnet URI
-    let magnet_torrent = session
-        .add_torrent_from_uri("magnet:?xt=urn:btih:...", TorrentFlags::default())
-        .await;
-
-    // 2. Add a torrent from a local .torrent file
-    let file_torrent = session
-        .add_torrent_from_uri("/path/to/file.torrent", TorrentFlags::default())
-        .await;
-
-    // 3. Add a torrent from raw metadata bytes
-    let data: &[u8] = &[0; 1024]; // Replace with actual bencoded bytes
-    let metadata = TorrentMetadata::try_from(data)?;
-    let metadata_torrent = session
-        .add_torrent_from_metadata(metadata, TorrentFlags::Paused)
-        .await;
-
-    Ok(())
-}
-```
+* # use std::io;
+* use fx_torrent::prelude::*;
+*
+* // The fx-torrent crate makes use of async tokio runtimes
+* // this requires that new sessions and torrents need to be created within a tokio runtime
+* #[tokio::main]
+* async fn main() -> Result<(), io::Error> {
+*     let session = FxSession::builder()
+*         .config(
+*             SessionConfig::builder()
+*                 .base_path("/downloads")
+*                 .client_name("MyClient")
+*                 .build(),
+*         )
+*         .default_extensions()
+*         .dht(DhtTracker::builder()
+*             .default_routing_nodes()
+*             .build()
+*             .await?)
+*         .build()?;
+*
+*     // 1. Add a torrent via Magnet URI
+*     let magnet_torrent = session
+*         .add_torrent_from_uri("magnet:?xt=urn:btih:...", TorrentFlags::default())
+*         .await;
+*
+*     // 2. Add a torrent from a local .torrent file
+*     let file_torrent = session
+*         .add_torrent_from_uri("/path/to/file.torrent", TorrentFlags::default())
+*         .await;
+*
+*     // 3. Add a torrent from raw metadata bytes
+*     let data: &[u8] = &[0; 1024]; // Replace with actual bencoded bytes
+*     let metadata = TorrentMetadata::try_from(data)?;
+*     let metadata_torrent = session
+*         .add_torrent_from_metadata(metadata, TorrentFlags::Paused)
+*         .await;
+*
+*     Ok(())
+* }
+* ```
 
 For more advanced examples, see the [examples](https://github.com/yoep/fx-torrent/tree/master/examples) directory.
 
@@ -124,8 +128,7 @@ Once implemented, these extensions can be attached to individual torrents or glo
 
 _example peer extension_
 ```rust
-# use fx_torrent::Torrent;
-# use fx_torrent::FxTorrentSession;
+# use fx_torrent::prelude::*;
 # use fx_torrent::peer::PeerContext;
 # use fx_torrent::peer::extension::Extension;
 # use fx_torrent::peer::extension::Result;
@@ -148,7 +151,7 @@ impl Extension for MyPeerExtension {
         .unwrap();
 
     // 2. Peer extension in a session
-    let session = FxTorrentSession::builder()
+    let session = FxSession::builder()
         .extension(|| MyPeerExtension.into())
         .build()
         .unwrap();
@@ -164,8 +167,7 @@ To create your own storage backend, implement the [storage::Extension] trait.
 
 _example storage extension_
 ```rust
-# use fx_torrent::Torrent;
-# use fx_torrent::FxTorrentSession;
+# use fx_torrent::prelude::*;
 # use fx_torrent::storage::Extension;
 # use fx_torrent::storage::StorageParams;
 
@@ -193,7 +195,7 @@ impl Extension for MyStorageExtension {
         .unwrap();
 
     // 2. Storage extension in a session
-    let session = FxTorrentSession::builder()
+    let session = FxSession::builder()
         .storage(|params| MyStorageExtension::new(params).into())
         .build().unwrap();
 # }
@@ -207,9 +209,8 @@ meaning the sequence in which you register them determines their execution prior
 
 _example operation extension_
 ```rust
-# use fx_torrent::Torrent;
+# use fx_torrent::prelude::*;
 # use fx_torrent::TorrentContext;
-# use fx_torrent::FxTorrentSession;
 # use fx_torrent::operation::Extension;
 # use fx_torrent::operation::TorrentOperationResult;
 # use fx_torrent::peer::PeerDiscovery;
@@ -236,7 +237,7 @@ impl Extension for MyOperation {
         .unwrap();
 
     // 2. Operation extension in a session
-    let session = FxTorrentSession::builder()
+    let session = FxSession::builder()
         .operation(|| MyOperation.into())
         .build()
         .unwrap();
@@ -245,6 +246,7 @@ impl Extension for MyOperation {
 
 */
 
+pub use aliases::*;
 pub use compact::*;
 pub use config::*;
 pub use error::*;
@@ -272,6 +274,7 @@ mod test_macros;
 #[macro_use]
 mod channel;
 
+mod aliases;
 pub mod bencode;
 mod bloom_filter;
 mod compact;
@@ -302,6 +305,26 @@ mod torrent_metadata;
 mod torrent_metrics;
 mod torrent_tracker;
 pub mod tracker;
+
+/// A prelude for conveniently writing applications using this library.
+pub mod prelude {
+    #[cfg(feature = "dht")]
+    pub use crate::dht::prelude::*;
+    pub use crate::FxSession;
+    pub use crate::InfoHash;
+    #[cfg(feature = "lsd")]
+    pub use crate::LocalServiceDiscovery;
+    pub use crate::Metrics;
+    pub use crate::SessionConfig;
+    pub use crate::SessionEvent;
+    pub use crate::Torrent;
+    pub use crate::TorrentEvent;
+    pub use crate::TorrentFlags;
+    pub use crate::TorrentMetadata;
+    pub use crate::TorrentState;
+
+    pub use crate::format_bytes;
+}
 
 use crate::peer::ProtocolExtensionFlags;
 

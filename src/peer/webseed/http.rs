@@ -4,8 +4,7 @@ use crate::peer::{
     PeerId, PeerState, Result,
 };
 use crate::torrent::InnerTorrent;
-use crate::{FileAttributeFlags, Piece, TorrentFileInfo, TorrentMetadata};
-use bit_vec::BitVec;
+use crate::{BitVec, FileAttributeFlags, Piece, TorrentFileInfo, TorrentMetadata};
 use derive_more::Display;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use fx_handle::Handle;
@@ -108,7 +107,7 @@ impl HttpPeer {
     /// Returns the bitfield of the remote peer.
     pub async fn remote_piece_bitfield(&self) -> BitVec {
         let total_pieces = self.inner.torrent.total_pieces().await;
-        BitVec::from_elem(total_pieces, true)
+        BitVec::repeat(true, total_pieces)
     }
 
     /// Close the peer connection.

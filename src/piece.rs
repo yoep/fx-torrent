@@ -1,5 +1,4 @@
-use crate::{overlapping_range, InfoHash};
-use bit_vec::BitVec;
+use crate::{overlapping_range, BitVec, InfoHash};
 use std::cmp::Ordering;
 use std::ops::Range;
 
@@ -137,7 +136,7 @@ impl Piece {
             length,
             priority: PiecePriority::default(),
             parts,
-            completed_parts: BitVec::from_elem(num_of_parts, false),
+            completed_parts: BitVec::repeat(false, num_of_parts),
             availability: 0,
         }
     }
@@ -165,7 +164,7 @@ impl Piece {
 
     /// Get if this piece has partially completed data.
     pub fn is_partially_completed(&self) -> bool {
-        !self.completed_parts.all() && !self.completed_parts.none()
+        !self.completed_parts.all() && self.completed_parts.any()
     }
 
     /// Check if the piece contains some bytes from the given torrent byte range.
@@ -194,7 +193,7 @@ impl Piece {
         self.completed_parts
             .iter()
             .enumerate()
-            .filter(|(_, value)| !*value)
+            .filter(|(_, value)| !**value)
             .map(|(index, _)| &self.parts[index])
             .collect()
     }
@@ -212,7 +211,7 @@ impl Piece {
     /// Reset completed parts in case the validation of the data failed.
     ///This will reset the `completed_parts` back to `false`.
     pub(crate) fn reset_completed_parts(&mut self) {
-        self.completed_parts = BitVec::from_elem(self.parts.len(), false);
+        self.completed_parts.fill(false);
     }
 }
 

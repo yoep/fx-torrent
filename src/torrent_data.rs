@@ -1,9 +1,8 @@
 use crate::channel::{ChannelReceiver, ChannelSender, Reply};
 use crate::{
-    File, FileAttributeFlags, FileIndex, FilePriority, PartIndex, Piece, PieceIndex, PiecePart,
-    PiecePriority,
+    BitVec, File, FileAttributeFlags, FileIndex, FilePriority, PartIndex, Piece, PieceIndex,
+    PiecePart, PiecePriority,
 };
-use bit_vec::BitVec;
 use itertools::Itertools;
 use log::warn;
 use std::collections::BTreeMap;
@@ -499,7 +498,7 @@ struct InnerDataPool {
 impl InnerDataPool {
     fn new(pieces: Vec<Piece>) -> Self {
         Self {
-            completed_pieces: BitVec::from_elem(pieces.len(), false),
+            completed_pieces: BitVec::repeat(false, pieces.len()),
             pieces: pieces
                 .into_iter()
                 .map(|piece| (piece.index, piece))
@@ -646,7 +645,7 @@ impl InnerDataPool {
             .collect();
 
         self.pieces = pieces;
-        self.completed_pieces = BitVec::from_elem(pieces_len, false);
+        self.completed_pieces = BitVec::repeat(false, pieces_len);
     }
 
     fn set_files(&mut self, files: Vec<File>) {
@@ -704,7 +703,10 @@ impl InnerDataPool {
     }
 
     fn is_piece_completed(&self, piece: &PieceIndex) -> bool {
-        self.completed_pieces.get(*piece).unwrap_or_default()
+        self.completed_pieces
+            .get(*piece)
+            .map(|bit| *bit)
+            .unwrap_or_default()
     }
 
     fn is_completed(&self) -> bool {
@@ -713,7 +715,12 @@ impl InnerDataPool {
             .filter(|(_, piece)| piece.priority != PiecePriority::None)
             .map(|(index, _)| *index)
             .into_iter()
-            .all(|piece| self.completed_pieces.get(piece).unwrap_or(false))
+            .all(|piece| {
+                self.completed_pieces
+                    .get(piece)
+                    .map(|bit| *bit)
+                    .unwrap_or(false)
+            })
     }
 
     fn set_piece_completed(&mut self, piece: &PieceIndex, completed: bool) {
@@ -762,7 +769,7 @@ impl InnerDataPool {
         self.completed_pieces
             .iter()
             .enumerate()
-            .filter(|(_, completed)| *completed)
+            .filter(|(_, completed)| **completed)
             .map(|(index, _)| index)
             .collect()
     }
@@ -771,7 +778,7 @@ impl InnerDataPool {
         self.completed_pieces
             .iter()
             .enumerate()
-            .filter(|(_, completed)| *completed)
+            .filter(|(_, completed)| **completed)
             .filter_map(|(index, _)| self.pieces.get(&index))
             .map(|piece| piece.len())
             .sum()
@@ -851,7 +858,11 @@ impl InnerDataPool {
     /// and the piece should not have been completed yet.
     fn is_wanted_piece(bitfield: &BitVec, piece: &Piece) -> bool {
         piece.priority != PiecePriority::None
-            && bitfield.get(piece.index).unwrap_or_default() == false
+            && bitfield
+                .get(piece.index)
+                .map(|bit| *bit)
+                .unwrap_or_default()
+                == false
     }
 }
 

@@ -9,9 +9,9 @@ use crate::peer::{extension, Error, Metrics, PeerHandle, PeerId, PeerPriority, R
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
 use crate::{
-    CompactIp, PieceIndex, TorrentEvent, TorrentMetadata, TorrentMetadataInfo, MAX_PIECE_PART_SIZE,
+    BitVec, CompactIp, PieceIndex, TorrentEvent, TorrentMetadata, TorrentMetadataInfo,
+    MAX_PIECE_PART_SIZE,
 };
-use bit_vec::BitVec;
 use bitmask_enum::bitmask;
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
@@ -935,9 +935,9 @@ impl PeerContext {
             client_interest_state: InterestState::NotInterested,
             remote_interest_state: InterestState::NotInterested,
             extension_registry,
-            client_pieces: BitVec::from_elem(total_pieces, false),
-            remote_pieces: BitVec::from_elem(total_pieces, false),
-            remote_fast_pieces: BitVec::from_elem(total_pieces, false),
+            client_pieces: BitVec::repeat(false, total_pieces),
+            remote_pieces: BitVec::repeat(false, total_pieces),
+            remote_fast_pieces: BitVec::repeat(false, total_pieces),
             // create new peer request buffers which are not running as the peer connection starts in the state choked
             client_pending_requests: HashMap::with_capacity(0),
             client_pending_request_permits: HashMap::with_capacity(0),
@@ -1096,7 +1096,10 @@ impl PeerContext {
     /// Check if fast requests are allowed for the given piece.
     /// It returns true when fast requests are allowed for the given piece, else false.
     pub fn is_fast_allowed(&self, piece: &PieceIndex) -> bool {
-        self.remote_fast_pieces.get(*piece).unwrap_or(false)
+        self.remote_fast_pieces
+            .get(*piece)
+            .map(|e| *e)
+            .unwrap_or(false)
     }
 
     /// Get the known metadata from the torrent.
@@ -1148,7 +1151,12 @@ impl PeerContext {
         wanted_pieces
             .into_iter()
             .filter(|piece| {
-                remote_has_all_pieces || self.remote_pieces.get(piece.index).unwrap_or_default()
+                remote_has_all_pieces
+                    || self
+                        .remote_pieces
+                        .get(piece.index)
+                        .map(|e| *e)
+                        .unwrap_or_default()
             })
             .any(|piece| !self.client_pending_requests.contains_key(&piece.index))
     }
@@ -1314,8 +1322,7 @@ impl PeerContext {
 
                 // extend the remote pieces bitfield if needed
                 if self.remote_pieces.len() < bitfield_len {
-                    let additional_len = bitfield_len - self.remote_pieces.len();
-                    self.remote_pieces.extend(vec![false; additional_len]);
+                    self.remote_pieces.resize(bitfield_len, false);
                 }
 
                 self.determine_client_interest_state().await;
@@ -1447,9 +1454,12 @@ impl PeerContext {
             PeerCommand::GetRemoteInterestState { response } => {
                 response.send(self.remote_interest_state)
             }
-            PeerCommand::GetRemoteHasPiece { piece, response } => {
-                response.send(self.remote_pieces.get(piece).unwrap_or_default())
-            }
+            PeerCommand::GetRemoteHasPiece { piece, response } => response.send(
+                self.remote_pieces
+                    .get(piece)
+                    .map(|bit| *bit)
+                    .unwrap_or_default(),
+            ),
             PeerCommand::HasWantedPieces { response } => {
                 response.send(self.has_wanted_piece().await)
             }
@@ -1881,15 +1891,14 @@ impl PeerContext {
             }
 
             // increase the size of the BitVec if metadata is still being retrieved
-            let additional_len = piece as usize + 1 - self.remote_pieces.len();
-            self.remote_pieces.extend(vec![false; additional_len]);
+            self.remote_pieces.resize(piece, false);
         }
 
         self.remote_pieces.set(piece, has_piece);
 
         self.metrics
             .available_pieces
-            .set(self.remote_pieces.count_ones());
+            .set(self.remote_pieces.count_ones() as u64);
 
         if has_piece {
             if !self.is_client_interested() {
@@ -1956,7 +1965,7 @@ impl PeerContext {
         }
 
         let bitfield_len = self.data_pool.num_of_pieces().await;
-        self.update_remote_pieces(BitVec::from_elem(bitfield_len, have_all))
+        self.update_remote_pieces(BitVec::repeat(have_all, bitfield_len))
             .await;
         self.metrics.available_pieces.set(bitfield_len as u64);
         self.determine_client_interest_state().await;
@@ -2025,12 +2034,13 @@ impl PeerContext {
             // reject any remaining pending requests as specified in BEP6 when entering the choked state
             // this should prevent race conditions in which case we're still sending some piece data while
             // the client is entering the choked state
-            let futures = std::mem::take(&mut self.remote_pending_requests)
-                .into_iter()
-                .map(|e| self.send_reject_request(e))
-                .collect_vec();
+            for request in std::mem::take(&mut self.remote_pending_requests) {
+                if self.connection.is_closed() {
+                    break;
+                }
 
-            futures::future::join_all(futures).await;
+                self.send_reject_request(request).await;
+            }
         } else {
             // clear any remaining pending requests as specified in BEP3 when entering the choked state
             self.remote_pending_requests.clear();
@@ -2047,9 +2057,7 @@ impl PeerContext {
 
         {
             if self.remote_fast_pieces.len() < piece {
-                // extend the bitfield
-                let additional_len = piece as usize + 1 - self.remote_fast_pieces.len();
-                self.remote_fast_pieces.extend(vec![false; additional_len]);
+                self.remote_fast_pieces.resize(piece, false);
             }
 
             self.remote_fast_pieces.set(piece, true);
@@ -2188,7 +2196,14 @@ impl PeerContext {
             .unwrap_or_default()
             .into_iter()
             // filter out the pieces the remote doesn't have
-            .filter(|e| remote_has_all_pieces || self.remote_pieces.get(e.index).unwrap_or(false))
+            .filter(|e| {
+                remote_has_all_pieces
+                    || self
+                        .remote_pieces
+                        .get(e.index)
+                        .map(|bit| *bit)
+                        .unwrap_or(false)
+            })
             // filter out any pending requests which have already been sent
             .filter(|e| !self.client_pending_requests.contains_key(&e.index))
             // take a max of X pieces
@@ -2226,7 +2241,7 @@ impl PeerContext {
             .iter()
             .enumerate()
             // filter out the non-fast pieces
-            .filter(|(_, value)| *value)
+            .filter(|(_, value)| **value)
             // filter only for wanted pieces
             .filter(|(piece, _)| wanted_pieces.iter().any(|e| &e.index == piece))
             // filter out any pending requests which have already been sent
@@ -2333,7 +2348,7 @@ impl PeerContext {
 
             if is_metadata_known && bitfield.all() {
                 message = Some(Message::HaveAll);
-            } else if !is_metadata_known || bitfield.none() {
+            } else if !is_metadata_known || bitfield.not_any() {
                 message = Some(Message::HaveNone);
             }
 
@@ -2405,7 +2420,7 @@ impl PeerContext {
 
     /// Send the reject request to the remote peer.
     /// This is only executed if the fast protocol is enabled.
-    async fn send_reject_request(&self, request: Request) {
+    async fn send_reject_request(&mut self, request: Request) {
         self.metrics.rejects.inc();
 
         // if the fast protocol is disabled, then we don't send a reject
@@ -2416,10 +2431,23 @@ impl PeerContext {
         let piece = request.index;
         match self.send(Message::RejectRequest(request)).await {
             Ok(_) => trace!("Peer {} rejected remote request {}", self, piece),
-            Err(e) => warn!(
-                "Peer {} failed to reject remote request {}, {}",
-                self, piece, e
-            ),
+            Err(e) => {
+                warn!(
+                    "Peer {} failed to reject remote request {}, {}",
+                    self, piece, e
+                );
+                if let Error::Io(e) = e {
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::Interrupted
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::ConnectionRefused
+                    ) {
+                        self.close(CloseReason::TimedOutRequest).await
+                    }
+                }
+            }
         }
     }
 
@@ -3031,7 +3059,10 @@ mod tests {
         let source_peer_bitfield = source_peer.client_piece_bitfield().await;
         assert_eq!(
             true,
-            source_peer_bitfield.get(29).unwrap_or_default(),
+            source_peer_bitfield
+                .get(29)
+                .map(|bit| *bit)
+                .unwrap_or_default(),
             "expected piece 29 to be available in the source peer"
         );
 
