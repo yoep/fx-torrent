@@ -51,14 +51,13 @@ impl PeerPool {
         }
     }
 
-    /// Returns an existing peer from the pool by the given handle.
-    /// The returned instance is a weak reference that can be dropped by the pool at any time.
-    pub fn get(&self, handle: &PeerHandle) -> Option<Peer> {
+    /// Returns a peer reference from the pool by the given handle.
+    pub fn get(&self, handle: &PeerHandle) -> Option<&Peer> {
         self.peers
             .values()
             .filter_map(|e| e.connection.as_ref())
             .find(|conn| conn.peer.handle() == handle)
-            .map(|conn| conn.peer.clone())
+            .map(|conn| &conn.peer)
     }
 
     /// Returns the total number of known peer addresses in the pool.
@@ -66,14 +65,13 @@ impl PeerPool {
         self.peers.len()
     }
 
-    /// Returns an existing peer from the pool by the given address.
-    /// The returned instance is a weak reference that can be dropped by the pool at any time.
-    pub fn get_by_addr(&self, addr: &SocketAddr) -> Option<Peer> {
+    /// Returns a peer reference from the pool by the given address.
+    pub fn get_by_addr(&self, addr: &SocketAddr) -> Option<&Peer> {
         self.peers
             .values()
             .filter_map(|e| e.connection.as_ref())
             .find(|conn| conn.peer.addr() == addr)
-            .map(|conn| conn.peer.clone())
+            .map(|conn| &conn.peer)
     }
 
     /// Returns an iterator over the peers in the pool.

@@ -165,6 +165,12 @@ impl TorrentConfig {
     }
 }
 
+impl Default for TorrentConfig {
+    fn default() -> Self {
+        Self::builder().build()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct TorrentConfigBuilder {
     client_name: Option<String>,

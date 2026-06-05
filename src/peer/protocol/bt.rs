@@ -1,6 +1,6 @@
 use crate::peer::extension::{ExtensionNumber, ExtensionRegistry};
 use crate::peer::{Error, PeerId, ProtocolExtensionFlags, Result};
-use crate::{bencode, BitVec, CompactIp, InfoHash, PieceIndex, PiecePart};
+use crate::{bencode, BitVec, CompactIp, InfoHash, PieceBlock, PieceIndex};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use log::trace;
 use serde::{Deserialize, Serialize};
@@ -573,8 +573,8 @@ impl TryFrom<Cursor<&[u8]>> for Request {
     }
 }
 
-impl From<&PiecePart> for Request {
-    fn from(value: &PiecePart) -> Self {
+impl From<PieceBlock> for Request {
+    fn from(value: PieceBlock) -> Self {
         Self {
             index: value.piece,
             begin: value.begin,
@@ -591,17 +591,6 @@ pub struct Piece {
     pub begin: usize,
     /// The data of the piece
     pub data: Vec<u8>,
-}
-
-impl Piece {
-    /// Get the related request for this piece data.
-    pub fn request(&self) -> Request {
-        Request {
-            index: self.index,
-            begin: self.begin,
-            length: self.data.len(),
-        }
-    }
 }
 
 impl TryFrom<Cursor<&[u8]>> for Piece {
@@ -621,6 +610,16 @@ impl TryFrom<Cursor<&[u8]>> for Piece {
             begin: begin as usize,
             data: buffer,
         })
+    }
+}
+
+impl From<&Piece> for Request {
+    fn from(value: &Piece) -> Self {
+        Self {
+            index: value.index,
+            begin: value.begin,
+            length: value.data.len(),
+        }
     }
 }
 

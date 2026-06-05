@@ -4,11 +4,11 @@ use crate::peer::{
     PeerId, PeerState, Result,
 };
 use crate::torrent::InnerTorrent;
-use crate::{BitVec, FileAttributeFlags, Piece, TorrentFileInfo, TorrentMetadata};
+use crate::{BitVec, FileAttributeFlags, PieceBlock, PieceIndex, TorrentFileInfo, TorrentMetadata};
 use derive_more::Display;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use fx_handle::Handle;
-use log::{debug, warn};
+use log::debug;
 use percent_encoding::{percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use reqwest::redirect::Policy;
 use reqwest::Client;
@@ -110,6 +110,12 @@ impl HttpPeer {
         BitVec::repeat(true, total_pieces)
     }
 
+    /// Request one or more piece blocks from the remote peer.
+    pub async fn request(&self, piece: PieceIndex, blocks: &[PieceBlock]) -> Result<()> {
+        let metadata = self.inner.torrent.metadata().await?;
+        self.inner.request_piece(&piece, blocks, &metadata).await
+    }
+
     /// Close the peer connection.
     pub fn close(&self) {
         self.inner.cancellation_token.cancel();
@@ -145,7 +151,6 @@ struct HttpPeerContext {
 impl HttpPeerContext {
     async fn start(&self) {
         let mut stats_interval = interval(STATUS_INTERVAL);
-        let mut interval = interval(Duration::from_secs(3));
 
         loop {
             select! {
@@ -154,58 +159,39 @@ impl HttpPeerContext {
                     self.callbacks.invoke(PeerEvent::Stats(self.metrics.snapshot()));
                     self.metrics.tick(STATUS_INTERVAL);
                 }
-                _ = interval.tick() => self.check_for_wanted_pieces().await,
             }
         }
 
         debug!("Http peer {} main loop ended", self);
     }
 
-    async fn check_for_wanted_pieces(&self) {
-        let wanted_pieces = self
-            .torrent
-            .wanted_request_pieces()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .take(3);
-        let metadata = match self.torrent.metadata().await {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-
-        for piece in wanted_pieces {
-            // request a permit and release it after requesting the piece, don't release it while requesting
-            if let Some(_permit) = self.torrent.request_download_permit(&piece.index).await {
-                if let Err(e) = self.request_piece(&piece, &metadata).await {
-                    warn!(
-                        "Torrent failed to request webseed data from {}, {}",
-                        self, e
-                    );
-                    break;
-                }
-            }
-        }
-    }
-
     /// Try to request the given piece.
     /// It returns an error if the piece couldn't be requested from the webseed.
-    async fn request_piece(&self, piece: &Piece, metadata: &TorrentMetadata) -> Result<()> {
-        let piece_len = piece.len();
+    async fn request_piece(
+        &self,
+        piece_index: &PieceIndex,
+        blocks: &[PieceBlock],
+        metadata: &TorrentMetadata,
+    ) -> Result<()> {
         let file_index = self
             .torrent
-            .file_index_for(&piece.index)
+            .file_index_for(piece_index)
             .await
-            .ok_or(Error::InvalidPiece(piece.index))?;
+            .ok_or(Error::InvalidPiece(*piece_index))?;
+        let piece = match self.torrent.piece(piece_index).await {
+            None => return Err(Error::InvalidPiece(*piece_index)),
+            Some(piece) => piece,
+        };
         let mut cursor = 0usize;
-        let mut buffer = vec![0u8; piece_len];
+        let len = blocks.iter().map(|block| block.length).sum();
+        let mut buffer = vec![0u8; len];
 
-        while cursor < piece_len {
+        while cursor < len {
             let file = self
                 .torrent
                 .file(&file_index)
                 .await
-                .ok_or(Error::InvalidPiece(piece.index))?;
+                .ok_or(Error::InvalidPiece(*piece_index))?;
             if file.attributes().contains(FileAttributeFlags::PaddingFile) {
                 cursor += file.len();
                 continue;
@@ -252,22 +238,25 @@ impl HttpPeerContext {
             }
 
             // loop over each part that needs to be completed and fetch it from the body
-            for part in piece.parts_to_request() {
+            for block in blocks {
                 let data_len = buffer.len();
-                let part_start = part.begin;
-                let part_end = part_start.saturating_add(part.length);
-                if part_end > data_len {
+                let block_start = block.begin;
+                let block_end = block_start.saturating_add(block.length);
+                if block_end > data_len {
                     return Err(Error::Io(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!(
-                            "part end {} is out of bound for response data length {}",
-                            part_end, data_len
+                            "block end {} is out of bound for response data length {}",
+                            block_end, data_len
                         ),
                     )));
                 }
 
-                let data = &buffer[part_start..part_end];
-                let _ = self.torrent.piece_part_completed(part, data).await;
+                let data = &buffer[block_start..block_end];
+                let _ = self
+                    .torrent
+                    .piece_block_received(&self.handle, block, data)
+                    .await;
             }
         }
 

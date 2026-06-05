@@ -2,7 +2,7 @@ use crate::info_hash::InfoHash;
 use crate::{bencode, error, Magnet, Sha1Hash, Sha256Hash};
 use crate::{Result, TorrentError};
 use bitmask_enum::bitmask;
-use log::{debug, warn};
+use log::warn;
 use serde::de::{Error, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};
@@ -394,11 +394,7 @@ impl TorrentMetadataInfo {
             .collect()
     }
 
-    /// Get the total file length/size of the torrent.
-    ///
-    /// # Returns
-    ///
-    /// Returns the total file size of the torrent in bytes.
+    /// Returns the total amount of bytes in the torrent.
     pub fn len(&self) -> usize {
         match &self.files {
             TorrentFiles::Single { file } => file.length.clone() as usize,
@@ -704,9 +700,10 @@ impl TorrentMetadata {
             .collect()
     }
 
-    /// Returns the total number of pieces in the torrent, or [None] if the [TorrentMetadataInfo] is unknown.
+    /// Returns the total number of pieces in the torrent,
+    /// or [None] if the [TorrentMetadataInfo] is unknown.
     ///
-    /// This can only be calculated if the [TorrentMetadataInfo] is known.
+    /// The total number of pieces can only be calculated if the [TorrentMetadataInfo] is known.
     pub fn total_pieces(&self) -> Option<usize> {
         self.info
             .as_ref()
@@ -724,7 +721,7 @@ impl TorrentMetadata {
                 if expected_pieces == num_pieces {
                     Some(num_pieces)
                 } else {
-                    debug!(
+                    warn!(
                         "Unable to determine pieces, expected {} but got {} instead",
                         expected_pieces, num_pieces
                     );

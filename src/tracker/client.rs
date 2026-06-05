@@ -1251,7 +1251,7 @@ mod tests {
         async fn test_get_by_handle() {
             init_logger!();
             let server = TrackerServer::new().await.unwrap();
-            let client = TrackerClient::new(Duration::from_secs(1));
+            let client = TrackerClient::new(Duration::from_secs(2));
 
             // add the tracker to the client
             let handle = client
@@ -1274,7 +1274,7 @@ mod tests {
         async fn test_get_by_url() {
             init_logger!();
             let server = TrackerServer::new().await.unwrap();
-            let client = TrackerClient::new(Duration::from_secs(1));
+            let client = TrackerClient::new(Duration::from_secs(2));
 
             // add the tracker to the client
             let url = server.url();
@@ -1300,7 +1300,7 @@ mod tests {
         init_logger!();
         let info_hash =
             InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
-        let manager = TrackerClient::new(Duration::from_secs(1));
+        let manager = TrackerClient::new(Duration::from_secs(2));
 
         // try to remove a non-existing torrent
         manager.remove_torrent(&info_hash).await;

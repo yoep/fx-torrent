@@ -25,7 +25,7 @@ use crate::storage::{DiskStorage, MemoryStorage, Storage, StorageParams};
 use crate::torrent::Torrent;
 use crate::tracker::TrackerClient;
 use crate::Result;
-pub use crate::SessionHandle;
+use crate::SessionHandle;
 use crate::TorrentTracker;
 use crate::{
     ExtensionFactory, InfoHash, Magnet, NoSessionCache, TorrentConfig, TorrentError, TorrentEvent,
@@ -55,10 +55,10 @@ const DEFAULT_CACHE_LIMIT: usize = 10;
 /// The [StorageExtension] factory used to create underlying storage for torrents.
 pub type SessionStorageFactory = dyn Fn(StorageParams) -> Storage + Send + Sync;
 
-#[deprecated(since = "0.9.2", note = "Use [FxSession] instead")]
+#[deprecated(since = "0.10.0", note = "Use [FxSession] instead")]
 #[doc(hidden)]
 pub type FxTorrentSession = FxSession;
-#[deprecated(since = "0.9.2", note = "Use [FxSessionBuilder] instead")]
+#[deprecated(since = "0.10.0", note = "Use [FxSessionBuilder] instead")]
 #[doc(hidden)]
 pub type FxTorrentSessionBuilder = FxSessionBuilder;
 
@@ -84,7 +84,7 @@ pub enum SessionEvent {
 /// This trait will be removed near future.
 #[async_trait]
 #[doc(hidden)]
-#[deprecated(since = "0.9.2", note = "Use [FxTorrentSession] instead")]
+#[deprecated(since = "0.10.0", note = "Use [FxTorrentSession] instead")]
 pub trait Session: Debug + Callback<SessionEvent> + Send + Sync {
     /// Retrieve the unique session identifier for this session.
     /// This handle can be used to identify a session.

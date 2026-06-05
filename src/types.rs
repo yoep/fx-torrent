@@ -6,6 +6,12 @@ pub type SessionHandle = Handle;
 /// A unique handle identifier of a [crate::Torrent].
 pub type TorrentHandle = Handle;
 
+/// The alias type used to identify piece indexes.
+pub type PieceIndex = usize;
+
+/// The alias type used to identify piece part indexes.
+pub type BlockIndex = usize;
+
 /// The bitfield vector type used by the library.
 pub type BitVec = bitvec::vec::BitVec<u8, bitvec::order::Msb0>;
 

@@ -3,7 +3,6 @@ pub use connect_dht_nodes::*;
 pub use connect_peers::*;
 pub use connect_trackers::*;
 pub use create_pieces_and_files::*;
-pub use op::*;
 #[cfg(feature = "dht")]
 pub use retrieve_dht_peers::*;
 #[cfg(feature = "lsd")]
@@ -11,6 +10,7 @@ pub use retrieve_lsd_peers::*;
 pub use retrieve_metadata::*;
 pub use retrieve_tracker_peers::*;
 pub use stats::*;
+pub use types::*;
 pub use validate_files::*;
 
 #[cfg(feature = "dht")]
@@ -18,7 +18,6 @@ mod connect_dht_nodes;
 mod connect_peers;
 mod connect_trackers;
 mod create_pieces_and_files;
-mod op;
 #[cfg(feature = "dht")]
 mod retrieve_dht_peers;
 #[cfg(feature = "lsd")]
@@ -26,6 +25,7 @@ mod retrieve_lsd_peers;
 mod retrieve_metadata;
 mod retrieve_tracker_peers;
 mod stats;
+mod types;
 mod validate_files;
 
 use std::fmt::Debug;

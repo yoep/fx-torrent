@@ -1,4 +1,3 @@
-pub use bt_peer::*;
 pub use discovery::*;
 pub use discovery_tcp::*;
 pub use discovery_utp::*;
@@ -7,12 +6,12 @@ pub use metrics::*;
 pub use peer::*;
 pub use peer_id::*;
 pub use protocol::CloseReason;
+pub use types::*;
 
 #[cfg(test)]
 #[macro_use]
 mod test_macros;
 
-mod bt_peer;
 mod discovery;
 mod discovery_tcp;
 mod discovery_utp;
@@ -23,14 +22,15 @@ mod peer;
 mod peer_connection;
 mod peer_id;
 mod protocol;
+mod types;
 pub mod webseed;
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
     use crate::peer::protocol::UtpSocket;
-    use crate::peer::TorrentPeer;
-    use crate::{BitVec, Torrent};
+    use crate::peer::Extension;
+    use crate::{BitVec, PieceBlock, PieceIndex, Torrent};
     use async_trait::async_trait;
     use fx_callback::{Callback, Subscription};
     use mockall::mock;
@@ -44,7 +44,7 @@ pub mod tests {
         pub Peer {}
 
         #[async_trait]
-        impl TorrentPeer for Peer {
+        impl Extension for Peer {
             fn handle(&self) -> &PeerHandle;
             fn addr(&self) -> &SocketAddr;
             fn client_info(&self) -> &PeerClientInfo;
@@ -52,6 +52,10 @@ pub mod tests {
             async fn state(&self) -> PeerState;
             async fn is_seed(&self) -> bool;
             async fn remote_piece_bitfield(&self) -> BitVec;
+            async fn remote_fast_bitfield(&self) -> BitVec;
+            async fn remote_choke_state(&self) -> ChokeState;
+            async fn suggested_pieces(&self) -> Vec<PieceIndex>;
+            async fn request(&self, piece: PieceIndex, blocks: &[PieceBlock]) -> Result<()>;
             async fn close(&self);
         }
 

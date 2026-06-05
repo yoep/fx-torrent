@@ -208,6 +208,96 @@ fn example() {
 }
 ```
 
+### Piece Picker Extension
+
+Piece picker extensions allow you to customize or completely override the core piece selection algorithm.
+Piece selection tasks are executed either periodically via a background ticker or instantly on-demand when requested by a peer.
+
+To implement a custom piece picker algorithm, implement the `fx_torrent::piece_picker::Extension` trait.
+
+_example piece picker extension_
+```rust
+#[derive(Debug)]
+pub struct MyPiecePicker;
+#[async_trait]
+impl Extension for MyPiecePicker {
+    async fn pick_pieces(&mut self, peer: &Peer) {
+        // Your custom piece picking algorithm goes here
+    }
+
+    async fn tick<'a>(&'a mut self, peers: Vec<&'a Peer>) {
+        // Tick-based piece picking logic goes here
+    }
+
+    // Additional trait methods
+}
+
+fn example () {
+    // 1. Piece picker extension directly in a torrent
+    let torrent = Torrent::request()
+        .piece_picker(|
+            torrent: InnerTorrent,
+            data_pool: DataPool,
+            storage: Arc<Storage>,
+            options: PickerOptions| MyPiecePicker.into())
+        .build()
+        .unwrap();
+
+    // 2. Piece picker extension in a session
+    let session = FxSession::builder()
+        .piece_picker(|
+            torrent: InnerTorrent,
+            data_pool: DataPool,
+            storage: Arc<Storage>,
+            options: PickerOptions| MyPiecePicker.into())
+        .build()
+        .unwrap();
+}
+```
+
+#### Piece Picker Strategy Extension
+
+The `fx_torrent::piece_picker::FxPiecePicker` architecture allows sub-strategies to be sequentially stacked or overridden.
+These strategies operate in an order-dependent chain,
+meaning their registration order explicitly dictates execution priority during the piece picking lifecycle.
+
+```rust
+#[derive(Debug)]
+pub struct MyStrategy;
+impl Extension for MyStrategy {
+    async fn pick_pieces<'a>(
+        &'a self,
+        peer: &Peer,
+        peer_info: &'a PeerInfo<'a>,
+        pieces: Vec<&PieceInfo>,
+        options: PickerOptions,
+    ) -> Vec<PieceBlock> {
+        // Your custom piece picking logic goes here
+        vec![]
+    }
+}
+
+fn example() {
+    let torrent = Torrent::request()
+        .piece_picker(|
+            torrent: InnerTorrent,
+            data_pool: DataPool,
+            storage: Arc<Storage>,
+            options: PickerOptions| FxPiecePicker::new(
+            torrent,
+            data_pool,
+            storage,
+            vec![
+                MyStrategy.into(),
+                PriorityStrategy::new().into(),
+            ],
+            32 * 1024 * 1024
+        ))
+        .build()
+        .unwrap();
+}
+```
+
 ## Features
 
 - [x] [BEP3](https://www.bittorrent.org/beps/bep_0003.html) - The BitTorrent Protocol Specification
