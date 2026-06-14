@@ -19,7 +19,7 @@ pub type ExtensionRegistry = HashMap<ExtensionName, ExtensionNumber>;
 
 /// A peer extension that is used within the BitTorrent protocol.
 /// An extension can only be activated when the remote peer supports **BEP10** and
-/// the same name is used in the [crate::peer::bt_peer::ExtendedHandshake] message.
+/// the same name is used in the [crate::peer::peer::ExtendedHandshake] message.
 #[async_trait]
 pub trait Extension: Debug + Send + Sync {
     /// Returns the unique name of the extension.

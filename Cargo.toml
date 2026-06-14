@@ -28,7 +28,7 @@ async-trait = "0.1"
 axum = { version = "0.8", optional = true }
 base32 = "0.5"
 base64 = "0.22"
-bit-vec = "0.9"
+bitvec = "1.0"
 bitmask-enum = "2.2"
 byteorder = "1.5"
 crc = "3.4"

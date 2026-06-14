@@ -1,7 +1,7 @@
 use crate::operation::TorrentOperationResult;
 use crate::storage::Storage;
 use crate::torrent::InnerTorrent;
-use crate::{File, Piece, PieceIndex, TorrentContext, TorrentFlags, TorrentState};
+use crate::{File, Piece, TorrentContext, TorrentFlags, TorrentState};
 use futures::{stream, StreamExt};
 use log::{debug, info};
 use std::fmt::Debug;
@@ -142,47 +142,27 @@ impl FileValidationOperation {
         });
     }
 
-    /// Validate the piece data stored within the [StorageExtension] of the torrent.
-    /// Returns the [PieceIndex] when the stored piece data is valid, else [None].
-    async fn validate_piece(
-        torrent: InnerTorrent,
-        storage: Arc<Storage>,
-        piece: Piece,
-    ) -> Option<PieceIndex> {
-        let expected_v1 = piece.hash.hash_v1();
-        let expected_v2 = piece.hash.hash_v2();
-
-        // early fail if the piece hash is missing
-        if expected_v1.is_none() && expected_v2.is_none() {
-            debug!(
-                "Torrent {} is unable to validate piece {}, piece hash is missing or invalid",
-                torrent, piece.index
-            );
-            return None;
-        }
-
-        let validation_result = match (expected_v1, expected_v2) {
-            (Some(_), Some(hash_v2)) | (None, Some(hash_v2)) => storage
-                .hash_v2(&piece.index)
-                .await
-                .ok()
-                .map(|hash| hash_v2 == hash)
-                .unwrap_or(false),
-            (Some(hash_v1), None) => storage
-                .hash_v1(&piece.index)
-                .await
-                .ok()
-                .map(|hash| hash == hash_v1)
-                .unwrap_or(false),
-            _ => false,
+    /// Hash the given piece.
+    async fn hash_piece(torrent: InnerTorrent, storage: Arc<Storage>, piece: Piece) {
+        match (piece.hash.has_v1(), piece.hash.has_v2()) {
+            (true, true) | (false, true) => {
+                torrent
+                    .piece_verified(&piece.index, None, storage.hash_v2(&piece.index).await.ok())
+                    .await;
+            }
+            (true, false) => {
+                torrent
+                    .piece_verified(&piece.index, storage.hash_v1(&piece.index).await.ok(), None)
+                    .await;
+            }
+            (false, false) => {
+                debug!(
+                    "Torrent {} is unable to validate piece {}, piece hash is missing or invalid",
+                    torrent, piece.index
+                );
+                torrent.piece_verified(&piece.index, None, None).await;
+            }
         };
-
-        if validation_result {
-            let _ = torrent.piece_completed(&piece.index).await;
-            Some(piece.index)
-        } else {
-            None
-        }
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
@@ -198,29 +178,24 @@ impl FileValidationOperation {
         let start = Instant::now();
         let futures: Vec<_> = pieces
             .into_iter()
-            .map(|piece| Self::validate_piece(torrent.clone(), storage.clone(), piece))
+            .map(|piece| Self::hash_piece(torrent.clone(), storage.clone(), piece))
             .collect();
 
-        let valid_pieces = select! {
+        select! {
             _ = cancelled => {
                 return;
             },
-            futures = stream::iter(futures)
+            _ = stream::iter(futures)
                 .buffer_unordered(max_parallel)
-                .collect::<Vec<_>>() => {
-                    futures.into_iter()
-                    .flat_map(|e| e)
-                    .collect::<Vec<_>>()
-            }
-        };
+                .collect::<Vec<_>>() => {}
+        }
 
         let _ = ready_sender.send(());
         let time_taken = start.elapsed();
         info!(
-            "Torrent {} completed {} file validation(s) ({} valid chunks) in {:.3} seconds",
+            "Torrent {} completed {} file validation(s) in {:.3} seconds",
             torrent,
             num_of_files,
-            valid_pieces.len(),
             time_taken.as_secs_f64()
         );
     }
@@ -339,14 +314,7 @@ mod tests {
         let result = operation.execute(&mut context).await;
         assert_eq!(TorrentOperationResult::Continue, result);
 
-        let pieces = context.data_pool().pieces().await;
         for piece in 0..30 {
-            assert_eq!(
-                true,
-                pieces.get(piece).unwrap().is_completed(),
-                "expected piece {} to be completed",
-                piece
-            );
             assert_eq!(
                 true,
                 context.data_pool().is_piece_completed(&piece).await,

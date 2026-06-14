@@ -41,8 +41,7 @@ impl Storage {
         }
     }
 
-    /// Write the piece data to the storage for the given bytes.
-    /// The given bytes should be verified against the hash before calling this fn.
+    /// Write the given data slice of the piece to the storage.
     ///
     /// # Arguments
     ///

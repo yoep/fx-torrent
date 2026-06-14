@@ -1,7 +1,7 @@
 use fx_callback::Callback;
+use fx_torrent::prelude::*;
 use fx_torrent::storage::MemoryStorage;
 use fx_torrent::tracker::TrackerClient;
-use fx_torrent::{Torrent, TorrentEvent, TorrentFlags, TorrentMetadata, TorrentState};
 use std::path::PathBuf;
 use std::time::Duration;
 use std::{env, fs, io};

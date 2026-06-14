@@ -1,11 +1,9 @@
 use crate::channel::{ChannelReceiver, ChannelSender, Reply};
 use crate::{
-    File, FileAttributeFlags, FileIndex, FilePriority, PartIndex, Piece, PieceIndex, PiecePart,
+    BitVec, File, FileAttributeFlags, FileIndex, FilePriority, Piece, PieceBlock, PieceIndex,
     PiecePriority,
 };
-use bit_vec::BitVec;
 use itertools::Itertools;
-use log::warn;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
@@ -148,10 +146,10 @@ impl DataPool {
             .unwrap_or_default()
     }
 
-    /// Returns the piece part matching the given offset within the piece, if found, else [None].
-    pub async fn find_piece_part(&self, piece: &PieceIndex, offset: usize) -> Option<PiecePart> {
+    /// Returns the [PieceBlock] matching the given offset within the piece, if found.
+    pub async fn find_piece_block(&self, piece: &PieceIndex, offset: usize) -> Option<PieceBlock> {
         self.sender
-            .send(|tx| DataPoolCommand::FindPiecePart {
+            .send(|tx| DataPoolCommand::FindPieceBlock {
                 piece: *piece,
                 offset,
                 response: tx,
@@ -215,19 +213,7 @@ impl DataPool {
             .unwrap_or_default()
     }
 
-    /// Returns `true` if the torrent has reached the end game, else `false`.
-    ///
-    /// The end game is reached when the last 3 percent, counted with a precision of 2 decimals,
-    /// of the pieces are left to be completed.
-    pub async fn is_end_game(&self) -> bool {
-        self.sender
-            .send(|tx| DataPoolCommand::IsEndGame { response: tx })
-            .await
-            .await
-            .unwrap_or_default()
-    }
-
-    /// Returns `true` if the given piece has completed downloading, else `false`.
+    /// Returns `true` if the given piece has been downloaded and validated, else `false`.
     pub async fn is_piece_completed(&self, piece: &PieceIndex) -> bool {
         let rx = self
             .sender
@@ -239,25 +225,15 @@ impl DataPool {
         rx.await.unwrap_or_default()
     }
 
-    /// Set the completion state of the given piece index.
-    pub async fn set_completed(&self, piece: &PieceIndex, completed: bool) {
+    /// Set the completion state for the given piece slice.
+    pub async fn set_completed(&self, pieces: &[PieceIndex], completed: bool) {
         self.sender
             .send(|tx| DataPoolCommand::SetPieceCompleted {
-                index: *piece,
+                pieces: pieces.to_vec(),
                 completed,
                 response: tx,
             })
             .await;
-    }
-
-    /// Set the given piece part as completed.
-    pub async fn set_part_completed(&self, piece: &PieceIndex, part: &PartIndex) {
-        self.sender
-            .fire_and_forget(DataPoolCommand::SetPiecePartCompleted {
-                piece: *piece,
-                part: *part,
-            })
-            .await
     }
 
     /// Returns `true` if the given torrent byte range is available (downloaded and validated), else `false`.
@@ -414,10 +390,10 @@ enum DataPoolCommand {
         offset: usize,
         response: Reply<Option<Piece>>,
     },
-    FindPiecePart {
+    FindPieceBlock {
         piece: PieceIndex,
         offset: usize,
-        response: Reply<Option<PiecePart>>,
+        response: Reply<Option<PieceBlock>>,
     },
     PiecePriorities {
         response: Reply<BTreeMap<PieceIndex, PiecePriority>>,
@@ -438,13 +414,9 @@ enum DataPoolCommand {
         response: Reply<bool>,
     },
     SetPieceCompleted {
-        index: PieceIndex,
+        pieces: Vec<PieceIndex>,
         completed: bool,
         response: Reply<()>,
-    },
-    SetPiecePartCompleted {
-        piece: PieceIndex,
-        part: PartIndex,
     },
     InterestedPieces {
         response: Reply<Vec<PieceIndex>>,
@@ -475,9 +447,6 @@ enum DataPoolCommand {
     IsCompleted {
         response: Reply<bool>,
     },
-    IsEndGame {
-        response: Reply<bool>,
-    },
     HasBytes {
         bytes: Range<usize>,
         response: Reply<bool>,
@@ -499,7 +468,7 @@ struct InnerDataPool {
 impl InnerDataPool {
     fn new(pieces: Vec<Piece>) -> Self {
         Self {
-            completed_pieces: BitVec::from_elem(pieces.len(), false),
+            completed_pieces: BitVec::repeat(false, pieces.len()),
             pieces: pieces
                 .into_iter()
                 .map(|piece| (piece.index, piece))
@@ -544,14 +513,14 @@ impl InnerDataPool {
                 DataPoolCommand::FindPieceAtOffset { offset, response } => {
                     response.send(self.find_piece_at_offset(offset));
                 }
-                DataPoolCommand::FindPiecePart {
+                DataPoolCommand::FindPieceBlock {
                     piece,
                     offset,
                     response,
                 } => response.send(self.pieces.iter().find(|(idx, _)| *idx == &piece).and_then(
                     |(_, piece)| {
                         piece
-                            .parts
+                            .blocks
                             .iter()
                             .find(|part| part.begin == offset)
                             .cloned()
@@ -577,15 +546,12 @@ impl InnerDataPool {
                     response.send(self.is_piece_completed(&index));
                 }
                 DataPoolCommand::SetPieceCompleted {
-                    index,
+                    pieces,
                     completed,
                     response,
                 } => {
-                    self.set_piece_completed(&index, completed);
+                    self.set_pieces_completion_state(&pieces, completed);
                     response.send(());
-                }
-                DataPoolCommand::SetPiecePartCompleted { piece: index, part } => {
-                    self.set_part_completed(&index, &part);
                 }
                 DataPoolCommand::InterestedPieces { response } => {
                     response.send(self.interested_pieces());
@@ -613,9 +579,6 @@ impl InnerDataPool {
                 }
                 DataPoolCommand::IsCompleted { response } => {
                     response.send(self.is_completed());
-                }
-                DataPoolCommand::IsEndGame { response } => {
-                    response.send(self.is_end_game());
                 }
                 DataPoolCommand::FileIndexFor {
                     piece: index,
@@ -646,7 +609,7 @@ impl InnerDataPool {
             .collect();
 
         self.pieces = pieces;
-        self.completed_pieces = BitVec::from_elem(pieces_len, false);
+        self.completed_pieces = BitVec::repeat(false, pieces_len);
     }
 
     fn set_files(&mut self, files: Vec<File>) {
@@ -672,9 +635,9 @@ impl InnerDataPool {
     }
 
     fn set_piece_priorities(&mut self, priorities: Vec<(PieceIndex, PiecePriority)>) {
-        for (index, priority) in &priorities {
-            if let Some(piece) = self.pieces.get_mut(index) {
-                piece.priority = *priority;
+        for (index, priority) in priorities {
+            if let Some(piece) = self.pieces.get_mut(&index) {
+                piece.priority = priority;
             }
         }
     }
@@ -704,7 +667,10 @@ impl InnerDataPool {
     }
 
     fn is_piece_completed(&self, piece: &PieceIndex) -> bool {
-        self.completed_pieces.get(*piece).unwrap_or_default()
+        self.completed_pieces
+            .get(*piece)
+            .map(|bit| *bit)
+            .unwrap_or_default()
     }
 
     fn is_completed(&self) -> bool {
@@ -713,32 +679,17 @@ impl InnerDataPool {
             .filter(|(_, piece)| piece.priority != PiecePriority::None)
             .map(|(index, _)| *index)
             .into_iter()
-            .all(|piece| self.completed_pieces.get(piece).unwrap_or(false))
+            .all(|piece| {
+                self.completed_pieces
+                    .get(piece)
+                    .map(|bit| *bit)
+                    .unwrap_or(false)
+            })
     }
 
-    fn set_piece_completed(&mut self, piece: &PieceIndex, completed: bool) {
-        if let Some(piece) = self.pieces.get_mut(piece) {
-            if completed {
-                piece.mark_completed();
-            } else {
-                piece.reset_completed_parts();
-            }
-        }
-
-        self.completed_pieces.set(*piece, completed)
-    }
-
-    fn set_part_completed(&mut self, piece_index: &PieceIndex, part: &PartIndex) {
-        if let Some(piece) = self.pieces.get_mut(piece_index) {
-            piece.part_completed(part);
-            if piece.is_completed() {
-                self.completed_pieces.set(*piece_index, true);
-            }
-        } else {
-            warn!(
-                "Data pool got piece part completed for unknown piece {}",
-                piece_index
-            );
+    fn set_pieces_completion_state(&mut self, pieces: &[PieceIndex], completed: bool) {
+        for piece in pieces {
+            self.completed_pieces.set(*piece, completed);
         }
     }
 
@@ -762,7 +713,7 @@ impl InnerDataPool {
         self.completed_pieces
             .iter()
             .enumerate()
-            .filter(|(_, completed)| *completed)
+            .filter(|(_, completed)| **completed)
             .map(|(index, _)| index)
             .collect()
     }
@@ -771,7 +722,7 @@ impl InnerDataPool {
         self.completed_pieces
             .iter()
             .enumerate()
-            .filter(|(_, completed)| *completed)
+            .filter(|(_, completed)| **completed)
             .filter_map(|(index, _)| self.pieces.get(&index))
             .map(|piece| piece.len())
             .sum()
@@ -831,27 +782,16 @@ impl InnerDataPool {
             .all(|(index, _)| self.is_piece_completed(index))
     }
 
-    fn is_end_game(&self) -> bool {
-        let interested_pieces = self.interested_pieces().len();
-        if interested_pieces == 0 {
-            return true;
-        }
-
-        let total_completed_pieces = self.completed_pieces.count_ones();
-        // if only 3 percent, counted with a precision of 2 decimals, of the pieces are left to be completed
-        // then we enter the end-game phase
-        let percentage_completed_pieces =
-            ((total_completed_pieces as f32 / interested_pieces as f32) * 10_000.0).round() / 100.0;
-
-        percentage_completed_pieces >= 97.0
-    }
-
     /// Check if the piece is wanted by the torrent.
     /// In such a case, the piece priority should not be [PiecePriority::None]
     /// and the piece should not have been completed yet.
     fn is_wanted_piece(bitfield: &BitVec, piece: &Piece) -> bool {
         piece.priority != PiecePriority::None
-            && bitfield.get(piece.index).unwrap_or_default() == false
+            && bitfield
+                .get(piece.index)
+                .map(|bit| *bit)
+                .unwrap_or_default()
+                == false
     }
 }
 
@@ -874,8 +814,7 @@ mod tests {
                     offset: 0,
                     length: 1024,
                     priority: PiecePriority::Normal,
-                    parts: vec![],
-                    completed_parts: Default::default(),
+                    blocks: vec![],
                     availability: 0,
                 },
                 Piece {
@@ -884,8 +823,7 @@ mod tests {
                     offset: 1024,
                     length: 1024,
                     priority: PiecePriority::None,
-                    parts: vec![],
-                    completed_parts: Default::default(),
+                    blocks: vec![],
                     availability: 0,
                 },
             ]);
@@ -894,7 +832,7 @@ mod tests {
             assert_eq!(true, result, "expected the piece to have been wanted");
 
             // set the piece as completed
-            pool.set_completed(&piece, true).await;
+            pool.set_completed(&[piece], true).await;
 
             let result = pool.is_piece_wanted(&piece).await;
             assert_eq!(false, result, "expected the piece to be no longer wanted");
@@ -910,8 +848,7 @@ mod tests {
                     offset: 0,
                     length: 1024,
                     priority: PiecePriority::Normal,
-                    parts: vec![],
-                    completed_parts: Default::default(),
+                    blocks: vec![],
                     availability: 0,
                 },
                 Piece {
@@ -920,8 +857,7 @@ mod tests {
                     offset: 1024,
                     length: 1024,
                     priority: PiecePriority::None,
-                    parts: vec![],
-                    completed_parts: Default::default(),
+                    blocks: vec![],
                     availability: 0,
                 },
             ]);
@@ -930,7 +866,7 @@ mod tests {
             assert_eq!(false, result, "expected the piece to not have been wanted");
 
             // set the piece as completed
-            pool.set_completed(&piece, true).await;
+            pool.set_completed(&[piece], true).await;
 
             let result = pool.is_piece_wanted(&piece).await;
             assert_eq!(false, result, "expected the piece to not have been wanted");
@@ -949,8 +885,7 @@ mod tests {
                     offset: 0,
                     length: 1024,
                     priority: PiecePriority::Normal,
-                    parts: vec![],
-                    completed_parts: Default::default(),
+                    blocks: vec![],
                     availability: 0,
                 },
                 Piece {
@@ -959,20 +894,19 @@ mod tests {
                     offset: 1024,
                     length: 1024,
                     priority: PiecePriority::Normal,
-                    parts: vec![],
-                    completed_parts: Default::default(),
+                    blocks: vec![],
                     availability: 0,
                 },
             ]);
 
-            pool.set_completed(&0, true).await;
+            pool.set_completed(&[0], true).await;
             let result = pool.is_completed().await;
             assert_eq!(
                 false, result,
                 "expected the torrent to not have been completed yet"
             );
 
-            pool.set_completed(&1, true).await;
+            pool.set_completed(&[1], true).await;
             let result = pool.is_completed().await;
             assert_eq!(true, result, "expected the torrent to have been completed");
         }
@@ -999,7 +933,7 @@ mod tests {
 
             // complete the first 2 pieces
             for index in 0..2 {
-                pool.set_completed(&index, true).await;
+                pool.set_completed(&[index], true).await;
             }
             let result = pool.num_completed_pieces().await;
             assert_eq!(2, result, "expected the number of completed pieces to be 2");
@@ -1131,8 +1065,7 @@ mod tests {
             ]);
 
             // set pieces to completed state
-            pool.set_completed(&0, true).await;
-            pool.set_completed(&1, true).await;
+            pool.set_completed(&[0, 1], true).await;
 
             // retrieve bytes available
             let result = pool.has_bytes(0..2048).await;
@@ -1299,8 +1232,7 @@ mod tests {
 
             // set the pieces with priorities in the pool
             pool.set_pieces(pieces).await;
-            pool.set_completed(&0, true).await;
-            pool.set_completed(&1, true).await;
+            pool.set_completed(&[0, 1], true).await;
 
             let result = pool.completed_pieces().await;
             assert_eq!(vec![0, 1], result, "expected the completed pieces to match");
@@ -1319,63 +1251,10 @@ mod tests {
 
             // set the pieces with priorities in the pool
             pool.set_pieces(pieces).await;
-            pool.set_completed(&1, true).await;
-            pool.set_completed(&3, true).await;
+            pool.set_completed(&[1, 3], true).await;
 
             let result = pool.completed_size().await;
             assert_eq!(1_536, result, "expected the completed size to match");
-        }
-    }
-
-    mod is_end_game {
-        use super::*;
-
-        #[tokio::test]
-        async fn test_end_game_not_reached() {
-            init_logger!();
-            let pieces = vec![
-                create_piece(0, 1024),
-                create_piece(1, 1024),
-                create_piece(2, 1024),
-                create_piece(3, 1024),
-            ];
-            let data_pool = DataPool::from(pieces);
-
-            data_pool.set_completed(&0, true).await;
-
-            let result = data_pool.is_end_game().await;
-            assert_eq!(
-                false, result,
-                "expected the torrent to not be in end-game phase yet"
-            );
-        }
-
-        #[tokio::test]
-        async fn test_end_game_reached() {
-            init_logger!();
-            let pieces = (0..100)
-                .into_iter()
-                .map(|i| create_piece(i, 256))
-                .collect::<Vec<_>>();
-            let data_pool = DataPool::from(pieces);
-
-            // complete 96 percent
-            for i in 0..96 {
-                data_pool.set_completed(&i, true).await;
-            }
-            let result = data_pool.is_end_game().await;
-            assert_eq!(
-                false, result,
-                "expected the torrent to not be in end-game phase yet"
-            );
-
-            // complete 97 percent
-            data_pool.set_completed(&96, true).await;
-            let result = data_pool.is_end_game().await;
-            assert_eq!(
-                true, result,
-                "expected the torrent to be in the end-game phase"
-            );
         }
     }
 
@@ -1386,8 +1265,7 @@ mod tests {
             offset: index * length,
             length,
             priority: PiecePriority::Normal,
-            parts: vec![],
-            completed_parts: Default::default(),
+            blocks: vec![],
             availability: 1,
         }
     }

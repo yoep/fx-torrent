@@ -71,7 +71,11 @@ mod tests {
         incoming.set_remote_has_piece(1, true).await;
         assert_eq!(
             true,
-            incoming.remote_piece_bitfield().get(1).unwrap_or_default(),
+            incoming
+                .remote_piece_bitfield()
+                .get(1)
+                .map(|bit| *bit)
+                .unwrap_or_default(),
             "expected the remote peer to have piece 1"
         );
 
@@ -84,7 +88,11 @@ mod tests {
 
         assert_eq!(
             false,
-            incoming.remote_piece_bitfield().get(1).unwrap_or_default(),
+            incoming
+                .remote_piece_bitfield()
+                .get(1)
+                .map(|bit| *bit)
+                .unwrap_or_default(),
             "expected the remote peer to not have piece 1"
         );
     }

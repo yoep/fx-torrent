@@ -18,40 +18,45 @@ and is based on the `libtorrent` library for functionality and naming convention
 
 ## Getting Started
 
-Create a new `FxTorrentSession` which manages one or more torrents.
+Create a new `FxSession` which manages one or more torrents.
 A `Torrent` can be created from a magnet link, torrent file, or passing the raw `TorrentMetadata`.
 
 _create a new session with torrent_
 ```rust
-use std::io;
-use fx_torrent::{FxTorrentSession, Session, SessionConfig, TorrentFlags, TorrentMetadata};
-
 // The fx-torrent crate makes use of async tokio runtimes
-// this requires that new sessions and torrents need to be created within an async context
+// this requires that new sessions and torrents need to be created within a tokio runtime
 #[tokio::main]
-async fn main() -> Result<(), io::Error> {
-    let session = FxTorrentSession::builder()
+async fn main() -> Result<(), std::io::Error> {
+    let session = FxSession::builder()
         .config(
             SessionConfig::builder()
-                .base_path("/torrent/location/directory")
+                .base_path("/downloads")
                 .client_name("MyClient")
                 .build(),
         )
         .default_extensions()
-        .build()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .dht(DhtTracker::builder()
+            .default_routing_nodes()
+            .build()
+            .await?)
+        .build()?;
 
-    // Create a torrent from a magnet link
-    let magnet_torrent = session.add_torrent_from_uri("magnet:?XXX", TorrentFlags::default()).await;
+    // 1. Add a torrent via Magnet URI
+    let magnet_torrent = session
+        .add_torrent_from_uri("magnet:?xt=urn:btih:...", TorrentFlags::default())
+        .await;
 
-    // Create a torrent from a torrent file
-    let file_torrent = session.add_torrent_from_uri("/tmp/example.torrent", TorrentFlags::default()).await;
+    // 2. Add a torrent from a local .torrent file
+    let file_torrent = session
+        .add_torrent_from_uri("/path/to/file.torrent", TorrentFlags::default())
+        .await;
 
-    // Create a torrent from metadata info
-    let data: &[u8] = &[0; 1024];
-    let metadata: TorrentMetadata = TorrentMetadata::try_from(data)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let metadata_torrent = session.add_torrent_from_metadata(metadata, TorrentFlags::Paused).await;
+    // 3. Add a torrent from raw metadata bytes
+    let data: &[u8] = &[0; 1024]; // Replace with actual bencoded bytes
+    let metadata = TorrentMetadata::try_from(data)?;
+    let metadata_torrent = session
+        .add_torrent_from_metadata(metadata, TorrentFlags::Paused)
+        .await;
 
     Ok(())
 }
@@ -121,7 +126,7 @@ fn example() {
         .unwrap();
 
     // 2. Peer extension in a session
-    let session = FxTorrentSession::builder()
+    let session = FxSession::builder()
         .extension(|| MyPeerExtension.into())
         .build()
         .unwrap();
@@ -161,7 +166,7 @@ fn example() {
         .unwrap();
 
     // 2. Storage extension in a session
-    let session = FxTorrentSession::builder()
+    let session = FxSession::builder()
         .storage(|params| MyStorageExtension::new(params).into())
         .build().unwrap();
 }
@@ -196,8 +201,98 @@ fn example() {
         .unwrap();
 
     // 2. Operation extension in a session
-    let session = FxTorrentSession::builder()
+    let session = FxSession::builder()
         .operation(|| MyOperation.into())
+        .build()
+        .unwrap();
+}
+```
+
+### Piece Picker Extension
+
+Piece picker extensions allow you to customize or completely override the core piece selection algorithm.
+Piece selection tasks are executed either periodically via a background ticker or instantly on-demand when requested by a peer.
+
+To implement a custom piece picker algorithm, implement the `fx_torrent::piece_picker::Extension` trait.
+
+_example piece picker extension_
+```rust
+#[derive(Debug)]
+pub struct MyPiecePicker;
+#[async_trait]
+impl Extension for MyPiecePicker {
+    async fn pick_pieces(&mut self, peer: &Peer) {
+        // Your custom piece picking algorithm goes here
+    }
+
+    async fn tick<'a>(&'a mut self, peers: Vec<&'a Peer>) {
+        // Tick-based piece picking logic goes here
+    }
+
+    // Additional trait methods
+}
+
+fn example () {
+    // 1. Piece picker extension directly in a torrent
+    let torrent = Torrent::request()
+        .piece_picker(|
+            torrent: InnerTorrent,
+            data_pool: DataPool,
+            storage: Arc<Storage>,
+            options: PickerOptions| MyPiecePicker.into())
+        .build()
+        .unwrap();
+
+    // 2. Piece picker extension in a session
+    let session = FxSession::builder()
+        .piece_picker(|
+            torrent: InnerTorrent,
+            data_pool: DataPool,
+            storage: Arc<Storage>,
+            options: PickerOptions| MyPiecePicker.into())
+        .build()
+        .unwrap();
+}
+```
+
+#### Piece Picker Strategy Extension
+
+The `fx_torrent::piece_picker::FxPiecePicker` architecture allows sub-strategies to be sequentially stacked or overridden.
+These strategies operate in an order-dependent chain,
+meaning their registration order explicitly dictates execution priority during the piece picking lifecycle.
+
+```rust
+#[derive(Debug)]
+pub struct MyStrategy;
+impl Extension for MyStrategy {
+    async fn pick_pieces<'a>(
+        &'a self,
+        peer: &Peer,
+        peer_info: &'a PeerInfo<'a>,
+        pieces: Vec<&PieceInfo>,
+        options: PickerOptions,
+    ) -> Vec<PieceBlock> {
+        // Your custom piece picking logic goes here
+        vec![]
+    }
+}
+
+fn example() {
+    let torrent = Torrent::request()
+        .piece_picker(|
+            torrent: InnerTorrent,
+            data_pool: DataPool,
+            storage: Arc<Storage>,
+            options: PickerOptions| FxPiecePicker::new(
+            torrent,
+            data_pool,
+            storage,
+            vec![
+                MyStrategy.into(),
+                PriorityStrategy::new().into(),
+            ],
+            32 * 1024 * 1024
+        ))
         .build()
         .unwrap();
 }

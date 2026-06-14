@@ -1,17 +1,17 @@
 use crate::app::{FXKeyEvent, FXWidget, PERFORMANCE_HISTORY};
 use crate::torrent::data::TorrentData;
-use crate::torrent::widgets::{AddPeerWidget, ContentWidget, PeerAction};
+use crate::torrent::widgets::{AddPeerWidget, ContentWidget, PeerAction, ProgressWidget};
 use crate::widgets::print_optional_string;
 use async_trait::async_trait;
 use crossterm::event::KeyCode;
 use fx_callback::{Callback, Subscription};
-use fx_torrent::{format_bytes, Torrent, TorrentEvent};
+use fx_torrent::prelude::*;
 use log::{error, info, warn};
 use ratatui::layout::Constraint::{Fill, Length, Percentage};
-use ratatui::layout::{Alignment, Layout, Rect};
+use ratatui::layout::{Layout, Rect};
 use ratatui::prelude::{Color, Line, Span, Style};
 use ratatui::style::Stylize;
-use ratatui::widgets::{Block, Gauge, Paragraph, Sparkline, Widget};
+use ratatui::widgets::{Block, Paragraph, Sparkline, Widget};
 use ratatui::Frame;
 use std::net::SocketAddr;
 
@@ -21,6 +21,7 @@ pub struct TorrentInfoWidget {
     torrent: Torrent,
     add_peer: AddPeerWidget,
     content_widget: ContentWidget,
+    progress_widget: ProgressWidget,
     event_receiver: Subscription<TorrentEvent>,
     data: TorrentData,
     state: State,
@@ -46,7 +47,6 @@ impl TorrentInfoWidget {
                 wanted_completed_size: 0,
                 total_files: 0,
                 peers: 0,
-                progress: 0.0,
                 wasted: 0,
                 down: vec![],
                 up: vec![],
@@ -63,6 +63,7 @@ impl TorrentInfoWidget {
             name: name.to_string(),
             add_peer: AddPeerWidget::new(),
             content_widget,
+            progress_widget: ProgressWidget::new(torrent.clone()),
             torrent,
             event_receiver,
             data,
@@ -70,7 +71,7 @@ impl TorrentInfoWidget {
         }
     }
 
-    async fn handle_event(&mut self, event: &TorrentEvent) {
+    async fn on_event(&mut self, event: &TorrentEvent) {
         let data = &mut self.data;
 
         match event {
@@ -124,7 +125,6 @@ impl TorrentInfoWidget {
                     .on_files_changed(self.torrent.files().await);
             }
             TorrentEvent::Stats(stats) => {
-                data.progress = stats.progress();
                 data.wanted_completed_size = stats.wanted_completed_size.get();
                 data.wasted = stats.wasted.total();
                 data.down.push(stats.download.rate() as u64);
@@ -158,20 +158,16 @@ impl TorrentInfoWidget {
             }
         });
     }
-}
 
-#[async_trait]
-impl FXWidget for TorrentInfoWidget {
-    fn name(&self) -> &str {
-        &self.name
+    /// Process any pending events from the torrent.
+    async fn process_torrent_events(&mut self) {
+        while let Ok(event) = self.event_receiver.try_recv() {
+            self.on_event(&event).await;
+        }
     }
 
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn tick(&mut self) {
-        while let Ok(event) = self.event_receiver.try_recv() {
-            self.handle_event(&event).await;
-        }
-
+    /// Tick the state widget which is currently active within the UI.
+    async fn tick_active_state_widget(&mut self) {
         match self.state {
             State::AddPeer => match self.add_peer.on_action() {
                 Some(PeerAction::Ok(addr)) => {
@@ -185,6 +181,20 @@ impl FXWidget for TorrentInfoWidget {
             },
             State::Content => self.content_widget.tick().await,
         }
+    }
+}
+
+#[async_trait]
+impl FXWidget for TorrentInfoWidget {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    async fn tick(&mut self) {
+        self.process_torrent_events().await;
+        self.progress_widget.tick().await;
+        self.tick_active_state_widget().await;
     }
 
     fn on_key_event(&mut self, mut event: FXKeyEvent) {
@@ -295,16 +305,7 @@ impl FXWidget for TorrentInfoWidget {
             .render(up_performance, frame.buffer_mut());
 
         // render the progress
-        Gauge::default()
-            .block(
-                Block::bordered()
-                    .title(" Progress ")
-                    .title_alignment(Alignment::Center),
-            )
-            .gauge_style(Style::default().fg(Color::Yellow))
-            .ratio(self.data.progress as f64)
-            .label(format!("{:.1}%", self.data.progress * 100f32))
-            .render(progress_area, frame.buffer_mut());
+        self.progress_widget.render(frame, progress_area);
 
         // render the contents of the torrent
         match self.state {

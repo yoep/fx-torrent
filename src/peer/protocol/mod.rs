@@ -7,7 +7,7 @@ pub use utp_socket::*;
 pub use utp_stream::*;
 
 mod bt;
-mod close_reason;
+pub(crate) mod close_reason;
 mod utp_ext;
 mod utp_message;
 mod utp_packet;

@@ -1,7 +1,6 @@
 use crate::peer::extension::{ExtensionNumber, ExtensionRegistry};
 use crate::peer::{Error, PeerId, ProtocolExtensionFlags, Result};
-use crate::{bencode, CompactIp, InfoHash, PieceIndex, PiecePart};
-use bit_vec::BitVec;
+use crate::{bencode, BitVec, CompactIp, InfoHash, PieceBlock, PieceIndex};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use log::trace;
 use serde::{Deserialize, Serialize};
@@ -362,7 +361,7 @@ impl TryFrom<&[u8]> for Message {
                     Error::Parsing(format!("failed to read bitfield payload, {}", e))
                 })?;
 
-                Ok(Message::Bitfield(BitVec::from_bytes(&buffer)))
+                Ok(Message::Bitfield(BitVec::from_vec(buffer)))
             }
             MessageType::Request => {
                 let request = Request::try_from(cursor)?;
@@ -443,8 +442,7 @@ impl TryInto<Vec<u8>> for Message {
                 buffer.write_u32::<BigEndian>(e)?;
             }
             Message::Bitfield(bitfield) => {
-                let bytes = bitfield.to_bytes();
-                buffer.extend_from_slice(bytes.as_slice());
+                buffer.extend_from_slice(bitfield.as_raw_slice());
             }
             Message::Request(e) | Message::RejectRequest(e) | Message::Cancel(e) => {
                 buffer.write_u32::<BigEndian>(e.index as u32)?;
@@ -575,8 +573,8 @@ impl TryFrom<Cursor<&[u8]>> for Request {
     }
 }
 
-impl From<&PiecePart> for Request {
-    fn from(value: &PiecePart) -> Self {
+impl From<PieceBlock> for Request {
+    fn from(value: PieceBlock) -> Self {
         Self {
             index: value.piece,
             begin: value.begin,
@@ -593,17 +591,6 @@ pub struct Piece {
     pub begin: usize,
     /// The data of the piece
     pub data: Vec<u8>,
-}
-
-impl Piece {
-    /// Get the related request for this piece data.
-    pub fn request(&self) -> Request {
-        Request {
-            index: self.index,
-            begin: self.begin,
-            length: self.data.len(),
-        }
-    }
 }
 
 impl TryFrom<Cursor<&[u8]>> for Piece {
@@ -623,6 +610,16 @@ impl TryFrom<Cursor<&[u8]>> for Piece {
             begin: begin as usize,
             data: buffer,
         })
+    }
+}
+
+impl From<&Piece> for Request {
+    fn from(value: &Piece) -> Self {
+        Self {
+            index: value.index,
+            begin: value.begin,
+            length: value.data.len(),
+        }
     }
 }
 
@@ -879,11 +876,11 @@ mod tests {
 
     #[test]
     fn test_message_bitfield_to_bytes() {
-        let mut bitfield = BitVec::from_elem(32, true);
+        let mut bitfield = BitVec::repeat(true, 32);
         bitfield.set(13, false);
         bitfield.set(27, false);
         let mut expected_result = vec![MessageType::Bitfield as u8];
-        expected_result.extend_from_slice(&bitfield.to_bytes());
+        expected_result.extend_from_slice(bitfield.as_raw_slice());
         let message = Message::Bitfield(bitfield);
 
         let result = message.to_bytes().unwrap();

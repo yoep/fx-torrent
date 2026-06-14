@@ -7,20 +7,19 @@ and is based on the `libtorrent` library for functionality and naming convention
 
 ## Getting Started
 
-The entry point for the `fx_torrent` crate is the [`FxTorrentSession`].
+The entry point for the `fx_torrent` crate is the [`FxSession`].
 A session manages the lifecycle of multiple torrents.
 
 ### Basic Usage
 
 ```rust
-use std::io;
-use fx_torrent::{FxTorrentSession, Session, SessionConfig, TorrentFlags, TorrentMetadata};
-
+# use std::io;
+use fx_torrent::prelude::*;
 // The fx-torrent crate makes use of async tokio runtimes
-// this requires that new sessions and torrents need to be created within an async context
+// this requires that new sessions and torrents need to be created within a tokio runtime
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
-    let session = FxTorrentSession::builder()
+    let session = FxSession::builder()
         .config(
             SessionConfig::builder()
                 .base_path("/downloads")
@@ -28,25 +27,25 @@ async fn main() -> Result<(), io::Error> {
                 .build(),
         )
         .default_extensions()
+        .dht(DhtTracker::builder()
+            .default_routing_nodes()
+            .build()
+            .await?)
         .build()?;
-
     // 1. Add a torrent via Magnet URI
     let magnet_torrent = session
         .add_torrent_from_uri("magnet:?xt=urn:btih:...", TorrentFlags::default())
         .await;
-
     // 2. Add a torrent from a local .torrent file
     let file_torrent = session
         .add_torrent_from_uri("/path/to/file.torrent", TorrentFlags::default())
         .await;
-
     // 3. Add a torrent from raw metadata bytes
     let data: &[u8] = &[0; 1024]; // Replace with actual bencoded bytes
     let metadata = TorrentMetadata::try_from(data)?;
     let metadata_torrent = session
         .add_torrent_from_metadata(metadata, TorrentFlags::Paused)
         .await;
-
     Ok(())
 }
 ```
@@ -124,8 +123,7 @@ Once implemented, these extensions can be attached to individual torrents or glo
 
 _example peer extension_
 ```rust
-# use fx_torrent::Torrent;
-# use fx_torrent::FxTorrentSession;
+# use fx_torrent::prelude::*;
 # use fx_torrent::peer::PeerContext;
 # use fx_torrent::peer::extension::Extension;
 # use fx_torrent::peer::extension::Result;
@@ -148,7 +146,7 @@ impl Extension for MyPeerExtension {
         .unwrap();
 
     // 2. Peer extension in a session
-    let session = FxTorrentSession::builder()
+    let session = FxSession::builder()
         .extension(|| MyPeerExtension.into())
         .build()
         .unwrap();
@@ -164,8 +162,7 @@ To create your own storage backend, implement the [storage::Extension] trait.
 
 _example storage extension_
 ```rust
-# use fx_torrent::Torrent;
-# use fx_torrent::FxTorrentSession;
+# use fx_torrent::prelude::*;
 # use fx_torrent::storage::Extension;
 # use fx_torrent::storage::StorageParams;
 
@@ -193,7 +190,7 @@ impl Extension for MyStorageExtension {
         .unwrap();
 
     // 2. Storage extension in a session
-    let session = FxTorrentSession::builder()
+    let session = FxSession::builder()
         .storage(|params| MyStorageExtension::new(params).into())
         .build().unwrap();
 # }
@@ -207,9 +204,8 @@ meaning the sequence in which you register them determines their execution prior
 
 _example operation extension_
 ```rust
-# use fx_torrent::Torrent;
+# use fx_torrent::prelude::*;
 # use fx_torrent::TorrentContext;
-# use fx_torrent::FxTorrentSession;
 # use fx_torrent::operation::Extension;
 # use fx_torrent::operation::TorrentOperationResult;
 # use fx_torrent::peer::PeerDiscovery;
@@ -236,8 +232,120 @@ impl Extension for MyOperation {
         .unwrap();
 
     // 2. Operation extension in a session
-    let session = FxTorrentSession::builder()
+    let session = FxSession::builder()
         .operation(|| MyOperation.into())
+        .build()
+        .unwrap();
+# }
+```
+
+### Piece Picker Extension
+
+Piece picker extensions allow you to customize or completely override the core piece selection algorithm.
+Piece selection tasks are executed either periodically via a background ticker or instantly on-demand when requested by a peer.
+
+To implement a custom piece picker algorithm, implement the [piece_picker::Extension] trait.
+
+_example piece picker extension_
+```rust
+# use async_trait;
+# use fx_torrent::DataPool;
+# use fx_torrent::FxSession;
+# use fx_torrent::InnerTorrent;
+# use fx_torrent::Torrent;
+# use fx_torrent::peer::Peer;
+# use fx_torrent::piece_picker::Extension;
+# use fx_torrent::piece_picker::PickerOptions;
+# use fx_torrent::storage::Storage;
+# use std::sync::Arc;
+
+#[derive(Debug)]
+pub struct MyPiecePicker;
+#[async_trait]
+impl Extension for MyPiecePicker {
+    async fn pick_pieces(&mut self, peer: &Peer) {
+        // Your custom piece picking algorithm goes here
+    }
+
+    async fn tick<'a>(&'a mut self, peers: Vec<&'a Peer>) {
+        // Tick-based piece picking logic goes here
+    }
+
+    // Additional trait methods
+}
+
+# fn example () {
+    // 1. Piece picker extension directly in a torrent
+    let torrent = Torrent::request()
+        .piece_picker(|
+            torrent: InnerTorrent,
+            data_pool: DataPool,
+            storage: Arc<Storage>,
+            options: PickerOptions| MyPiecePicker.into())
+        .build()
+        .unwrap();
+
+    // 2. Piece picker extension in a session
+    let session = FxSession::builder()
+        .piece_picker(|
+            torrent: InnerTorrent,
+            data_pool: DataPool,
+            storage: Arc<Storage>,
+            options: PickerOptions| MyPiecePicker.into())
+        .build()
+        .unwrap();
+# }
+```
+
+#### Piece Picker Strategy Extension
+
+The [piece_picker::FxPiecePicker] architecture allows sub-strategies to be sequentially stacked or overridden.
+These strategies operate in an order-dependent chain,
+meaning their registration order explicitly dictates execution priority during the piece picking lifecycle.
+
+```rust
+# use fx_torrent::DataPool;
+# use fx_torrent::InnerTorrent;
+# use fx_torrent::Torrent;
+# use fx_torrent::peer::Peer;
+# use fx_torrent::piece_picker::FxPiecePicker;
+# use fx_torrent::piece_picker::PickerOptions;
+# use fx_torrent::piece_picker::PiecePicker;
+# use fx_torrent::piece_picker::strategy::{Extension, PriorityStrategy, PeerInfo};
+# use fx_torrent::storage::Storage;
+# use std::sync::Arc;
+
+#[derive(Debug)]
+pub struct MyStrategy;
+impl Extension for MyStrategy {
+    async fn pick_pieces<'a>(
+        &'a self,
+        peer: &Peer,
+        peer_info: &'a PeerInfo<'a>,
+        pieces: Vec<&PieceInfo>,
+        options: PickerOptions,
+    ) -> Vec<PieceBlock> {
+        // Your custom piece picking logic goes here
+        vec![]
+    }
+}
+
+# fn example() {
+    let torrent = Torrent::request()
+        .piece_picker(|
+            torrent: InnerTorrent,
+            data_pool: DataPool,
+            storage: Arc<Storage>,
+            options: PickerOptions| FxPiecePicker::new(
+            torrent,
+            data_pool,
+            storage,
+            vec![
+                MyStrategy.into(),
+                PriorityStrategy::new().into(),
+            ],
+            32 * 1024
+        ))
         .build()
         .unwrap();
 # }
@@ -254,7 +362,6 @@ pub use info_hash::*;
 pub use lsd::*;
 pub use magnet::*;
 pub use piece::*;
-use piece_chunk_pool::*;
 pub use session::*;
 pub use session_cache::*;
 pub use torrent::*;
@@ -263,6 +370,7 @@ pub use torrent_health::*;
 pub use torrent_metadata::*;
 pub use torrent_metrics::*;
 pub use torrent_tracker::*;
+pub use types::*;
 
 use std::ops::Range;
 
@@ -290,7 +398,7 @@ pub mod operation;
 pub mod peer;
 mod peer_pool;
 mod piece;
-mod piece_chunk_pool;
+pub mod piece_picker;
 mod session;
 mod session_cache;
 pub mod storage;
@@ -302,6 +410,29 @@ mod torrent_metadata;
 mod torrent_metrics;
 mod torrent_tracker;
 pub mod tracker;
+mod types;
+
+/// A prelude for conveniently writing applications using this library.
+pub mod prelude {
+    #[cfg(feature = "dht")]
+    pub use crate::dht::prelude::*;
+    pub use crate::FxSession;
+    pub use crate::InfoHash;
+    #[cfg(feature = "lsd")]
+    pub use crate::LocalServiceDiscovery;
+    pub use crate::Metrics;
+    pub use crate::PieceIndex;
+    pub use crate::PiecePriority;
+    pub use crate::SessionConfig;
+    pub use crate::SessionEvent;
+    pub use crate::Torrent;
+    pub use crate::TorrentEvent;
+    pub use crate::TorrentFlags;
+    pub use crate::TorrentMetadata;
+    pub use crate::TorrentState;
+
+    pub use crate::format_bytes;
+}
 
 use crate::peer::ProtocolExtensionFlags;
 

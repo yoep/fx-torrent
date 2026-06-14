@@ -1,16 +1,7 @@
 use crate::{overlapping_range, InfoHash};
-use bit_vec::BitVec;
+use crate::{BlockIndex, PieceIndex};
 use std::cmp::Ordering;
 use std::ops::Range;
-
-/// The maximum size in bytes of a piece part can be requested from a peer.
-pub(crate) const MAX_PIECE_PART_SIZE: usize = 16 * 1024; // 16 KiB
-
-/// The alias type used to identify piece indexes.
-pub type PieceIndex = usize;
-
-/// The alias type used to identify piece part indexes.
-pub type PartIndex = PieceIndex;
 
 /// The priority of a piece.
 #[repr(u8)]
@@ -86,10 +77,8 @@ pub struct Piece {
     pub length: usize,
     /// The priority of this piece
     pub priority: PiecePriority,
-    /// The (request) parts of the piece.
-    pub parts: Vec<PiecePart>,
-    /// The completed parts of the piece
-    pub(crate) completed_parts: BitVec,
+    /// The (request) blocks of the piece.
+    pub blocks: Vec<PieceBlock>,
     /// The availability of this piece
     pub(crate) availability: u32,
 }
@@ -104,7 +93,7 @@ impl Piece {
     /// * `offset` - The beginning offset of the piece within the torrent.
     /// * `length` - The length of the piece bytes.
     pub fn new(hash: InfoHash, index: PieceIndex, offset: usize, length: usize) -> Self {
-        let num_of_parts = (length + MAX_PIECE_PART_SIZE - 1) / MAX_PIECE_PART_SIZE;
+        let num_of_parts = (length + PieceBlock::MAX_LEN - 1) / PieceBlock::MAX_LEN;
         let mut parts = Vec::with_capacity(num_of_parts);
         let mut part_offset = 0;
 
@@ -113,16 +102,16 @@ impl Piece {
         for part in 0..num_of_parts {
             // calculate the part length.
             // if this part is the last one, it might be smaller
-            let part_end = (part + 1) * MAX_PIECE_PART_SIZE;
+            let part_end = (part + 1) * PieceBlock::MAX_LEN;
             let part_length = if part_end > length {
-                length - (part * MAX_PIECE_PART_SIZE)
+                length - (part * PieceBlock::MAX_LEN)
             } else {
-                MAX_PIECE_PART_SIZE
+                PieceBlock::MAX_LEN
             };
 
-            parts.push(PiecePart {
+            parts.push(PieceBlock {
                 piece: index,
-                part,
+                block: part,
                 begin: part_offset,
                 length: part_length,
             });
@@ -136,8 +125,7 @@ impl Piece {
             offset,
             length,
             priority: PiecePriority::default(),
-            parts,
-            completed_parts: BitVec::from_elem(num_of_parts, false),
+            blocks: parts,
             availability: 0,
         }
     }
@@ -153,19 +141,9 @@ impl Piece {
         self.availability
     }
 
-    /// Get the number of request parts for this piece.
-    pub fn num_of_parts(&self) -> usize {
-        self.parts.len()
-    }
-
-    /// Get if this piece has all its parts completed.
-    pub fn is_completed(&self) -> bool {
-        self.completed_parts.all()
-    }
-
-    /// Get if this piece has partially completed data.
-    pub fn is_partially_completed(&self) -> bool {
-        !self.completed_parts.all() && !self.completed_parts.none()
+    /// Returns the total number of blocks in this piece.
+    pub fn num_of_blocks(&self) -> usize {
+        self.blocks.len()
     }
 
     /// Check if the piece contains some bytes from the given torrent byte range.
@@ -187,63 +165,57 @@ impl Piece {
     pub fn torrent_range(&self) -> Range<usize> {
         self.offset..(self.offset + self.length)
     }
-
-    /// Get the parts of this piece that need to be requested from a peer.
-    /// This returns the parts that have not been completed yet.
-    pub fn parts_to_request(&self) -> Vec<&PiecePart> {
-        self.completed_parts
-            .iter()
-            .enumerate()
-            .filter(|(_, value)| !*value)
-            .map(|(index, _)| &self.parts[index])
-            .collect()
-    }
-
-    /// Mark this piece as fully completed.
-    pub(crate) fn mark_completed(&mut self) {
-        self.completed_parts.fill(true);
-    }
-
-    /// Mark a part of this piece as completed
-    pub(crate) fn part_completed(&mut self, part: &PartIndex) {
-        self.completed_parts.set(*part, true);
-    }
-
-    /// Reset completed parts in case the validation of the data failed.
-    ///This will reset the `completed_parts` back to `false`.
-    pub(crate) fn reset_completed_parts(&mut self) {
-        self.completed_parts = BitVec::from_elem(self.parts.len(), false);
-    }
 }
 
-/// Identifies a piece part of a piece.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PiecePart {
-    /// The piece index to which this part belongs
+/// A data block within a piece.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct PieceBlock {
+    /// The piece index of the block.
     pub piece: PieceIndex,
-    /// The unique index of this part within the piece
-    pub part: PartIndex,
-    /// The offset of bytes where this part begins within the piece
+    /// The block index within the piece.
+    pub block: BlockIndex,
+    /// The offset of bytes where this block begins within the piece.
     pub begin: usize,
-    /// The size in bytes of this part.
-    /// This is related to the [MAX_PIECE_PART_SIZE]
+    /// The amount of bytes within this block.
+    /// This is related to the [PieceBlock::MAX_LEN].
     pub length: usize,
 }
 
-impl PartialOrd for PiecePart {
+impl PieceBlock {
+    /// The amount of bytes that can be requested from a peer.
+    pub const MAX_LEN: usize = 16 * 1024; // 16 KiB
+}
+
+impl PartialOrd<Self> for PieceBlock {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PieceBlock {
+    fn cmp(&self, other: &Self) -> Ordering {
         if self.piece != other.piece {
-            return None;
+            return self.piece.cmp(&other.piece);
         }
 
-        Some(self.part.cmp(&other.part))
+        self.block.cmp(&other.block)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
+
+    macro_rules! block {
+        ($piece:expr, $block:expr) => {{
+            PieceBlock {
+                piece: $piece,
+                block: $block,
+                begin: 0,
+                length: 0,
+            }
+        }};
+    }
 
     #[test]
     fn test_piece_priority_order() {
@@ -265,43 +237,17 @@ mod tests {
     }
 
     #[test]
-    fn test_piece_parts_to_request() {
-        let expected_last_part = PiecePart {
-            piece: 836,
-            part: 117,
-            begin: 1916928,
-            length: 15000,
-        };
-        let piece = Piece::new(InfoHash::default(), 836, 0, 1931928);
+    fn test_piece_block_order() {
+        // different pieces, same block
+        let block1 = block!(0, 0);
+        let block2 = block!(1, 0);
+        assert_eq!(Some(Ordering::Less), block1.partial_cmp(&block2));
+        assert_eq!(Some(Ordering::Greater), block2.partial_cmp(&block1));
 
-        let parts = piece.parts_to_request();
-        assert_eq!(118, parts.len(), "expected to match the number of parts");
-
-        let last_part = parts.last().unwrap();
-        assert_eq!(expected_last_part, **last_part);
-    }
-
-    #[test]
-    fn test_piece_is_completed() {
-        let mut piece = create_piece(0, 3);
-
-        piece.part_completed(&0);
-        piece.part_completed(&1);
-
-        let result = piece.is_completed();
-        assert_eq!(false, result);
-
-        piece.part_completed(&2);
-
-        let result = piece.is_completed();
-        assert_eq!(true, result);
-    }
-
-    fn create_piece(piece: PieceIndex, num_of_parts: usize) -> Piece {
-        let info_hash = InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7")
-            .expect("expected a valid hash");
-        let length = num_of_parts * MAX_PIECE_PART_SIZE;
-
-        Piece::new(info_hash, piece, 0, length)
+        // same piece, different blocks
+        let block1 = block!(1, 2);
+        let block2 = block!(1, 0);
+        assert_eq!(Some(Ordering::Greater), block1.partial_cmp(&block2));
+        assert_eq!(Some(Ordering::Less), block2.partial_cmp(&block1));
     }
 }

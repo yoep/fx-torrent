@@ -105,6 +105,14 @@ impl PeerConnection {
         }
     }
 
+    /// Returns `true` if the peer connection stream is closed.
+    pub fn is_closed(&self) -> bool {
+        match self {
+            PeerConnection::Tcp(conn) => conn.is_closed(),
+            PeerConnection::Utp(conn) => conn.is_closed(),
+        }
+    }
+
     /// Try to close the connection with the remote peer.
     pub async fn close(&self) -> Result<()> {
         match self {
@@ -180,6 +188,10 @@ where
             _ = self.cancellation_token.cancelled() => Err(Error::Closed),
             result = self.writer.write(bytes) => result,
         }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.cancellation_token.is_cancelled()
     }
 
     async fn close(&self) -> Result<()> {

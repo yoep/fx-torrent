@@ -1,13 +1,13 @@
 pub use disk::*;
 pub use memory::*;
 pub use metrics::*;
-pub use store::*;
+pub use types::*;
 
 mod disk;
 mod memory;
 mod metrics;
 mod parts_file;
-mod store;
+mod types;
 
 /// The result type of storage operations.
 pub type Result<T> = std::result::Result<T, std::io::Error>;

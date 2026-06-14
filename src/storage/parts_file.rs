@@ -200,8 +200,7 @@ mod tests {
             offset: 0,
             length: piece_len,
             priority: Default::default(),
-            parts: vec![],
-            completed_parts: Default::default(),
+            blocks: vec![],
             availability: 0,
         }]);
         let part_file = PartsFile::new(filename, temp_path, pieces.clone());

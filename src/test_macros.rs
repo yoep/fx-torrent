@@ -92,14 +92,20 @@ macro_rules! torrent_context {
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr, $lsd:expr, $storage:expr) => {{
         use crate::dht::DhtTracker;
         use crate::peer::PeerDiscovery;
+        use crate::piece_picker::FxPiecePicker;
+        use crate::piece_picker::PickerOptions;
+        use crate::storage::Storage;
         use crate::torrent_data::DataPool;
         use crate::tracker::TrackerClient;
         use crate::ExtensionFactory;
+        use crate::InnerTorrent;
         use crate::LocalServiceDiscovery;
+        use crate::TorrentHandle;
         use crate::{
             TorrentConfig, TorrentContext, TorrentFlags, TorrentMetadata,
             DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
         };
+        use fx_callback::MultiThreadedCallback;
         use std::time::Duration;
 
         let uri: &str = $uri;
@@ -130,9 +136,13 @@ macro_rules! torrent_context {
             trackers.push(lsd.into());
         }
 
+        let handle = TorrentHandle::new();
         let peer_port = discoveries.first().map(|e| e.addr().port());
+        let callbacks = MultiThreadedCallback::new();
+        let storage: Arc<Storage> = ($storage)(info_hash, data_pool.clone());
         (
             TorrentContext::new(
+                handle,
                 metadata,
                 config,
                 peer_port,
@@ -141,8 +151,18 @@ macro_rules! torrent_context {
                 options,
                 data_pool.clone(),
                 trackers,
-                ($storage)(info_hash, data_pool),
+                storage.clone(),
+                FxPiecePicker::new(
+                    InnerTorrent::new(handle, command_sender.clone(), callbacks.clone()),
+                    data_pool,
+                    storage,
+                    vec![],
+                    16 * 1024 * 1024,
+                    PickerOptions::Priority,
+                )
+                .into(),
                 command_sender,
+                callbacks,
             ),
             receiver,
         )

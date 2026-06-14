@@ -3,11 +3,10 @@ use crate::widgets::InputWidget;
 use async_trait::async_trait;
 use crossterm::event::KeyCode;
 use fx_callback::{Callback, Subscription};
-use fx_torrent::dht::{DhtEvent, DhtMetrics, DhtTracker, Mode, Node, NodeState, PeerEntry};
-use fx_torrent::{format_bytes, InfoHash};
+use fx_torrent::prelude::*;
 use ratatui::layout::Constraint::{Fill, Length, Percentage};
 use ratatui::layout::{Layout, Rect};
-use ratatui::prelude::{Color, StatefulWidget, Style, Text};
+use ratatui::prelude::*;
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{

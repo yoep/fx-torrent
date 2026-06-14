@@ -9,15 +9,13 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEvent};
 use futures::StreamExt;
 use futures::{future, FutureExt};
 use fx_callback::{Callback, Subscription};
-use fx_torrent::dht::{DhtTracker, Mode};
 use fx_torrent::operation::{
     ConnectPeersOperation, CreatePiecesAndFilesOperation, DhtNodesOperation, DhtPeersOperation,
     FileValidationOperation, LsdPeersOperation, MetadataOperation, StatsOperation,
     TorrentOperationFactory, TrackerPeersOperation, TrackersOperation,
 };
-use fx_torrent::{
-    FxSessionCache, FxTorrentSession, Session, SessionConfig, SessionEvent, TorrentFlags,
-};
+use fx_torrent::prelude::*;
+use fx_torrent::FxSessionCache;
 use log::{error, trace, warn};
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::layout::{Alignment, Layout, Rect};
@@ -120,7 +118,7 @@ struct InnerFxKeyEvent {
 #[derive(Debug)]
 pub struct App {
     tabs: Vec<(Box<dyn FXWidget>, TabState)>,
-    session: FxTorrentSession,
+    session: FxSession,
     session_event_receiver: Subscription<SessionEvent>,
     settings: AppSettings,
     app_command_receiver: UnboundedReceiver<AppCommand>,
@@ -481,7 +479,7 @@ impl App {
         .render(footer_area, frame.buffer_mut());
     }
 
-    async fn create_session(settings: &AppSettings) -> io::Result<FxTorrentSession> {
+    async fn create_session(settings: &AppSettings) -> io::Result<FxSession> {
         let webseeds_enabled = settings.webseeds_enabled;
         let mut operations: Vec<TorrentOperationFactory> = vec![
             TorrentOperationFactory::new(|| StatsOperation::new().into()),
@@ -541,7 +539,7 @@ impl App {
             );
         }
 
-        FxTorrentSession::builder()
+        FxSession::builder()
             .config(
                 SessionConfig::builder()
                     .client_name(APP_CLIENT_NAME)
