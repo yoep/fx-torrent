@@ -5,13 +5,14 @@ use async_trait::async_trait;
 use std::fmt::Debug;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// The storage type for storing and reading torrent data.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Storage {
-    Disk(DiskStorage),
-    Memory(MemoryStorage),
-    Other(Box<dyn Extension>),
+    Disk(Arc<DiskStorage>),
+    Memory(Arc<MemoryStorage>),
+    Other(Arc<dyn Extension>),
 }
 
 impl Storage {
@@ -102,13 +103,13 @@ impl Storage {
 
 impl From<DiskStorage> for Storage {
     fn from(storage: DiskStorage) -> Self {
-        Storage::Disk(storage)
+        Storage::Disk(Arc::new(storage))
     }
 }
 
 impl From<MemoryStorage> for Storage {
     fn from(storage: MemoryStorage) -> Self {
-        Storage::Memory(storage)
+        Storage::Memory(Arc::new(storage))
     }
 }
 
@@ -117,7 +118,7 @@ where
     E: Extension + 'static,
 {
     fn from(storage: E) -> Self {
-        Storage::Other(Box::new(storage))
+        Storage::Other(Arc::new(storage))
     }
 }
 
@@ -176,46 +177,52 @@ pub struct StorageParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockall::mock;
+    use rand::{rng, Rng};
 
-    #[derive(Debug)]
-    pub struct TestStorage {
-        metrics: Metrics,
+    mock! {
+        #[derive(Debug)]
+        pub Extension {}
+        #[async_trait]
+        impl Extension for Extension {
+            async fn read(&self, buffer: &mut [u8], piece: &PieceIndex, offset: usize) -> Result<usize>;
+            async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize>;
+            async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash>;
+            async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash>;
+            async fn move_storage(&self, new_path: &Path) -> Result<()>;
+            fn metrics(&self) -> &Metrics;
+        }
     }
 
-    #[async_trait]
-    impl Extension for TestStorage {
-        async fn read(&self, _: &mut [u8], _: &PieceIndex, _: usize) -> Result<usize> {
-            todo!()
-        }
+    #[tokio::test]
+    async fn test_extension_read() {
+        let mut extension = MockExtension::new();
+        extension.expect_read().times(1).returning(|buffer, _, _| {
+            rng().fill_bytes(buffer);
+            Ok(buffer.len())
+        });
+        let storage: Storage = extension.into();
 
-        async fn write(&self, _: &[u8], _: &PieceIndex, _: usize) -> Result<usize> {
-            todo!()
-        }
-
-        async fn hash_v1(&self, _: &PieceIndex) -> Result<Sha1Hash> {
-            todo!()
-        }
-
-        async fn hash_v2(&self, _: &PieceIndex) -> Result<Sha256Hash> {
-            todo!()
-        }
-
-        async fn move_storage(&self, _: &Path) -> Result<()> {
-            Ok(())
-        }
-
-        fn metrics(&self) -> &Metrics {
-            &self.metrics
+        let mut buffer = vec![0u8; 256];
+        let result = storage.read(&mut buffer, &0, 0).await;
+        match result {
+            Ok(result) => {
+                assert_eq!(256, result, "expected 256 bytes read");
+            }
+            _ => assert!(false, "expected Ok, but got {:?}", result),
         }
     }
 
     #[test]
-    fn test_storage_extension() {
-        let storage: Storage = TestStorage {
-            metrics: Default::default(),
-        }
-        .into();
-        storage.metrics().bytes_read.inc_by(20);
+    fn test_extension_metrics() {
+        let metrics = Metrics::default();
+        metrics.bytes_read.inc_by(20);
+        let mut extension = MockExtension::new();
+        extension
+            .expect_metrics()
+            .times(1)
+            .return_const(metrics.clone());
+        let storage: Storage = extension.into();
 
         let metrics = storage.metrics();
 

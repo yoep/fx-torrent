@@ -4,7 +4,6 @@ use itertools::Itertools;
 use log::trace;
 use std::collections::HashMap;
 use std::io;
-use std::sync::Arc;
 use std::time::Instant;
 
 /// The index key of available slots within the cache buffer.
@@ -31,12 +30,12 @@ pub struct PickerCache {
     /// The in-memory cache buffer of incomplete data.
     buffer: Vec<u8>,
     /// The storage to use for flushing the cache when the limit is exceeded.
-    storage: Arc<Storage>,
+    storage: Storage,
 }
 
 impl PickerCache {
     /// Create a new cache instance for storing incomplete piece data.
-    pub fn new(storage: Arc<Storage>, limit: usize) -> Self {
+    pub fn new(storage: Storage, limit: usize) -> Self {
         Self {
             total_pieces: 0,
             piece_len: 0,
