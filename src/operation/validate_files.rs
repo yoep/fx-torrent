@@ -5,7 +5,6 @@ use crate::{File, Piece, TorrentContext, TorrentFlags, TorrentState};
 use futures::{stream, StreamExt};
 use log::{debug, info};
 use std::fmt::Debug;
-use std::sync::Arc;
 use std::time::Instant;
 use tokio::select;
 use tokio::sync::oneshot;
@@ -143,7 +142,7 @@ impl FileValidationOperation {
     }
 
     /// Hash the given piece.
-    async fn hash_piece(torrent: InnerTorrent, storage: Arc<Storage>, piece: Piece) {
+    async fn hash_piece(torrent: InnerTorrent, storage: Storage, piece: Piece) {
         match (piece.hash.has_v1(), piece.hash.has_v2()) {
             (true, true) | (false, true) => {
                 torrent
@@ -168,7 +167,7 @@ impl FileValidationOperation {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn run_validation(
         torrent: InnerTorrent,
-        storage: Arc<Storage>,
+        storage: Storage,
         pieces: Vec<Piece>,
         num_of_files: usize,
         max_parallel: usize,
@@ -279,9 +278,7 @@ mod tests {
             vec![],
             None,
             None,
-            |info_hash, data_pool| Arc::new(
-                DiskStorage::new(info_hash, temp_path, data_pool).into()
-            )
+            |info_hash, data_pool| DiskStorage::new(info_hash, temp_path, data_pool).into()
         );
         let mut operation = FileValidationOperation::new();
 

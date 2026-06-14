@@ -60,8 +60,6 @@ macro_rules! torrent_context {
         )
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr) => {{
-        use std::sync::Arc;
-
         torrent_context!(
             $uri,
             $temp_dir,
@@ -71,12 +69,10 @@ macro_rules! torrent_context {
             $extensions,
             $dht,
             None,
-            |_, _| Arc::new(crate::storage::MemoryStorage::new().into())
+            |_, _| crate::storage::MemoryStorage::new().into()
         )
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr, $lsd:expr) => {{
-        use std::sync::Arc;
-
         torrent_context!(
             $uri,
             $temp_dir,
@@ -86,7 +82,7 @@ macro_rules! torrent_context {
             $extensions,
             $dht,
             $lsd,
-            |_, _| Arc::new(crate::storage::MemoryStorage::new().into())
+            |_, _| crate::storage::MemoryStorage::new().into()
         )
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr, $lsd:expr, $storage:expr) => {{
@@ -139,7 +135,7 @@ macro_rules! torrent_context {
         let handle = TorrentHandle::new();
         let peer_port = discoveries.first().map(|e| e.addr().port());
         let callbacks = MultiThreadedCallback::new();
-        let storage: Arc<Storage> = ($storage)(info_hash, data_pool.clone());
+        let storage: Storage = ($storage)(info_hash, data_pool.clone());
         (
             TorrentContext::new(
                 handle,

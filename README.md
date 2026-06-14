@@ -238,7 +238,7 @@ fn example () {
         .piece_picker(|
             torrent: InnerTorrent,
             data_pool: DataPool,
-            storage: Arc<Storage>,
+            storage: Storage,
             options: PickerOptions| MyPiecePicker.into())
         .build()
         .unwrap();
@@ -248,7 +248,7 @@ fn example () {
         .piece_picker(|
             torrent: InnerTorrent,
             data_pool: DataPool,
-            storage: Arc<Storage>,
+            storage: Storage,
             options: PickerOptions| MyPiecePicker.into())
         .build()
         .unwrap();
@@ -266,12 +266,14 @@ meaning their registration order explicitly dictates execution priority during t
 pub struct MyStrategy;
 impl Extension for MyStrategy {
     async fn pick_pieces<'a>(
-        &'a self,
+        &self,
         peer: &Peer,
-        peer_info: &'a PeerInfo<'a>,
-        pieces: Vec<&PieceInfo>,
+        blocks: &'a Vec<PiecePickerBlock>,
+        target_queue_len: usize,
+        suggested_pieces: &[PieceIndex],
+        is_end_game: bool,
         options: PickerOptions,
-    ) -> Vec<PieceBlock> {
+    ) -> Vec<&'a PiecePickerBlock> {
         // Your custom piece picking logic goes here
         vec![]
     }
@@ -282,7 +284,7 @@ fn example() {
         .piece_picker(|
             torrent: InnerTorrent,
             data_pool: DataPool,
-            storage: Arc<Storage>,
+            storage: Storage,
             options: PickerOptions| FxPiecePicker::new(
             torrent,
             data_pool,

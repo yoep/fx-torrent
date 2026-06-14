@@ -9,7 +9,6 @@ use derive_more::Display;
 use itertools::Itertools;
 use log::{debug, trace, warn};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Instant;
 
 /// The FX piece picker implementation for retrieving pieces from peers.
@@ -24,7 +23,7 @@ pub struct FxPiecePicker {
     cache: PickerCache,
     torrent: InnerTorrent,
     data_pool: DataPool,
-    storage: Arc<Storage>,
+    storage: Storage,
     strategies: Vec<Strategy>,
 }
 
@@ -33,7 +32,7 @@ impl FxPiecePicker {
     pub fn new(
         torrent: InnerTorrent,
         data_pool: DataPool,
-        storage: Arc<Storage>,
+        storage: Storage,
         strategies: Vec<Strategy>,
         cache_limit: usize,
         options: PickerOptions,

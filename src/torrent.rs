@@ -61,7 +61,7 @@ pub type StorageFactory = dyn FnOnce(StorageParams) -> Storage + Send + Sync;
 
 /// Factory type for creating a new [PiecePicker] instance.
 pub type PiecePickerFactory =
-    dyn Fn(InnerTorrent, DataPool, Arc<Storage>, PickerOptions) -> PiecePicker + Send + Sync;
+    dyn Fn(InnerTorrent, DataPool, Storage, PickerOptions) -> PiecePicker + Send + Sync;
 
 /// The states of the torrent
 #[derive(Debug, Display, Copy, Clone, PartialEq)]
@@ -264,7 +264,7 @@ impl TorrentRequest {
     /// Set the piece picker factory to use for the torrent.
     pub fn piece_picker<F>(&mut self, picker: F) -> &mut Self
     where
-        F: Fn(InnerTorrent, DataPool, Arc<Storage>, PickerOptions) -> PiecePicker
+        F: Fn(InnerTorrent, DataPool, Storage, PickerOptions) -> PiecePicker
             + Send
             + Sync
             + 'static,
@@ -335,7 +335,7 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
             Box::new(
                 |torrent: InnerTorrent,
                  data_pool: DataPool,
-                 storage: Arc<Storage>,
+                 storage: Storage,
                  options: PickerOptions| {
                     FxPiecePicker::new(
                         torrent,
@@ -364,7 +364,7 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
             options,
             config,
             data_pool,
-            Arc::from(storage(storage_params)),
+            storage(storage_params),
             operations,
             trackers,
             piece_picker,
@@ -462,7 +462,7 @@ impl Torrent {
         options: TorrentFlags,
         config: TorrentConfig,
         data_pool: DataPool,
-        storage: Arc<Storage>,
+        storage: Storage,
         operations: Vec<Operation>,
         trackers: Vec<TorrentTracker>,
         piece_picker: Box<PiecePickerFactory>,
@@ -1762,7 +1762,7 @@ pub struct TorrentContext {
     /// The pieces of the torrent, these are only known if the metadata is available
     data_pool: DataPool,
     /// The data storage of the torrent.
-    storage: Arc<Storage>,
+    storage: Storage,
     /// The piece picker of the torrent.
     piece_picker: PiecePicker,
 
@@ -1802,7 +1802,7 @@ impl TorrentContext {
         options: TorrentFlags,
         data_pool: DataPool,
         trackers: Vec<TorrentTracker>,
-        storage: Arc<Storage>,
+        storage: Storage,
         piece_picker: PiecePicker,
         command_sender: ChannelSender<TorrentCommand>,
         callbacks: MultiThreadedCallback<TorrentEvent>,
@@ -2076,7 +2076,7 @@ impl TorrentContext {
     }
 
     /// Returns a reference to the underlying storage layer of the torrent.
-    pub fn storage(&self) -> &Arc<Storage> {
+    pub fn storage(&self) -> &Storage {
         &self.storage
     }
 
