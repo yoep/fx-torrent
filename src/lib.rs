@@ -98,6 +98,52 @@ Metadata can be decoded from bencoded bytes (using `TorrentMetadata::try_from`) 
 # }
 ```
 
+### Streaming
+
+The fx_torrent engine supports sequential file streaming through [FileStream].
+This allows you to stream file data (such as media files) over the network before
+the entire torrent finishes downloading.
+
+Because [FileStream] implements the standard [futures::Stream] trait,
+it can be easily integrated into asynchronous loops or piped directly into web frameworks like axum.
+
+_Basic Usage_
+```rust
+# use fx_torrent::Torrent;
+# use futures::StreamExt;
+
+# fn example() {
+    let torrent = Torrent::request()
+         .build()
+         .unwrap();
+     let file = torrent.file_by_name("example.mp4").await.unwrap();
+
+    let mut stream = torrent.stream(&file).await.unwrap();
+    while let Some(bytes) = stream.next().await {
+        // use the bytes here
+    }
+# }
+```
+
+_Axum Integration Example_
+```rust
+# use axum::body::Body;
+# use axum::response::Response;
+# use futures::StreamExt;
+# use fx_torrent::Torrent;
+
+fn axum_example(filename: &str) -> Response<Body> {
+    let torrent = Torrent::request()
+         .build()
+         .unwrap();
+     let file = torrent.file_by_name(filename).await.unwrap();
+
+    let stream = torrent.stream(&file).await.unwrap();
+    Response::builder()
+        .body(Body::from_stream(Box::into_pin(stream)))
+}
+```
+
 ## DHT
 
 When using the `dht` feature, enabled by default, one of the following additional features should be enabled:
@@ -368,6 +414,7 @@ pub use magnet::*;
 pub use piece::*;
 pub use session::*;
 pub use session_cache::*;
+pub use stream::*;
 pub use torrent::*;
 pub use torrent_flags::*;
 pub use torrent_health::*;
@@ -406,6 +453,7 @@ pub mod piece_picker;
 mod session;
 mod session_cache;
 pub mod storage;
+mod stream;
 mod torrent;
 mod torrent_data;
 mod torrent_flags;

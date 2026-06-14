@@ -78,7 +78,7 @@ impl DataPool {
         rx.await.unwrap_or_default()
     }
 
-    /// Returns the file for the given index.
+    /// Returns the file for the given index, if found.
     pub async fn file(&self, file: &FileIndex) -> Option<File> {
         let rx = self
             .sender
@@ -88,6 +88,19 @@ impl DataPool {
             })
             .await;
         rx.await.unwrap_or_default()
+    }
+
+    /// Returns the file for the given name, if found.
+    pub async fn file_by_name(&self, name: impl ToString) -> Option<File> {
+        self.sender
+            .send(|tx| DataPoolCommand::GetFileByName {
+                name: name.to_string(),
+                response: tx,
+            })
+            .await
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Returns all pieces present within the pool.
@@ -372,6 +385,10 @@ enum DataPoolCommand {
         index: FileIndex,
         response: Reply<Option<File>>,
     },
+    GetFileByName {
+        name: String,
+        response: Reply<Option<File>>,
+    },
     GetPieces {
         response: Reply<Vec<Piece>>,
     },
@@ -496,6 +513,12 @@ impl InnerDataPool {
                 DataPoolCommand::GetFile { index, response } => {
                     response.send(self.files.get(&index).cloned());
                 }
+                DataPoolCommand::GetFileByName { name, response } => response.send(
+                    self.files
+                        .values()
+                        .find(|file| file.filename() == name.as_str())
+                        .cloned(),
+                ),
                 DataPoolCommand::GetPieces { response } => {
                     response.send(self.pieces.values().cloned().collect());
                 }
@@ -771,15 +794,13 @@ impl InnerDataPool {
     }
 
     fn has_bytes(&self, bytes: &Range<usize>) -> bool {
-        self.pieces
-            .iter()
-            .filter(|(_, piece)| {
-                let piece_range = piece.torrent_range();
+        let piece_len = self.pieces.get(&0).map(|piece| piece.length).unwrap_or(1);
+        let start_piece = bytes.start / piece_len;
+        let end_piece = (bytes.end - 1) / piece_len;
 
-                // check if there is any overlap with the given byte range and piece range
-                piece_range.start < bytes.end && bytes.start < piece_range.end
-            })
-            .all(|(index, _)| self.is_piece_completed(index))
+        (start_piece..=end_piece)
+            .into_iter()
+            .all(|piece| self.is_piece_completed(&piece))
     }
 
     /// Check if the piece is wanted by the torrent.

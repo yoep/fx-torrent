@@ -83,6 +83,44 @@ RUSTFLAGS="--cfg tokio_unstable" cargo run --example cli
 
 If you do not wish to use experimental tokio features, you must disable the `tracing` feature in the example.
 
+### Streaming
+
+The `fx_torrent` engine supports sequential file streaming through `FileStream`.
+This allows you to stream file data (such as media files) over the network before
+the entire torrent finishes downloading.
+
+Because `FileStream` implements the standard `futures::Stream` trait,
+it can be easily integrated into asynchronous loops or piped directly into web frameworks like axum.
+
+_Basic Usage_
+```rust
+fn example() {
+    let torrent = Torrent::request()
+        .build()
+        .unwrap();
+    let file = torrent.file_by_name("example.mp4").await.unwrap();
+
+    let mut stream = torrent.stream(&file).await.unwrap();
+    while let Some(bytes) = stream.next().await {
+        // use the bytes here
+    }
+}
+```
+
+_Axum Integration Example_
+```rust
+fn axum_example(filename: &str) -> Response<Body> {
+    let torrent = Torrent::request()
+         .build()
+         .unwrap();
+    let file = torrent.file_by_name(filename).await.unwrap();
+
+    let stream = torrent.stream(&file).await.unwrap();
+    Response::builder()
+        .body(Body::from_stream(Box::into_pin(stream)))
+}
+```
+
 ## DHT
 
 When using the `dht` feature, enabled by default, one of the following additional features should be enabled:
