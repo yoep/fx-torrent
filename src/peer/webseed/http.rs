@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
+use tokio::sync::Mutex;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -67,6 +68,7 @@ impl HttpPeer {
             },
             url,
             addr,
+            state: Mutex::new(PeerState::Idle),
             metrics: Metrics::new(),
             torrent,
             callbacks: MultiThreadedCallback::new(),
@@ -101,8 +103,7 @@ impl HttpPeer {
 
     /// Returns the state of the peer.
     pub async fn state(&self) -> PeerState {
-        // TODO: implement state changes
-        PeerState::Idle
+        *self.inner.state.lock().await
     }
 
     /// Returns the bitfield of the remote peer.
@@ -153,6 +154,7 @@ struct HttpPeerContext {
     client_info: PeerClientInfo,
     url: Url,
     addr: SocketAddr,
+    state: Mutex<PeerState>,
     metrics: Metrics,
     torrent: InnerTorrent,
     callbacks: MultiThreadedCallback<PeerEvent>,
@@ -196,6 +198,9 @@ impl HttpPeerContext {
         let mut cursor = 0usize;
         let len = blocks.len();
         let mut buffer = vec![0u8; len];
+
+        // update the state while downloading
+        self.update_state(PeerState::Downloading).await;
 
         while cursor < len {
             let file = self
@@ -271,7 +276,13 @@ impl HttpPeerContext {
             }
         }
 
+        self.update_state(PeerState::Idle).await;
         Ok(())
+    }
+
+    async fn update_state(&self, new_state: PeerState) {
+        let mut state = self.state.lock().await;
+        *state = new_state;
     }
 
     fn create_request_url(
@@ -335,7 +346,56 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn test_http_peer_create_request_url() {
+    async fn test_state() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let url = Url::parse("https://mirror.com/pub/").unwrap();
+        let expected_result =
+            Url::parse("https://mirror.com/pub/debian-11.6.0-amd64-netinst.iso/README%25201.md")
+                .unwrap();
+        let torrent = torrent!(
+            "debian.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![],
+            vec![]
+        );
+        let peer = HttpPeer::new(url, torrent.inner.clone()).expect("expected an http peer");
+
+        let result = peer.state().await;
+
+        assert_eq!(PeerState::Idle, result);
+    }
+
+    #[tokio::test]
+    async fn test_remote_piece_bitfield() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let url = Url::parse("https://mirror.com/pub/").unwrap();
+        let expected_result =
+            Url::parse("https://mirror.com/pub/debian-11.6.0-amd64-netinst.iso/README%25201.md")
+                .unwrap();
+        let torrent = torrent!(
+            "debian.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![],
+            vec![]
+        );
+        let total_pieces = torrent.total_pieces().await;
+        let peer = HttpPeer::new(url, torrent.inner.clone()).expect("expected an http peer");
+
+        let result = peer.remote_piece_bitfield().await;
+
+        assert_eq!(BitVec::repeat(true, total_pieces), result);
+    }
+
+    #[tokio::test]
+    async fn test_create_request_url() {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
@@ -372,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn test_http_peer_create_filepath() {
+    fn test_create_filepath() {
         let expected_result = PathBuf::from("debian-11.6.0-amd64-netinst.iso");
         let torrent = read_test_file_to_bytes("debian.torrent");
         let metadata = TorrentMetadata::try_from(torrent.as_slice()).unwrap();
