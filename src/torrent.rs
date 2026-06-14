@@ -1463,6 +1463,15 @@ impl InnerTorrent {
             .unwrap_or_default()
     }
 
+    /// Returns `true` if the torrent is in the end-game phase, else `false`.
+    pub async fn is_end_game(&self) -> bool {
+        self.sender
+            .send(|tx| TorrentCommand::IsEndGame { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
     /// Notify the torrent that a peer's connection is closed.
     pub(crate) async fn peer_closed(&self, addr: SocketAddr, reason: CloseReason) {
         self.sender
@@ -1716,6 +1725,9 @@ pub enum TorrentCommand {
         response: Reply<bool>,
     },
     IsPartialSeed {
+        response: Reply<bool>,
+    },
+    IsEndGame {
         response: Reply<bool>,
     },
     #[cfg(test)]
@@ -2983,6 +2995,9 @@ impl TorrentContext {
             TorrentCommand::IsPartialSeed { response } => {
                 response.send(self.is_partial_seed().await);
             }
+            TorrentCommand::IsEndGame { response } => {
+                response.send(self.piece_picker.is_end_game());
+            }
             #[cfg(test)]
             TorrentCommand::DataPool { response } => response.send(self.data_pool.clone()),
         }
@@ -3829,11 +3844,9 @@ mod tests {
         }
     }
 
-    // FIXME: Check performance, as test is not completing within 90 seconds
-    #[ignore]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_torrent_resume_internal() {
-        init_logger!(LevelFilter::Debug);
+        init_logger!(LevelFilter::Trace);
         let temp_dir_source = tempdir().unwrap();
         let temp_path_source = temp_dir_source.path().to_str().unwrap();
         let temp_dir_target = tempdir().unwrap();
@@ -4096,8 +4109,10 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
-            vec![CreatePiecesAndFilesOperation::new().into(),],
-            vec![]
+            vec![CreatePiecesAndFilesOperation::new().into()],
+            vec![],
+            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            None
         );
         let data_pool = torrent.inner.data_pool().await.unwrap();
 
@@ -4106,16 +4121,7 @@ mod tests {
         // retrieve all created pieces from the torrent
         let pieces = data_pool.pieces().await;
 
-        let total_pieces = torrent.total_pieces().await;
-        assert_ne!(0, total_pieces, "expected the pieces to have been created");
-
-        let result = data_pool.is_end_game().await;
-        assert_eq!(
-            false, result,
-            "expected the torrent to not be in the end-game phase"
-        );
-
-        let completed_range_1 = (total_pieces as f64 * 0.90) as usize;
+        let completed_range_1 = (pieces.len() as f64 * 0.90) as usize;
         for piece in (0..completed_range_1).into_iter().map(|e| e as PieceIndex) {
             let _ = torrent
                 .inner
@@ -4127,13 +4133,13 @@ mod tests {
                 .await;
         }
 
-        let result = data_pool.is_end_game().await;
+        let result = torrent.inner.is_end_game().await;
         assert_eq!(
             false, result,
             "expected the torrent to not be in the end-game phase"
         );
 
-        let completed_range_2 = (total_pieces as f64 * 0.98) as usize;
+        let completed_range_2 = (pieces.len() as f64 * 0.98) as usize;
         for piece in (completed_range_1..completed_range_2)
             .into_iter()
             .map(|e| e as PieceIndex)
@@ -4151,12 +4157,12 @@ mod tests {
         // wait for all pieces to be processed and check the bitfield result
         let bitfield = torrent.inner.bitfield().await.unwrap();
         assert_eq!(
-            (total_pieces as f64 * 0.98) as usize,
+            (pieces.len() as f64 * 0.98) as usize,
             bitfield.count_ones(),
             "expected 98% of pieces to be completed"
         );
 
-        let result = data_pool.is_end_game().await;
+        let result = torrent.inner.is_end_game().await;
         assert_eq!(
             true, result,
             "expected the torrent to be in the end-game phase"

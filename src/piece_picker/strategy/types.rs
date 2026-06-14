@@ -1,23 +1,10 @@
-use crate::peer::{ChokeState, Peer};
+use crate::peer::Peer;
 use crate::piece_picker::strategy::rarest_first::RarestFirstStrategy;
 use crate::piece_picker::strategy::PriorityStrategy;
-use crate::piece_picker::{PickerOptions, PieceInfo};
-use crate::{BitVec, PieceBlock, PieceIndex};
+use crate::piece_picker::{PickerOptions, PiecePickerBlock};
+use crate::PieceIndex;
 use async_trait::async_trait;
-use itertools::Itertools;
 use std::fmt::Debug;
-
-/// The information about the state of the peer.
-#[derive(Debug)]
-pub struct PeerInfo<'a> {
-    /// The choke state of the remote peer.
-    pub choke_state: ChokeState,
-    /// The piece bitfield of the remote peer that are allowed to be downloaded,
-    /// even when the remote peer is choked.
-    pub fast_bitfield: BitVec,
-    /// The suggested pieces to download by the remote peer.
-    pub suggested_pieces: &'a [PieceIndex],
-}
 
 /// The piece picker strategy.
 #[derive(Debug)]
@@ -28,29 +15,53 @@ pub enum Strategy {
 }
 
 impl Strategy {
-    /// Returns the interesting pieces, sorted by the strategy,
+    /// Returns the unique strategy name.
+    pub fn name(&self) -> &str {
+        match self {
+            Strategy::RarestFirst(_) => "rarest_first",
+            Strategy::Priority(_) => "priority",
+            Strategy::Other(_) => "other",
+        }
+    }
+
+    /// Returns the picked piece blocks, sorted by the strategy,
     /// which should be downloaded from the peer.
+    /// The strategy will try to pick the desired target queue length for the peer.
     ///
     /// ## Notes
     ///
-    /// The `pieces` are already filtered on available pieces of the peer,
-    /// and therefore should not be filtered again.
+    /// The `blocks` are already filtered on peer availability and
+    /// not [crate::piece_picker::PieceBlockState::Finished] therefore,
+    /// they should not be filtered again on these criteria.
     ///
-    /// Picking `blocks` which are already being [crate::piece_picker::BlockState::Requested]
+    /// Picking `blocks` which are already being [crate::piece_picker::PieceBlockState::Requested]
     /// is allowed, especially during the endgame phase of the torrent.
     pub async fn pick_pieces<'a>(
-        &'a self,
+        &self,
         peer: &Peer,
-        peer_info: &'a PeerInfo<'a>,
-        pieces: impl IntoIterator<Item = &'a PieceInfo>,
+        blocks: &'a Vec<PiecePickerBlock>,
+        target_queue_len: usize,
+        suggested_pieces: &[PieceIndex],
+        is_end_game: bool,
         options: PickerOptions,
-    ) -> Vec<PieceBlock> {
+    ) -> Vec<&'a PiecePickerBlock> {
         match self {
-            Strategy::RarestFirst(strategy) => strategy.pick_pieces(pieces, options),
-            Strategy::Priority(strategy) => strategy.pick_pieces(pieces, options),
+            Strategy::RarestFirst(strategy) => {
+                strategy.pick_pieces(blocks, target_queue_len, is_end_game, options)
+            }
+            Strategy::Priority(strategy) => {
+                strategy.pick_pieces(blocks, target_queue_len, is_end_game, options)
+            }
             Strategy::Other(strategy) => {
                 strategy
-                    .pick_pieces(peer, peer_info, pieces.into_iter().collect_vec(), options)
+                    .pick_pieces(
+                        peer,
+                        blocks,
+                        target_queue_len,
+                        suggested_pieces,
+                        is_end_game,
+                        options,
+                    )
                     .await
             }
         }
@@ -80,18 +91,22 @@ where
 
 #[async_trait]
 pub trait Extension: Debug + Send + Sync {
-    /// Returns the interesting pieces, sorted by the strategy,
+    /// Returns the picked piece blocks, sorted by the strategy,
     /// which should be downloaded from the peer.
+    /// The strategy will try to pick the desired target queue length for the peer.
     ///
     /// ## Note
     ///
-    /// The `pieces` are already filtered on the available pieces of the peer,
-    /// and therefore should not be filtered again.
+    /// The `blocks` are already filtered on peer availability and
+    /// not [crate::piece_picker::PieceBlockState::Finished] therefore,
+    /// they should not be filtered again on these criteria.
     async fn pick_pieces<'a>(
-        &'a self,
+        &self,
         peer: &Peer,
-        peer_info: &'a PeerInfo<'a>,
-        pieces: Vec<&PieceInfo>,
+        blocks: &'a Vec<PiecePickerBlock>,
+        target_queue_len: usize,
+        suggested_pieces: &[PieceIndex],
+        is_end_game: bool,
         options: PickerOptions,
-    ) -> Vec<PieceBlock>;
+    ) -> Vec<&'a PiecePickerBlock>;
 }

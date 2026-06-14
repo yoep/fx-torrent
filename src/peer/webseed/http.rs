@@ -8,6 +8,7 @@ use crate::{BitVec, FileAttributeFlags, PieceBlock, PieceIndex, TorrentFileInfo,
 use derive_more::Display;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use fx_handle::Handle;
+use itertools::Itertools;
 use log::debug;
 use percent_encoding::{percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use reqwest::redirect::Policy;
@@ -111,9 +112,19 @@ impl HttpPeer {
     }
 
     /// Request one or more piece blocks from the remote peer.
-    pub async fn request(&self, piece: PieceIndex, blocks: &[PieceBlock]) -> Result<()> {
+    pub async fn request(&self, blocks: &[PieceBlock]) -> Result<()> {
         let metadata = self.inner.torrent.metadata().await?;
-        self.inner.request_piece(&piece, blocks, &metadata).await
+        let requests = blocks
+            .into_iter()
+            .map(|block| (block.piece, block))
+            .into_group_map();
+
+        // TODO: move the actual requests to a separate task with download queue
+        for (piece, blocks) in requests {
+            self.inner.request_piece(&piece, blocks, &metadata).await?;
+        }
+
+        Ok(())
     }
 
     /// Close the peer connection.
@@ -170,7 +181,7 @@ impl HttpPeerContext {
     async fn request_piece(
         &self,
         piece_index: &PieceIndex,
-        blocks: &[PieceBlock],
+        blocks: Vec<&PieceBlock>,
         metadata: &TorrentMetadata,
     ) -> Result<()> {
         let file_index = self
@@ -183,7 +194,7 @@ impl HttpPeerContext {
             Some(piece) => piece,
         };
         let mut cursor = 0usize;
-        let len = blocks.iter().map(|block| block.length).sum();
+        let len = blocks.len();
         let mut buffer = vec![0u8; len];
 
         while cursor < len {
@@ -238,7 +249,7 @@ impl HttpPeerContext {
             }
 
             // loop over each part that needs to be completed and fetch it from the body
-            for block in blocks {
+            for block in &blocks {
                 let data_len = buffer.len();
                 let block_start = block.begin;
                 let block_end = block_start.saturating_add(block.length);

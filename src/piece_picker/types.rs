@@ -16,14 +16,6 @@ pub enum PiecePicker {
 }
 
 impl PiecePicker {
-    /// Returns the options set for the piece picker.
-    pub fn options(&self) -> &PickerOptions {
-        match self {
-            PiecePicker::Picker(picker) => picker.options(),
-            PiecePicker::Other(picker) => picker.options(),
-        }
-    }
-
     /// Set the pieces of the torrent to pick from.
     /// This replaces any previously set pieces within the picker.
     pub fn set_pieces(&mut self, pieces: &[Piece]) {
@@ -63,6 +55,14 @@ impl PiecePicker {
         }
     }
 
+    /// Returns the options set for the piece picker.
+    pub fn options(&self) -> &PickerOptions {
+        match self {
+            PiecePicker::Picker(picker) => picker.options(),
+            PiecePicker::Other(picker) => picker.options(),
+        }
+    }
+
     /// Set the options for the piece picker.
     /// This replaces any previously set options.
     pub fn set_options(&mut self, options: PickerOptions) {
@@ -85,6 +85,14 @@ impl PiecePicker {
         match self {
             PiecePicker::Picker(picker) => picker.remove_options(options),
             PiecePicker::Other(picker) => picker.remove_options(options),
+        }
+    }
+
+    /// Returns `true` if the torrent has reached the end game, else `false`.
+    pub fn is_end_game(&self) -> bool {
+        match self {
+            PiecePicker::Picker(picker) => picker.is_end_game(),
+            PiecePicker::Other(picker) => picker.is_end_game(),
         }
     }
 
@@ -142,9 +150,6 @@ where
 
 #[async_trait]
 pub trait Extension: Debug + Send + Sync {
-    /// Returns the options set for the piece picker.
-    fn options(&self) -> &PickerOptions;
-
     /// Set the pieces of the torrent to pick from.
     /// This should replace any previously set pieces within the picker.
     fn set_pieces<'a>(&'a mut self, pieces: &'a [Piece]);
@@ -164,6 +169,9 @@ pub trait Extension: Debug + Send + Sync {
     /// after download, or if the underlying storage encounters a corruption error.
     fn set_failed(&mut self, piece: &PieceIndex);
 
+    /// Returns the options set for the piece picker.
+    fn options(&self) -> &PickerOptions;
+
     /// Set the options for the piece picker.
     /// This replaces any previously set options.
     fn set_options(&mut self, options: PickerOptions);
@@ -173,6 +181,9 @@ pub trait Extension: Debug + Send + Sync {
 
     /// Remove the given options from the piece picker.
     fn remove_options(&mut self, options: PickerOptions);
+
+    /// Returns `true` if the torrent has reached the end game, else `false`.
+    fn is_end_game(&self) -> bool;
 
     /// Process the data for a piece block that has been downloaded from a peer.
     async fn block_received<'a>(&'a mut self, peer: &'a Peer, block: PieceBlock, data: Vec<u8>);
@@ -193,11 +204,8 @@ pub trait Extension: Debug + Send + Sync {
 #[bitmask_config(vec_debug, flags_iter)]
 pub enum PickerOptions {
     /// Pick the pieces which are the least available.
-    /// This option is exclusive with [PickerOptions::MostAvailable].
+    /// This option is exclusive with [PickerOptions::Sequential].
     RarestFirst,
-    /// Pick the pieces which have the highest availability.
-    /// This option is exclusive with [PickerOptions::RarestFirst].
-    MostAvailable,
     /// Pick only pieces which are suggested by the peer.
     SuggestedOnly,
     /// Pick the pieces according to their priority.
@@ -205,6 +213,7 @@ pub enum PickerOptions {
     /// Pick the pieces which have been partially downloaded first.
     PrioritizePartials,
     /// Pick the pieces in sequential order.
+    /// This option is exclusive with [PickerOptions::RarestFirst].
     Sequential,
 }
 
@@ -219,14 +228,15 @@ mod tests {
 
         #[async_trait]
         impl Extension for PiecePickerExtension {
-            fn options(&self) -> &PickerOptions;
             fn set_pieces<'a>(&'a mut self, pieces: &'a [Piece]);
             fn set_priority(&mut self, piece: &PieceIndex, priority: PiecePriority);
             fn set_completed(&mut self, piece: &PieceIndex);
             fn set_failed(&mut self, piece: &PieceIndex);
+            fn options(&self) -> &PickerOptions;
             fn set_options(&mut self, options: PickerOptions);
             fn add_options(&mut self, options: PickerOptions);
             fn remove_options(&mut self, options: PickerOptions);
+            fn is_end_game(&self) -> bool;
             async fn block_received<'a>(&'a mut self, peer: &'a Peer, block: PieceBlock, data: Vec<u8>);
             async fn block_rejected(&mut self, peer: &Peer, block: PieceBlock);
             async fn pick_pieces(&mut self, peer: &Peer);

@@ -82,14 +82,15 @@ macro_rules! pieces {
 /// * `piece_len` - The length of each piece, except the last one.
 macro_rules! piece_infos {
     ($num_of_pieces:expr, $total_len:expr, $piece_len:expr) => {{
-        use crate::piece_picker::PieceInfo;
+        use crate::piece_picker::PiecePickerBlock;
         use crate::Piece;
 
         let pieces: Vec<Piece> = pieces!($num_of_pieces, $total_len, $piece_len);
 
         pieces
             .iter()
-            .map(|piece| PieceInfo::from(piece))
+            .map(|piece| Vec::<PiecePickerBlock>::from(piece))
+            .flatten()
             .collect_vec()
     }};
 }

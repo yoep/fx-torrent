@@ -130,12 +130,21 @@ impl Peer {
         }
     }
 
-    /// Request one or more blocks of a piece from the remote peer.
-    pub async fn request(&self, piece: PieceIndex, blocks: &[PieceBlock]) -> Result<()> {
+    /// Request the given piece blocks to be downloaded from the remote peer.
+    pub async fn request(&self, blocks: &[PieceBlock]) -> Result<()> {
         match self {
             Peer::BitTorrent(peer) => peer.request(blocks).await,
-            Peer::Http(peer) => peer.request(piece, blocks).await,
-            Peer::Other(peer) => peer.request(piece, blocks).await,
+            Peer::Http(peer) => peer.request(blocks).await,
+            Peer::Other(peer) => peer.request(blocks).await,
+        }
+    }
+
+    /// Returns the target number of requests which should be queued for the remote peer.
+    pub async fn target_request_queue_len(&self) -> usize {
+        match self {
+            Peer::BitTorrent(peer) => peer.target_request_queue_len().await,
+            Peer::Http(_) => 100,
+            Peer::Other(peer) => peer.target_request_queue_len().await,
         }
     }
 
@@ -248,8 +257,11 @@ pub trait Extension: Debug + Display + Send + Sync + Callback<PeerEvent> {
     /// Returns the suggested pieces by the remote peer for downloading.
     async fn suggested_pieces(&self) -> Vec<PieceIndex>;
 
-    /// Request one or more blocks of a piece from the remote peer.
-    async fn request(&self, piece: PieceIndex, blocks: &[PieceBlock]) -> Result<()>;
+    /// Request the given piece blocks to be downloaded from the remote peer.
+    async fn request(&self, blocks: &[PieceBlock]) -> Result<()>;
+
+    /// Returns the target number of requests which should be queued for the remote peer.
+    async fn target_request_queue_len(&self) -> usize;
 
     /// Close the peer connection, cancelling any queued operation.
     /// The connection with the remote peer will be closed and this peer can no longer be used.

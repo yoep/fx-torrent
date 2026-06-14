@@ -20,7 +20,7 @@ use derive_more::Display;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use itertools::Itertools;
 use log::{debug, error, trace, warn};
-use std::cmp::Ordering;
+use std::cmp::{max, Ordering};
 use std::collections::{HashSet, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
 use std::net::SocketAddr;
@@ -33,6 +33,9 @@ use tokio_util::sync::CancellationToken;
 
 const KEEP_ALIVE_SECONDS: u64 = 90;
 const PEER_TICK_INTERVAL: Duration = Duration::from_secs(1);
+const MIN_TARGET_QUEUE_LEN: usize = 2;
+const MAX_TARGET_QUEUE_LEN: usize = 500;
+const REQUEST_QUEUE_TIME: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The response of a remote peer connection.
@@ -685,6 +688,15 @@ impl BitTorrentPeer {
             .await
     }
 
+    /// Returns the target number of requests which should be queued for the remote peer.
+    pub async fn target_request_queue_len(&self) -> usize {
+        self.sender
+            .send(|tx| PeerCommand::TargetRequestQueueLen { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
     /// Try to HolePunch the given target peer address.
     /// The response is completed once a `connect` message has been received from the relaying peer.
     pub(crate) async fn holepunch(
@@ -790,53 +802,87 @@ impl PartialEq for BitTorrentPeer {
 #[derive(Debug)]
 enum PeerCommand {
     /// Returns the remote peer id, if known.
-    GetRemoteId { response: Reply<Option<PeerId>> },
+    GetRemoteId {
+        response: Reply<Option<PeerId>>,
+    },
     /// Returns the remote peer information, if known.
-    GetRemotePeer { response: Reply<Option<RemotePeer>> },
+    GetRemotePeer {
+        response: Reply<Option<RemotePeer>>,
+    },
     /// Returns the supported extensions of the remote peer, if known.
     GetRemoteSupportedExtensions {
         response: Reply<Option<ProtocolExtensionFlags>>,
     },
     /// Returns the remote peer choke state, if known.
-    GetRemoteChokeState { response: Reply<ChokeState> },
+    GetRemoteChokeState {
+        response: Reply<ChokeState>,
+    },
     /// Returns the remote peer interested state, if known.
-    GetRemoteInterestState { response: Reply<InterestState> },
+    GetRemoteInterestState {
+        response: Reply<InterestState>,
+    },
     /// Returns `true` if the remote peer has the given piece, else `false`.
     GetRemoteHasPiece {
         piece: PieceIndex,
         response: Reply<bool>,
     },
     /// Returns `true` if the remote peer has pieces which are wanted by the torrent, else `false`.
-    HasWantedPieces { response: Reply<bool> },
+    HasWantedPieces {
+        response: Reply<bool>,
+    },
     /// Returns the bitfield (pieces) of the remote peer, if known.
-    GetRemoteBitfield { response: Reply<BitVec> },
+    GetRemoteBitfield {
+        response: Reply<BitVec>,
+    },
     /// Returns the bitfield (pieces) of the fast pieces for the remote peer, if known.
-    GetRemoteFastBitfield { response: Reply<BitVec> },
+    GetRemoteFastBitfield {
+        response: Reply<BitVec>,
+    },
     /// Returns `true` if the remote peer is a seed, else `false`.
-    IsSeed { response: Reply<bool> },
+    IsSeed {
+        response: Reply<bool>,
+    },
     /// Returns the state of the peer.
-    GetState { response: Reply<PeerState> },
+    GetState {
+        response: Reply<PeerState>,
+    },
     /// Returns the state of the client choke state.
-    GetClientChokeState { response: Reply<ChokeState> },
+    GetClientChokeState {
+        response: Reply<ChokeState>,
+    },
     /// Returns the bitfield of the client pieces that have been completed.
-    GetClientBitfield { response: Reply<BitVec> },
+    GetClientBitfield {
+        response: Reply<BitVec>,
+    },
     /// Returns `true` if the peer and remote peer support the given extension, else `false`.
-    IsExtensionSupported { name: String, response: Reply<bool> },
+    IsExtensionSupported {
+        name: String,
+        response: Reply<bool>,
+    },
     /// Returns the extension number of the given extension name if found, else `None`.
     FindExtensionNumber {
         name: String,
         response: Reply<Option<ExtensionNumber>>,
     },
     /// Returns the total number of pending requests to the remote peer.
-    GetClientPendingRequestsLen { response: Reply<usize> },
+    GetClientPendingRequestsLen {
+        response: Reply<usize>,
+    },
     /// Returns the total number of pending requests from the remote peer.
-    GetRemotePendingRequestsLen { response: Reply<usize> },
+    GetRemotePendingRequestsLen {
+        response: Reply<usize>,
+    },
     /// Returns the suggested pieces of the remote peer.
-    SuggestedPieces { response: Reply<Vec<PieceIndex>> },
+    SuggestedPieces {
+        response: Reply<Vec<PieceIndex>>,
+    },
     /// Request one or more piece blocks from the remote peer.
     Request {
         blocks: Vec<PieceBlock>,
         response: Reply<Result<()>>,
+    },
+    TargetRequestQueueLen {
+        response: Reply<usize>,
     },
     /// Send the given message to the remote peer.
     SendMessage {
@@ -849,7 +895,9 @@ enum PeerCommand {
         response: Reply<extension::Result<SocketAddr>>,
     },
     /// Close the peer connection.
-    Close { response: Reply<()> },
+    Close {
+        response: Reply<()>,
+    },
 }
 
 #[derive(Debug, Display)]
@@ -891,8 +939,8 @@ pub struct PeerContext {
     /// The pieces which have been suggested by the remote peer for downloading
     remote_suggested_pieces: HashSet<PieceIndex>,
 
-    /// The amount of requests we should queue up to the remote peer
-    desired_queue_size: u16,
+    /// The number of requests we should queue up for the remote peer
+    target_queue_len: usize,
     /// The queue of requests which should be sent to the remote peer
     download_queue: VecDeque<PieceBlock>,
     /// The client peer pending requests to the remote torrent.
@@ -957,7 +1005,7 @@ impl PeerContext {
             remote_pieces: BitVec::repeat(false, total_pieces),
             remote_fast_pieces: Default::default(),
             remote_suggested_pieces: Default::default(),
-            desired_queue_size: 4,
+            target_queue_len: 4,
             download_queue: VecDeque::new(),
             pending_requests: vec![],
             remote_pending_requests: Vec::new(),
@@ -1276,7 +1324,7 @@ impl PeerContext {
             Message::Cancel(request) => self.cancel_remote_pending_request(request).await,
             Message::Suggest(piece) => self.on_piece_suggested(piece as PieceIndex).await,
             Message::AllowedFast(piece) => self.remote_fast_piece(piece as PieceIndex).await,
-            Message::Piece(piece) => self.on_received_piece(piece).await,
+            Message::Piece(piece) => self.on_piece_data_received(piece).await,
             Message::ExtendedHandshake(handshake) => {
                 self.update_extended_handshake(handshake).await
             }
@@ -1442,7 +1490,7 @@ impl PeerContext {
     }
 
     /// Handle a received piece data message
-    async fn on_received_piece(&mut self, piece: Piece) {
+    async fn on_piece_data_received(&mut self, piece: Piece) {
         let request = if let Some(request) = self
             .remove_client_pending_request(&Request::from(&piece))
             .await
@@ -1486,6 +1534,15 @@ impl PeerContext {
                 "Received piece {} data from peer {} for a part that is unknown to the torrent",
                 piece.index, self
             );
+        }
+
+        // recalculate the target requests queue length of the peer
+        self.update_target_request_queue_len();
+
+        // check if the download queue is empty and the remote client is still unchoked
+        // if so, request additional pieces to be picked for this peer connection
+        if self.remote_choke_state == ChokeState::UnChoked && self.download_queue.is_empty() {
+            self.torrent.pick_pieces(&self.client.handle).await;
         }
     }
 
@@ -1557,6 +1614,9 @@ impl PeerContext {
             }
             PeerCommand::Request { blocks, response } => {
                 response.send(self.on_request(blocks).await)
+            }
+            PeerCommand::TargetRequestQueueLen { response } => {
+                response.send(self.target_request_queue_len())
             }
             PeerCommand::SendMessage { message, response } => {
                 response.send(self.send(message).await)
@@ -1663,7 +1723,11 @@ impl PeerContext {
 
         let is_interested =
             ignore_remote_interest_state || self.remote_interest_state == InterestState::Interested;
-        let is_upload_allowed = self.torrent.is_upload_allowed().await;
+        let is_upload_allowed =
+            match timeout(Duration::from_millis(500), self.torrent.is_upload_allowed()).await {
+                Err(_) => return,
+                Ok(e) => e,
+            };
 
         if is_interested && is_upload_allowed {
             self.request_upload_permit().await;
@@ -2173,6 +2237,22 @@ impl PeerContext {
         Ok(())
     }
 
+    fn target_request_queue_len(&self) -> usize {
+        self.target_queue_len
+            .saturating_sub(self.download_queue.len())
+            .saturating_sub(self.pending_requests.len())
+    }
+
+    fn update_target_request_queue_len(&mut self) {
+        let download_rate = self.metrics.bytes_in_useful.rate();
+        let target_queue_len = max(
+            (REQUEST_QUEUE_TIME.as_secs() * download_rate as u64) as usize / PieceBlock::MAX_LEN,
+            MIN_TARGET_QUEUE_LEN,
+        );
+
+        self.target_queue_len = target_queue_len.min(MAX_TARGET_QUEUE_LEN);
+    }
+
     /// Reject the current in-flight block requests to the remote peer.
     async fn reject_pending_requests(&mut self) {
         for pending in std::mem::take(&mut self.pending_requests) {
@@ -2193,13 +2273,7 @@ impl PeerContext {
 
     /// Try to sent one or more queued requests to the remote peer.
     async fn send_queued_requests(&mut self) {
-        // early exit if we're not in a state to start downloading requests
-        if !self.torrent.is_download_allowed().await {
-            return;
-        }
-
-        while !self.download_queue.is_empty()
-            && (self.pending_requests.len() as u16) < self.desired_queue_size
+        while !self.download_queue.is_empty() && self.pending_requests.len() < self.target_queue_len
         {
             let block = match self.download_queue.pop_front() {
                 None => return,
@@ -2962,7 +3036,75 @@ mod tests {
         assert_eq!(Ordering::Equal, result);
     }
 
-    #[cfg(test)]
+    mod target_request_queue_len {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_download_rate() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let torrent = torrent!(
+                "debian-udp.torrent",
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![CreatePiecesAndFilesOperation::new().into()],
+                vec![],
+                |_| MemoryStorage::new().into(),
+                None
+            );
+            let (mut peer, _target) = peer_context_pair!(&torrent.inner);
+
+            // update the target queue len when the download rate is 0
+            peer.update_target_request_queue_len();
+            assert_eq!(
+                MIN_TARGET_QUEUE_LEN, peer.target_queue_len,
+                "expected the target_queue_len to be MIN_TARGET_QUEUE_LEN"
+            );
+
+            peer.metrics.bytes_in_useful.inc_by(640_000);
+            peer.metrics.tick(Duration::from_secs(1));
+            peer.metrics.bytes_in_useful.inc_by(1_280_000);
+            peer.metrics.tick(Duration::from_secs(1));
+
+            // update the target queue len when a download rate is known
+            peer.update_target_request_queue_len();
+            assert_eq!(
+                65, peer.target_queue_len,
+                "expected the target_queue_len to be calculated from the download rate"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_max_target_queue_len() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let torrent = torrent!(
+                "debian-udp.torrent",
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![CreatePiecesAndFilesOperation::new().into()],
+                vec![],
+                |_| MemoryStorage::new().into(),
+                None
+            );
+            let (mut peer, _target) = peer_context_pair!(&torrent.inner);
+
+            // set the download rate to a ridiculously high value
+            peer.metrics.bytes_in_useful.inc_by(100_000_000);
+            peer.metrics.tick(Duration::from_secs(1));
+
+            peer.update_target_request_queue_len();
+            assert_eq!(
+                MAX_TARGET_QUEUE_LEN, peer.target_queue_len,
+                "expected the target_queue_len to be MAX_TARGET_QUEUE_LEN"
+            );
+        }
+    }
+
     mod peer_client_info {
         use super::*;
 
