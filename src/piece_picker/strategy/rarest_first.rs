@@ -68,4 +68,19 @@ mod tests {
 
         assert_eq!(0, result.len(), "expected no pieces to have been picked");
     }
+
+    #[test]
+    fn test_pick_pieces_priority() {
+        let mut blocks = piece_infos!(4, 128_000, 32_768);
+        let strategy = RarestFirstStrategy::new();
+
+        let result = strategy.pick_pieces(
+            &mut blocks,
+            10,
+            false,
+            PickerOptions::RarestFirst | PickerOptions::Priority,
+        );
+
+        assert!(result.is_empty(), "expected no pieces to have been picked");
+    }
 }

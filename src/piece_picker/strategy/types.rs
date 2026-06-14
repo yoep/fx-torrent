@@ -1,7 +1,7 @@
 use crate::peer::Peer;
 use crate::piece_picker::strategy::rarest_first::RarestFirstStrategy;
 use crate::piece_picker::strategy::suggested_only::SuggestedOnlyStrategy;
-use crate::piece_picker::strategy::PriorityStrategy;
+use crate::piece_picker::strategy::{PriorityStrategy, SequentialStrategy};
 use crate::piece_picker::{PickerOptions, PiecePickerBlock};
 use crate::PieceIndex;
 use async_trait::async_trait;
@@ -13,6 +13,7 @@ pub enum Strategy {
     RarestFirst(RarestFirstStrategy),
     SuggestedOnly(SuggestedOnlyStrategy),
     Priority(PriorityStrategy),
+    Sequential(SequentialStrategy),
     Other(Box<dyn Extension>),
 }
 
@@ -23,6 +24,7 @@ impl Strategy {
             Strategy::RarestFirst(_) => "rarest_first",
             Strategy::SuggestedOnly(_) => "suggested_only",
             Strategy::Priority(_) => "priority",
+            Strategy::Sequential(_) => "sequential",
             Strategy::Other(_) => "other",
         }
     }
@@ -62,6 +64,9 @@ impl Strategy {
             Strategy::Priority(strategy) => {
                 strategy.pick_pieces(blocks, target_queue_len, is_end_game, options)
             }
+            Strategy::Sequential(strategy) => {
+                strategy.pick_pieces(blocks, target_queue_len, is_end_game, options)
+            }
             Strategy::Other(strategy) => {
                 strategy
                     .pick_pieces(
@@ -93,6 +98,12 @@ impl From<SuggestedOnlyStrategy> for Strategy {
 impl From<PriorityStrategy> for Strategy {
     fn from(priority: PriorityStrategy) -> Self {
         Self::Priority(priority)
+    }
+}
+
+impl From<SequentialStrategy> for Strategy {
+    fn from(sequential: SequentialStrategy) -> Self {
+        Self::Sequential(sequential)
     }
 }
 

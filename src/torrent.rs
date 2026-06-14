@@ -10,7 +10,9 @@ use crate::peer::{
     PeerEntry, PeerHandle, PeerId, ProtocolExtensionFlags,
 };
 use crate::peer_pool::PeerPool;
-use crate::piece_picker::strategy::{PriorityStrategy, RarestFirstStrategy, SuggestedOnlyStrategy};
+use crate::piece_picker::strategy::{
+    PriorityStrategy, RarestFirstStrategy, SequentialStrategy, SuggestedOnlyStrategy,
+};
 use crate::piece_picker::{FxPiecePicker, PickerOptions, PiecePicker};
 use crate::storage::{Storage, StorageParams};
 use crate::torrent_data::DataPool;
@@ -343,6 +345,7 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
                         vec![
                             RarestFirstStrategy::new().into(),
                             SuggestedOnlyStrategy::new().into(),
+                            SequentialStrategy::new().into(),
                             PriorityStrategy::new().into(),
                         ],
                         32 * 1024 * 1024, // 32MB, TODO: make this configurable
@@ -2503,6 +2506,10 @@ impl TorrentContext {
         }
 
         self.options |= options;
+        if self.options.contains(TorrentFlags::SequentialDownload) {
+            self.piece_picker.add_options(PickerOptions::Sequential);
+        }
+
         self.invoke_event(TorrentEvent::OptionsChanged);
     }
 
@@ -2518,6 +2525,10 @@ impl TorrentContext {
         }
 
         self.options &= !options;
+        if !self.options.contains(TorrentFlags::SequentialDownload) {
+            self.piece_picker.remove_options(PickerOptions::Sequential);
+        }
+
         self.invoke_event(TorrentEvent::OptionsChanged);
     }
 
