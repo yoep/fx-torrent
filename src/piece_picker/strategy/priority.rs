@@ -1,6 +1,7 @@
+use crate::piece_picker::strategy::RarestFirstStrategy;
 use crate::piece_picker::{PickerOptions, PieceBlockState, PiecePickerBlock};
-use crate::PiecePriority;
 use itertools::Itertools;
+use std::cmp::Ordering;
 
 #[derive(Debug)]
 pub struct PriorityStrategy;
@@ -25,11 +26,15 @@ impl PriorityStrategy {
 
         blocks
             .iter()
-            .filter(|block| {
-                block.priority != PiecePriority::None
-                    && (is_end_game || block.state == PieceBlockState::None)
+            .filter(|block| is_end_game || block.state == PieceBlockState::None)
+            .sorted_by(|a, b| {
+                let order = b.priority.cmp(&a.priority);
+                if order == Ordering::Equal && options.contains(PickerOptions::RarestFirst) {
+                    return RarestFirstStrategy::sort(a, b);
+                }
+
+                order
             })
-            .sorted_by(|a, b| b.priority.cmp(&a.priority))
             .take(target_queue_len)
             .collect()
     }

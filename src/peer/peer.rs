@@ -1999,7 +1999,7 @@ impl PeerContext {
             }
 
             // increase the size of the BitVec if metadata is still being retrieved
-            self.remote_pieces.resize(piece, false);
+            self.remote_pieces.resize(piece + 1, false);
         }
 
         self.remote_pieces.set(piece, has_piece);

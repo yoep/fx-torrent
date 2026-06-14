@@ -515,5 +515,63 @@ mod tests {
                 _ => assert!(false, "expected Err, but got {:?}", result),
             }
         }
+
+        #[tokio::test]
+        async fn test_write_to_storage() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let (context, _rx) = torrent_context!(
+                "debian.torrent",
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::default(),
+                vec![],
+                vec![],
+                None
+            );
+            let block = PieceBlock {
+                piece: 0,
+                block: 0,
+                begin: 0,
+                length: 2048,
+            };
+            let mut cache = PickerCache::new(context.storage().clone(), 2048);
+
+            // resize the cache
+            cache.resize(128, 2048, 2048);
+
+            // fill the memory cache
+            let mut data = vec![0u8; 2048];
+            rng().fill(&mut data[..]);
+            cache
+                .write(
+                    &PieceBlock {
+                        piece: 1,
+                        block: 0,
+                        begin: 0,
+                        length: 2048,
+                    },
+                    data.clone(),
+                )
+                .await
+                .unwrap();
+
+            // write block data to storage
+            let mut data = vec![0u8; 2048];
+            rng().fill(&mut data[..]);
+            let result = cache.write(&block, data.clone()).await;
+            match result {
+                Ok(_) => {}
+                _ => assert!(false, "expected Ok, but got {:?}", result),
+            }
+
+            // read the data again from the storage
+            let result = cache.read(&0).await;
+            match result {
+                Ok(result) => assert_eq!(data, result, "expected the stored data to match"),
+                _ => assert!(false, "expected Ok, but got {:?}", result),
+            }
+        }
     }
 }

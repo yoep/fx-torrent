@@ -10,7 +10,7 @@ use crate::peer::{
     PeerEntry, PeerHandle, PeerId, ProtocolExtensionFlags,
 };
 use crate::peer_pool::PeerPool;
-use crate::piece_picker::strategy::{PriorityStrategy, RarestFirstStrategy};
+use crate::piece_picker::strategy::{PriorityStrategy, RarestFirstStrategy, SuggestedOnlyStrategy};
 use crate::piece_picker::{FxPiecePicker, PickerOptions, PiecePicker};
 use crate::storage::{Storage, StorageParams};
 use crate::torrent_data::DataPool;
@@ -342,6 +342,7 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
                         storage,
                         vec![
                             RarestFirstStrategy::new().into(),
+                            SuggestedOnlyStrategy::new().into(),
                             PriorityStrategy::new().into(),
                         ],
                         32 * 1024 * 1024, // 32MB, TODO: make this configurable

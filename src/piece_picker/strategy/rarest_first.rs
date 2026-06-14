@@ -1,5 +1,6 @@
 use crate::piece_picker::{PickerOptions, PieceBlockState, PiecePickerBlock};
 use itertools::Itertools;
+use std::cmp::Ordering;
 
 #[derive(Debug)]
 pub struct RarestFirstStrategy;
@@ -18,16 +19,23 @@ impl RarestFirstStrategy {
         is_end_game: bool,
         options: PickerOptions,
     ) -> Vec<&'a PiecePickerBlock> {
-        if !options.contains(PickerOptions::RarestFirst) {
+        if !options.contains(PickerOptions::RarestFirst)
+            || options.contains(PickerOptions::Priority)
+        {
             return vec![];
         }
 
         blocks
             .into_iter()
             .filter(|block| is_end_game || block.state == PieceBlockState::None)
-            .sorted_by(|a, b| a.availability.cmp(&b.availability))
+            .sorted_by(|a, b| Self::sort(a, b))
             .take(target_queue_len)
             .collect()
+    }
+
+    /// Returns the order of the given piece blocks, based on availability.
+    pub(crate) fn sort(a: &PiecePickerBlock, b: &PiecePickerBlock) -> Ordering {
+        a.availability.cmp(&b.availability)
     }
 }
 

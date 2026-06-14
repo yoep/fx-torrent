@@ -1,5 +1,6 @@
 use crate::peer::Peer;
 use crate::piece_picker::strategy::rarest_first::RarestFirstStrategy;
+use crate::piece_picker::strategy::suggested_only::SuggestedOnlyStrategy;
 use crate::piece_picker::strategy::PriorityStrategy;
 use crate::piece_picker::{PickerOptions, PiecePickerBlock};
 use crate::PieceIndex;
@@ -10,6 +11,7 @@ use std::fmt::Debug;
 #[derive(Debug)]
 pub enum Strategy {
     RarestFirst(RarestFirstStrategy),
+    SuggestedOnly(SuggestedOnlyStrategy),
     Priority(PriorityStrategy),
     Other(Box<dyn Extension>),
 }
@@ -19,6 +21,7 @@ impl Strategy {
     pub fn name(&self) -> &str {
         match self {
             Strategy::RarestFirst(_) => "rarest_first",
+            Strategy::SuggestedOnly(_) => "suggested_only",
             Strategy::Priority(_) => "priority",
             Strategy::Other(_) => "other",
         }
@@ -49,6 +52,13 @@ impl Strategy {
             Strategy::RarestFirst(strategy) => {
                 strategy.pick_pieces(blocks, target_queue_len, is_end_game, options)
             }
+            Strategy::SuggestedOnly(strategy) => strategy.pick_pieces(
+                blocks,
+                target_queue_len,
+                suggested_pieces,
+                is_end_game,
+                options,
+            ),
             Strategy::Priority(strategy) => {
                 strategy.pick_pieces(blocks, target_queue_len, is_end_game, options)
             }
@@ -71,6 +81,12 @@ impl Strategy {
 impl From<RarestFirstStrategy> for Strategy {
     fn from(rarest_first: RarestFirstStrategy) -> Self {
         Self::RarestFirst(rarest_first)
+    }
+}
+
+impl From<SuggestedOnlyStrategy> for Strategy {
+    fn from(suggested_only: SuggestedOnlyStrategy) -> Self {
+        Self::SuggestedOnly(suggested_only)
     }
 }
 
