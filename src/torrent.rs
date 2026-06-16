@@ -19,7 +19,6 @@ use crate::torrent_data::DataPool;
 use crate::tracker::{AnnounceEvent, AnnouncementResult, TrackerClient};
 #[cfg(feature = "lsd")]
 use crate::LocalServiceDiscovery;
-use crate::TorrentHandle;
 use crate::TorrentTracker;
 use crate::{BitVec, Result};
 use crate::{
@@ -27,6 +26,7 @@ use crate::{
     Sha1Hash, Sha256Hash, TorrentError, TorrentFlags, TorrentMetadata, TorrentMetadataInfo,
     DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
 };
+use crate::{FileStream, TorrentHandle};
 use derive_more::Display;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
@@ -38,6 +38,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -769,34 +770,14 @@ impl Torrent {
 
     /// Prioritize the given bytes within the torrent.
     /// This will match the bytes against the relevant pieces, and prioritize those pieces.
-    pub async fn prioritize_bytes(&self, bytes: &std::ops::Range<usize>, priority: PiecePriority) {
-        let _ = self
-            .inner
-            .sender
-            .send(|tx| TorrentCommand::PrioritizeBytes {
-                bytes: bytes.clone(),
-                priority,
-                response: tx,
-            })
-            .await
-            .await;
+    pub async fn prioritize_bytes(&self, bytes: &Range<usize>, priority: PiecePriority) {
+        self.inner.prioritize_bytes(bytes, priority).await;
     }
 
-    /// Get if the given byte range has completed downloading, validating and written to the storage.
-    ///
-    /// # Returns
-    ///
-    /// Returns true if the bytes have been downloaded, validated and written to storage.
-    pub async fn has_bytes(&self, range: &std::ops::Range<usize>) -> bool {
-        self.inner
-            .sender
-            .send(|tx| TorrentCommand::HasBytes {
-                bytes: range.clone(),
-                response: tx,
-            })
-            .await
-            .await
-            .unwrap_or_default()
+    /// Returns `true` if the given byte range is available in the torrent, else `false`.
+    /// This means that the bytes have been downloaded, written, and validated.
+    pub async fn has_bytes(&self, range: &Range<usize>) -> bool {
+        self.inner.has_bytes(range).await
     }
 
     /// Get the total files of the torrent.
@@ -820,9 +801,20 @@ impl Torrent {
         self.inner.files().await
     }
 
-    /// Returns the [File] for the given torrent file index, if available.
+    /// Returns the [File] for the given torrent file index, if found.
     pub async fn file(&self, file: &FileIndex) -> Option<File> {
         self.inner.file(file).await
+    }
+
+    /// Returns the [File] for the given torrent file name, if found.
+    pub async fn file_by_name(&self, name: &str) -> Option<File> {
+        self.inner.file_by_name(name).await
+    }
+
+    /// Stream the given file from the torrent.
+    /// It returns an error if the file stream couldn't be started.
+    pub async fn stream(&self, file: &File) -> Result<FileStream> {
+        self.inner.stream(&file.index).await
     }
 
     /// Set the priorities of the torrent files.
@@ -977,7 +969,7 @@ impl Torrent {
     pub async fn read_piece_bytes(
         &self,
         piece: &PieceIndex,
-        range: std::ops::Range<usize>,
+        range: Range<usize>,
     ) -> Result<Vec<u8>> {
         self.inner.read_piece_bytes(piece, range).await
     }
@@ -1289,11 +1281,47 @@ impl InnerTorrent {
             .await
     }
 
+    /// Prioritize the given bytes within the torrent.
+    pub async fn prioritize_bytes(&self, bytes: &Range<usize>, priority: PiecePriority) {
+        let _ = self
+            .sender
+            .send(|tx| TorrentCommand::PrioritizeBytes {
+                bytes: bytes.clone(),
+                priority,
+                response: tx,
+            })
+            .await
+            .await;
+    }
+
+    /// Returns `true` if the given byte range is available in the torrent, else `false`.
+    pub async fn has_bytes(&self, range: &Range<usize>) -> bool {
+        self.sender
+            .send(|tx| TorrentCommand::HasBytes {
+                bytes: range.clone(),
+                response: tx,
+            })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Read the given torrent byte range.
+    pub async fn read_bytes(&self, range: &Range<usize>) -> Result<Vec<u8>> {
+        self.sender
+            .send(|tx| TorrentCommand::ReadBytes {
+                range: range.clone(),
+                response: tx,
+            })
+            .await
+            .await
+    }
+
     /// Returns the files of the torrent, if the metadata is known (see [Torrent::is_metadata_known]).
     /// If the metadata is still being retrieved, the returned files array will be empty.
     pub async fn files(&self) -> Vec<File> {
         self.sender
-            .send(|tx| TorrentCommand::GetFiles { response: tx })
+            .send(|tx| TorrentCommand::Files { response: tx })
             .await
             .await
             .unwrap_or_default()
@@ -1302,8 +1330,21 @@ impl InnerTorrent {
     /// Returns the torrent file for the given index, if available.
     pub async fn file(&self, file: &FileIndex) -> Option<File> {
         self.sender
-            .send(|tx| TorrentCommand::GetFile {
+            .send(|tx| TorrentCommand::File {
                 file: *file,
+                response: tx,
+            })
+            .await
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Returns the torrent file for the given index, if available.
+    pub async fn file_by_name(&self, name: &str) -> Option<File> {
+        self.sender
+            .send(|tx| TorrentCommand::FileByName {
+                name: name.to_string(),
                 response: tx,
             })
             .await
@@ -1315,7 +1356,7 @@ impl InnerTorrent {
     /// Returns the [FileIndex] for the starting byte of the given piece.
     pub async fn file_index_for(&self, piece: &PieceIndex) -> Option<FileIndex> {
         self.sender
-            .send(|tx| TorrentCommand::GetFileIndexFor {
+            .send(|tx| TorrentCommand::FileIndexFor {
                 piece: *piece,
                 response: tx,
             })
@@ -1323,6 +1364,17 @@ impl InnerTorrent {
             .await
             .ok()
             .flatten()
+    }
+
+    /// Stream the given file from the torrent.
+    pub async fn stream(&self, file: &FileIndex) -> Result<FileStream> {
+        self.sender
+            .send(|tx| TorrentCommand::FileStream {
+                file: *file,
+                response: tx,
+            })
+            .await
+            .await
     }
 
     /// Returns the extensions of the torrent.
@@ -1403,7 +1455,7 @@ impl InnerTorrent {
     pub async fn read_piece_bytes(
         &self,
         piece: &PieceIndex,
-        range: std::ops::Range<usize>,
+        range: Range<usize>,
     ) -> Result<Vec<u8>> {
         self.sender
             .send(|tx| TorrentCommand::ReadPieceBytes {
@@ -1617,24 +1669,31 @@ pub enum TorrentCommand {
         pieces: Vec<PieceIndex>,
         available: bool,
     },
-    GetFiles {
+    Files {
         response: Reply<Vec<File>>,
     },
-    GetFile {
+    File {
         file: FileIndex,
         response: Reply<Option<File>>,
     },
-    /// Returns the [FileIndex] containing the first byte of the given [PieceIndex].
-    GetFileIndexFor {
+    FileByName {
+        name: String,
+        response: Reply<Option<File>>,
+    },
+    FileIndexFor {
         piece: PieceIndex,
         response: Reply<Option<FileIndex>>,
+    },
+    FileStream {
+        file: FileIndex,
+        response: Reply<Result<FileStream>>,
     },
     HasPiece {
         piece: PieceIndex,
         response: Reply<bool>,
     },
     HasBytes {
-        bytes: std::ops::Range<usize>,
+        bytes: Range<usize>,
         response: Reply<bool>,
     },
     GetPiecePriorities {
@@ -1649,7 +1708,7 @@ pub enum TorrentCommand {
         response: Reply<()>,
     },
     PrioritizeBytes {
-        bytes: std::ops::Range<usize>,
+        bytes: Range<usize>,
         priority: PiecePriority,
         response: Reply<()>,
     },
@@ -1677,12 +1736,16 @@ pub enum TorrentCommand {
     },
     ReadPieceBytes {
         piece: PieceIndex,
-        bytes: std::ops::Range<usize>,
+        bytes: Range<usize>,
         response: Reply<Result<Vec<u8>>>,
     },
     ReadFileToEnd {
         file: FileIndex,
         response: Reply<Result<(usize, Vec<u8>)>>,
+    },
+    ReadBytes {
+        range: Range<usize>,
+        response: Reply<Result<Vec<u8>>>,
     },
     HashV1Data {
         piece: PieceIndex,
@@ -1885,7 +1948,7 @@ impl TorrentContext {
         }
         self.data_pool.close().await;
         self.cancellation_token.cancel();
-        self.update_state(TorrentState::Stopped).await;
+        self.update_state(TorrentState::Stopped);
         trace!("Torrent {} main loop ended", self);
     }
 
@@ -2097,7 +2160,7 @@ impl TorrentContext {
     }
 
     /// Returns `true` if all bytes are completed, validated, and written to the storage, else `false`.
-    pub async fn has_bytes(&self, range: &std::ops::Range<usize>) -> bool {
+    pub async fn has_bytes(&self, range: &Range<usize>) -> bool {
         self.data_pool.has_bytes(range.clone()).await
     }
 
@@ -2120,17 +2183,13 @@ impl TorrentContext {
         let is_not_init_state = !self.state.is_initializing_phase();
         if is_not_init_state {
             let new_state = self.determine_state().await;
-            self.update_state(new_state).await;
+            self.update_state(new_state);
         }
     }
 
     /// Prioritize the given bytes within the torrent.
     /// This will match the bytes against the relevant pieces, and prioritize those pieces.
-    pub async fn prioritize_bytes(
-        &mut self,
-        bytes: &std::ops::Range<usize>,
-        priority: PiecePriority,
-    ) {
+    pub async fn prioritize_bytes(&mut self, bytes: &Range<usize>, priority: PiecePriority) {
         let piece_priorities = self
             .find_relevant_pieces_for_bytes(bytes)
             .await
@@ -2236,10 +2295,7 @@ impl TorrentContext {
     /// # Returns
     ///
     /// It returns all pieces with at least 1 byte overlapping with the given range.
-    pub async fn find_relevant_pieces_for_bytes(
-        &self,
-        torrent_bytes: &std::ops::Range<usize>,
-    ) -> Vec<Piece> {
+    pub async fn find_relevant_pieces_for_bytes(&self, torrent_bytes: &Range<usize>) -> Vec<Piece> {
         self.data_pool
             .pieces()
             .await
@@ -2292,6 +2348,37 @@ impl TorrentContext {
                 }
             })
             .collect()
+    }
+
+    /// Stream the given torrent file.
+    async fn stream(&self, file: &FileIndex) -> Result<FileStream> {
+        let file = match self.data_pool.file(file).await {
+            None => {
+                return Err(TorrentError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "torrent file not found",
+                )))
+            }
+            Some(file) => file,
+        };
+        let buffer_len = match self.metadata.info.as_ref() {
+            None => {
+                return Err(TorrentError::InvalidMetadata(
+                    "metadata unknown".to_string(),
+                ))
+            }
+            Some(info) => info.piece_length as usize,
+        };
+
+        Ok(FileStream::new(
+            file,
+            buffer_len,
+            buffer_len,
+            self.storage.clone(),
+            self.data_pool.clone(),
+            self.command_sender.clone(),
+            self.subscribe(),
+        ))
     }
 
     /// Get the number of non-padding files currently known in the torrent.
@@ -2535,7 +2622,7 @@ impl TorrentContext {
     /// Update the state of this torrent.
     /// If the torrent is already in the given state, this will be a no-op.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn update_state(&mut self, state: TorrentState) {
+    pub fn update_state(&mut self, state: TorrentState) {
         // check if we're already in the expected state
         // if so, ignore this update
         if self.state == state {
@@ -2727,7 +2814,7 @@ impl TorrentContext {
         let is_completed = self.is_completed().await;
         if is_completed {
             // offload the state change to the main loop
-            self.update_state(TorrentState::Finished).await;
+            self.update_state(TorrentState::Finished);
         }
     }
 
@@ -2900,14 +2987,20 @@ impl TorrentContext {
             TorrentCommand::PieceAvailabilities { pieces, available } => {
                 self.update_piece_availabilities(pieces, available).await;
             }
-            TorrentCommand::GetFiles { response } => {
+            TorrentCommand::Files { response } => {
                 response.send(self.data_pool.files().await);
             }
-            TorrentCommand::GetFile { file, response } => {
+            TorrentCommand::File { file, response } => {
                 response.send(self.data_pool.file(&file).await);
             }
-            TorrentCommand::GetFileIndexFor { piece, response } => {
+            TorrentCommand::FileByName { name, response } => {
+                response.send(self.data_pool.file_by_name(name).await);
+            }
+            TorrentCommand::FileIndexFor { piece, response } => {
                 response.send(self.data_pool.file_index_for(&piece).await)
+            }
+            TorrentCommand::FileStream { file, response } => {
+                response.send(self.stream(&file).await)
             }
             TorrentCommand::HasPiece { piece, response } => {
                 response.send(self.data_pool.is_piece_completed(&piece).await);
@@ -2975,6 +3068,9 @@ impl TorrentContext {
             } => response.send(self.read_piece_bytes(&piece, bytes).await),
             TorrentCommand::ReadFileToEnd { file, response } => {
                 response.send(self.read_file_to_end(&file).await);
+            }
+            TorrentCommand::ReadBytes { range, response } => {
+                response.send(self.read_bytes(range).await);
             }
             TorrentCommand::HashV1Data { piece, response } => {
                 response.send(self.storage().hash_v1(&piece).await.map_err(Into::into));
@@ -3110,7 +3206,7 @@ impl TorrentContext {
         let is_not_init_state = !self.state.is_initializing_phase();
         if is_not_init_state {
             let state = self.determine_state().await;
-            self.update_state(state).await;
+            self.update_state(state);
         }
     }
 
@@ -3205,20 +3301,8 @@ impl TorrentContext {
         match self.data_pool.piece(piece).await {
             None => Err(TorrentError::DataUnavailable),
             Some(piece) => {
-                let mut buffer = vec![0; piece.length];
-                let bytes_read = self.storage.read(&mut buffer, &piece.index, 0).await?;
-                if bytes_read != piece.len() {
-                    return Err(TorrentError::Io(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        format!(
-                            "wanted {} bytes, but got {} instead",
-                            piece.len(),
-                            bytes_read
-                        ),
-                    )));
-                }
-
-                Ok(buffer)
+                self.internal_read_bytes(piece.offset..piece.offset + piece.length, false)
+                    .await
             }
         }
     }
@@ -3232,14 +3316,13 @@ impl TorrentContext {
     pub(crate) async fn read_piece_bytes(
         &self,
         piece: &PieceIndex,
-        range: std::ops::Range<usize>,
+        range: Range<usize>,
     ) -> Result<Vec<u8>> {
-        // TODO: improve the retrieval of bytes
         self.read_piece(piece).await.map(|e| e[range].to_vec())
     }
 
     /// Try to read the given bytes from the torrent.
-    /// This reads all available bytes of one or more files from the torrent stored within the [StorageExtension].
+    /// This reads all available bytes of one or more files from the torrent stored within the [Storage].
     /// The returned bytes will be padded with 0 if the available data is smaller than the requested range.
     ///
     /// # Arguments
@@ -3249,56 +3332,63 @@ impl TorrentContext {
     /// # Returns
     ///
     /// It returns the bytes read from the torrent, padding the bytes with `0` if the data was not available.
-    pub async fn read_bytes_with_padding(
-        &self,
-        torrent_range: std::ops::Range<usize>,
-    ) -> Result<Vec<u8>> {
+    pub async fn read_bytes_with_padding(&self, torrent_range: Range<usize>) -> Result<Vec<u8>> {
         self.internal_read_bytes(torrent_range, true).await
     }
 
     /// Try to read the given bytes from the torrent.
-    /// This reads all bytes of one or more files from the torrent stored within the [StorageExtension].
+    /// This reads all bytes of one or more files from the torrent stored within the [Storage].
     ///
     /// # Arguments
     ///
-    /// * `torrent_range` - The byte range within the torrent to read.
+    /// * `byte_range` - The torrent byte range to be read.
     ///
     /// # Returns
     ///
     /// It returns the bytes read from the torrent, returning a [TorrentError] if data was not available.
-    pub async fn read_bytes(&self, torrent_range: std::ops::Range<usize>) -> Result<Vec<u8>> {
-        self.internal_read_bytes(torrent_range, false).await
+    pub async fn read_bytes(&self, byte_range: Range<usize>) -> Result<Vec<u8>> {
+        self.internal_read_bytes(byte_range, false).await
     }
 
     async fn internal_read_bytes(
         &self,
-        torrent_range: std::ops::Range<usize>,
+        byte_range: Range<usize>,
         with_padding: bool,
     ) -> Result<Vec<u8>> {
-        // verify that the given range is not longer than the total torrent size
-        let length = self.len().ok_or(TorrentError::InvalidMetadata(
-            "metadata is unknown".to_string(),
-        ))?;
-        if torrent_range.is_empty() || torrent_range.end > length {
-            return Err(TorrentError::InvalidRange(torrent_range));
+        // early exit if an empty bytes range is given
+        if byte_range.is_empty() {
+            return Err(TorrentError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "range cannot be empty",
+            )));
         }
 
-        let pieces = self.data_pool.pieces().await;
-        let starting_piece = pieces
-            .iter()
-            .find(|piece| {
-                torrent_range.start >= piece.offset
-                    && torrent_range.start <= piece.offset + piece.length
-            })
-            .ok_or(TorrentError::DataUnavailable)?;
-        let offset = torrent_range.start.saturating_sub(starting_piece.offset);
-        let mut buffer = vec![0u8; torrent_range.len()];
+        let metadata = match self.metadata.info.as_ref() {
+            None => return Err(TorrentError::DataUnavailable),
+            Some(info) => info,
+        };
 
+        // early exit if the given byte range is out-of-bounds
+        let total_len = metadata.len();
+        if byte_range.end > total_len {
+            return Err(TorrentError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("range {:?} is out-of-bounds", byte_range),
+            )));
+        }
+
+        let mut buffer = vec![0u8; byte_range.len()];
+        let start_piece_index = byte_range.start / metadata.piece_length as usize;
         let bytes_read = self
             .storage
-            .read(&mut buffer, &starting_piece.index, offset)
+            .read(
+                &mut buffer,
+                &start_piece_index,
+                byte_range.start % metadata.piece_length as usize,
+            )
             .await?;
-        if bytes_read < torrent_range.len() && !with_padding {
+
+        if bytes_read < byte_range.len() && !with_padding {
             return Err(TorrentError::DataUnavailable);
         }
 
@@ -3830,7 +3920,35 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_get_file() {
+        async fn test_file() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let torrent = torrent!(
+                "debian-udp.torrent",
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                Operation::default_operations(),
+                vec![],
+                |_| { MemoryStorage::new().into() },
+                None
+            );
+
+            // wait for the pieces to have been create
+            wait_for_torrent_pieces(&torrent).await;
+
+            let result = torrent.file(&0).await.unwrap();
+            assert_eq!(0, result.index, "expected the file index to match");
+            assert_eq!(
+                "debian-12.4.0-amd64-DVD-1.iso",
+                result.filename(),
+                "expected the filename to match"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_file_by_name() {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
@@ -3849,16 +3967,141 @@ mod tests {
             wait_for_torrent_pieces(&torrent).await;
 
             let result = torrent
-                .file(&0)
+                .file_by_name("debian-12.4.0-amd64-DVD-1.iso")
                 .await
-                .expect("expected a file to have been returned");
+                .unwrap();
             assert_eq!(0, result.index, "expected the file index to match");
+            assert_eq!(
+                "debian-12.4.0-amd64-DVD-1.iso",
+                result.filename(),
+                "expected the filename to match"
+            );
+        }
+    }
+
+    mod bytes {
+        use super::*;
+        use tokio::sync::oneshot;
+
+        #[tokio::test]
+        async fn test_prioritize_bytes() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let torrent = torrent!(
+                "debian-udp.torrent",
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![CreatePiecesAndFilesOperation::new().into()],
+                vec![],
+                |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+                None
+            );
+            let piece_len = torrent
+                .metadata()
+                .await
+                .ok()
+                .and_then(|e| e.info)
+                .map(|info| info.piece_length as usize)
+                .unwrap();
+
+            // wait for the pieces to be created
+            wait_for_torrent_pieces(&torrent).await;
+
+            // check the current priority of the pieces
+            let priorities = torrent.piece_priorities().await;
+            assert_eq!(priorities[&1], PiecePriority::Normal);
+            assert_eq!(priorities[&2], PiecePriority::Normal);
+
+            // set the byte priorities
+            torrent
+                .prioritize_bytes(&(piece_len..(piece_len * 2) + 1), PiecePriority::Now)
+                .await;
+
+            // check the new priority of pieces
+            let priorities = torrent.piece_priorities().await;
+            assert_eq!(priorities[&0], PiecePriority::Normal);
+            assert_eq!(priorities[&1], PiecePriority::Now);
+            assert_eq!(priorities[&2], PiecePriority::Now);
+            assert_eq!(priorities[&3], PiecePriority::Normal);
+        }
+
+        #[tokio::test]
+        async fn test_has_bytes() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let torrent = torrent!(
+                "debian-udp.torrent",
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![CreatePiecesAndFilesOperation::new().into()],
+                vec![],
+                |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+                None
+            );
+            let data_pool = torrent.inner.data_pool().await.unwrap();
+            let piece_len = torrent
+                .metadata()
+                .await
+                .ok()
+                .and_then(|e| e.info)
+                .map(|info| info.piece_length as usize)
+                .unwrap();
+
+            let (tx, rx) = oneshot::channel();
+            let mut receiver = torrent.subscribe();
+            tokio::spawn(async move {
+                while let Ok(event) = receiver.recv().await {
+                    if let TorrentEvent::PieceCompleted(piece) = &*event {
+                        if *piece == 2 {
+                            tx.send(()).unwrap();
+                            break;
+                        }
+                    }
+                }
+            });
+
+            // wait for the pieces to be created
+            wait_for_torrent_pieces(&torrent).await;
+
+            // check if the bytes are available
+            let bytes = piece_len..piece_len * 2;
+            let result = torrent.has_bytes(&bytes).await;
+            assert_eq!(
+                false, result,
+                "expected the bytes to not have been completed"
+            );
+
+            // set the pieces as completed
+            let pieces = data_pool.pieces().await;
+            torrent
+                .inner
+                .piece_verified(&1, pieces[1].hash.hash_v1(), None)
+                .await;
+            torrent
+                .inner
+                .piece_verified(&2, pieces[2].hash.hash_v1(), None)
+                .await;
+
+            // wait for the pieces to be completed internally
+            timeout!(
+                Duration::from_millis(500),
+                rx,
+                "expected a TorrentEvent::PieceCompleted"
+            );
+
+            // check if the bytes are available
+            let result = torrent.has_bytes(&bytes).await;
+            assert_eq!(true, result, "expected the bytes to have been completed");
         }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_torrent_resume_internal() {
-        init_logger!(LevelFilter::Trace);
+        init_logger!(LevelFilter::Debug);
         let temp_dir_source = tempdir().unwrap();
         let temp_path_source = temp_dir_source.path().to_str().unwrap();
         let temp_dir_target = tempdir().unwrap();
@@ -4051,7 +4294,7 @@ mod tests {
         let mut receiver = context.subscribe();
 
         // reset the state to Initializing
-        context.update_state(TorrentState::Initializing).await;
+        context.update_state(TorrentState::Initializing);
         let result = context.is_download_allowed();
         assert_eq!(false, result, "expected downloading to not be allowed");
 
@@ -4065,7 +4308,7 @@ mod tests {
         assert_eq!(false, result, "expected downloading to not be allowed");
 
         let result = async {
-            context.update_state(TorrentState::Finished).await;
+            context.update_state(TorrentState::Finished);
             context.is_download_allowed()
         }
         .await;
@@ -4212,7 +4455,7 @@ mod tests {
 
         context.remove_options(TorrentFlags::UploadMode);
         context.add_options(TorrentFlags::DownloadMode);
-        context.update_state(TorrentState::Paused).await;
+        context.update_state(TorrentState::Paused);
         let result = context.determine_state().await;
         assert_eq!(TorrentState::Downloading, result);
     }
@@ -4306,7 +4549,7 @@ mod tests {
             }
         });
 
-        context.update_state(expected_state).await;
+        context.update_state(expected_state);
 
         let result = timeout!(
             Duration::from_millis(200),
