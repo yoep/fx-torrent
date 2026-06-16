@@ -3920,7 +3920,35 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_get_file() {
+        async fn test_file() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let torrent = torrent!(
+                "debian-udp.torrent",
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                Operation::default_operations(),
+                vec![],
+                |_| { MemoryStorage::new().into() },
+                None
+            );
+
+            // wait for the pieces to have been create
+            wait_for_torrent_pieces(&torrent).await;
+
+            let result = torrent.file(&0).await.unwrap();
+            assert_eq!(0, result.index, "expected the file index to match");
+            assert_eq!(
+                "debian-12.4.0-amd64-DVD-1.iso",
+                result.filename(),
+                "expected the filename to match"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_file_by_name() {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
@@ -3939,16 +3967,141 @@ mod tests {
             wait_for_torrent_pieces(&torrent).await;
 
             let result = torrent
-                .file(&0)
+                .file_by_name("debian-12.4.0-amd64-DVD-1.iso")
                 .await
-                .expect("expected a file to have been returned");
+                .unwrap();
             assert_eq!(0, result.index, "expected the file index to match");
+            assert_eq!(
+                "debian-12.4.0-amd64-DVD-1.iso",
+                result.filename(),
+                "expected the filename to match"
+            );
+        }
+    }
+
+    mod bytes {
+        use super::*;
+        use tokio::sync::oneshot;
+
+        #[tokio::test]
+        async fn test_prioritize_bytes() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let torrent = torrent!(
+                "debian-udp.torrent",
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![CreatePiecesAndFilesOperation::new().into()],
+                vec![],
+                |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+                None
+            );
+            let piece_len = torrent
+                .metadata()
+                .await
+                .ok()
+                .and_then(|e| e.info)
+                .map(|info| info.piece_length as usize)
+                .unwrap();
+
+            // wait for the pieces to be created
+            wait_for_torrent_pieces(&torrent).await;
+
+            // check the current priority of the pieces
+            let priorities = torrent.piece_priorities().await;
+            assert_eq!(priorities[&1], PiecePriority::Normal);
+            assert_eq!(priorities[&2], PiecePriority::Normal);
+
+            // set the byte priorities
+            torrent
+                .prioritize_bytes(&(piece_len..(piece_len * 2) + 1), PiecePriority::Now)
+                .await;
+
+            // check the new priority of pieces
+            let priorities = torrent.piece_priorities().await;
+            assert_eq!(priorities[&0], PiecePriority::Normal);
+            assert_eq!(priorities[&1], PiecePriority::Now);
+            assert_eq!(priorities[&2], PiecePriority::Now);
+            assert_eq!(priorities[&3], PiecePriority::Normal);
+        }
+
+        #[tokio::test]
+        async fn test_has_bytes() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let torrent = torrent!(
+                "debian-udp.torrent",
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![CreatePiecesAndFilesOperation::new().into()],
+                vec![],
+                |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+                None
+            );
+            let data_pool = torrent.inner.data_pool().await.unwrap();
+            let piece_len = torrent
+                .metadata()
+                .await
+                .ok()
+                .and_then(|e| e.info)
+                .map(|info| info.piece_length as usize)
+                .unwrap();
+
+            let (tx, rx) = oneshot::channel();
+            let mut receiver = torrent.subscribe();
+            tokio::spawn(async move {
+                while let Ok(event) = receiver.recv().await {
+                    if let TorrentEvent::PieceCompleted(piece) = &*event {
+                        if *piece == 2 {
+                            tx.send(()).unwrap();
+                            break;
+                        }
+                    }
+                }
+            });
+
+            // wait for the pieces to be created
+            wait_for_torrent_pieces(&torrent).await;
+
+            // check if the bytes are available
+            let bytes = piece_len..piece_len * 2;
+            let result = torrent.has_bytes(&bytes).await;
+            assert_eq!(
+                false, result,
+                "expected the bytes to not have been completed"
+            );
+
+            // set the pieces as completed
+            let pieces = data_pool.pieces().await;
+            torrent
+                .inner
+                .piece_verified(&1, pieces[1].hash.hash_v1(), None)
+                .await;
+            torrent
+                .inner
+                .piece_verified(&2, pieces[2].hash.hash_v1(), None)
+                .await;
+
+            // wait for the pieces to be completed internally
+            timeout!(
+                Duration::from_millis(500),
+                rx,
+                "expected a TorrentEvent::PieceCompleted"
+            );
+
+            // check if the bytes are available
+            let result = torrent.has_bytes(&bytes).await;
+            assert_eq!(true, result, "expected the bytes to have been completed");
         }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_torrent_resume_internal() {
-        init_logger!(LevelFilter::Trace);
+        init_logger!(LevelFilter::Debug);
         let temp_dir_source = tempdir().unwrap();
         let temp_path_source = temp_dir_source.path().to_str().unwrap();
         let temp_dir_target = tempdir().unwrap();
