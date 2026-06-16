@@ -351,9 +351,6 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let url = Url::parse("https://mirror.com/pub/").unwrap();
-        let expected_result =
-            Url::parse("https://mirror.com/pub/debian-11.6.0-amd64-netinst.iso/README%25201.md")
-                .unwrap();
         let torrent = torrent!(
             "debian.torrent",
             temp_path,
@@ -375,9 +372,6 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let url = Url::parse("https://mirror.com/pub/").unwrap();
-        let expected_result =
-            Url::parse("https://mirror.com/pub/debian-11.6.0-amd64-netinst.iso/README%25201.md")
-                .unwrap();
         let torrent = torrent!(
             "debian.torrent",
             temp_path,

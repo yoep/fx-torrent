@@ -50,7 +50,7 @@ impl FileValidationOperation {
 
         let files = torrent.files().await;
         if files.len() > 0 {
-            torrent.update_state(TorrentState::CheckingFiles).await;
+            torrent.update_state(TorrentState::CheckingFiles);
             self.validate_files(torrent, files).await;
             return TorrentOperationResult::Stop;
         }
@@ -65,7 +65,7 @@ impl FileValidationOperation {
             self.ready_signal = None;
 
             let new_state = context.determine_state().await;
-            context.update_state(new_state).await;
+            context.update_state(new_state);
             // start announcing the torrent again
             if let Some(tracker) = context.tracker() {
                 tracker

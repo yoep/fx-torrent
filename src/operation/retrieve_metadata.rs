@@ -39,7 +39,7 @@ impl MetadataOperation {
         }
 
         if self.should_retrieve_metadata(torrent) {
-            torrent.update_state(TorrentState::RetrievingMetadata).await;
+            torrent.update_state(TorrentState::RetrievingMetadata);
             self.retrieve_metadata(torrent).await;
         }
 

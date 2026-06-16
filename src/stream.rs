@@ -6,6 +6,7 @@ use futures::future::BoxFuture;
 use futures::task::AtomicWaker;
 use futures::{ready, FutureExt, Stream};
 use fx_callback::Subscription;
+use log::trace;
 use std::cmp::min;
 use std::fmt::Debug;
 use std::io;
@@ -111,12 +112,11 @@ impl FileStream {
         self.file.torrent_offset + self.cursor..self.file.torrent_offset + buffer_end_byte
     }
 
-    fn wait_for(&mut self, bytes: &Buffer, cx: &mut Context) -> Poll<Option<Result<Vec<u8>>>> {
-        self.waker.register(cx.waker());
-
-        // prioritize the given buffer range within the torrent
+    fn prioritize_buffer(&self, bytes: Buffer) {
         let command_sender = self.command_sender.clone();
-        let bytes = bytes.clone();
+        let waker = self.waker.clone();
+
+        // execute the prioritization on a separate task
         tokio::spawn(async move {
             command_sender
                 .fire_and_forget(TorrentCommand::PrioritizeBytes {
@@ -125,9 +125,9 @@ impl FileStream {
                     response: Reply::empty(),
                 })
                 .await;
-        });
 
-        Poll::Pending
+            waker.wake();
+        });
     }
 
     async fn run_event_loop(
@@ -142,8 +142,11 @@ impl FileStream {
                     match event {
                         Err(_) => break,
                         Ok(event) => {
-                            if let TorrentEvent::PieceCompleted(_) = &*event {
-                                waker.wake()
+                            match &*event {
+                                TorrentEvent::PieceCompleted(_) | TorrentEvent::StateChanged(_) => {
+                                    waker.wake()
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -162,22 +165,41 @@ impl Stream for FileStream {
             return Poll::Ready(None);
         }
 
+        self.waker.register(cx.waker());
         loop {
             match &mut self.state {
                 StreamState::Idle => {
                     let buffer = self.next_buffer();
                     let data_pool = self.data_pool.clone();
 
-                    let future = async move { data_pool.has_bytes(buffer).await }.boxed();
-                    self.state = StreamState::Checking(future);
+                    let future = {
+                        let buffer = buffer.clone();
+                        async move { data_pool.has_bytes(buffer).await }
+                    }
+                    .boxed();
+                    trace!("Streaming buffer {:?}", buffer);
+                    self.state = StreamState::Checking {
+                        buffer,
+                        future,
+                        is_prioritized: false,
+                    };
                 }
-                StreamState::Checking(future) => {
+                StreamState::Checking {
+                    buffer,
+                    future,
+                    is_prioritized,
+                } => {
+                    let buffer = buffer.clone();
                     let is_available = ready!(future.as_mut().poll(cx));
-                    let buffer = self.next_buffer();
 
                     if !is_available {
-                        self.state = StreamState::Idle;
-                        return self.as_mut().wait_for(&buffer, cx);
+                        if !*is_prioritized {
+                            let buffer = buffer.clone();
+                            self.prioritize_buffer(buffer);
+                        }
+
+                        self.state = StreamState::Waiting { buffer };
+                        return Poll::Pending;
                     }
 
                     let storage = self.storage.clone();
@@ -208,9 +230,23 @@ impl Stream for FileStream {
                         }
                     }
                     .boxed();
-                    self.state = StreamState::Reading(future);
+                    self.state = StreamState::Reading { future };
                 }
-                StreamState::Reading(future) => {
+                StreamState::Waiting { buffer } => {
+                    let buffer = buffer.clone();
+                    let data_pool = self.data_pool.clone();
+
+                    let future = {
+                        let buffer = buffer.clone();
+                        async move { data_pool.has_bytes(buffer).await }.boxed()
+                    };
+                    self.state = StreamState::Checking {
+                        buffer,
+                        future,
+                        is_prioritized: true,
+                    };
+                }
+                StreamState::Reading { future } => {
                     let result = ready!(future.as_mut().poll(cx));
                     if let Ok(bytes) = &result {
                         self.cursor += bytes.len();
@@ -232,28 +268,43 @@ impl Drop for FileStream {
 
 enum StreamState {
     Idle,
-    Checking(BoxFuture<'static, bool>),
-    Reading(BoxFuture<'static, Result<Vec<u8>>>),
+    Checking {
+        buffer: Buffer,
+        future: BoxFuture<'static, bool>,
+        is_prioritized: bool,
+    },
+    Waiting {
+        buffer: Buffer,
+    },
+    Reading {
+        future: BoxFuture<'static, Result<Vec<u8>>>,
+    },
 }
 
 impl Debug for StreamState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StreamState::Idle => f.write_str("StreamState::Idle"),
-            StreamState::Checking(_) => f.write_str("StreamState::Checking"),
-            StreamState::Reading(_) => f.write_str("StreamState::Reading"),
+            StreamState::Checking { .. } => f.write_str("StreamState::Checking"),
+            StreamState::Waiting { .. } => f.write_str("StreamState::Waiting"),
+            StreamState::Reading { .. } => f.write_str("StreamState::Reading"),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::operation::{CreatePiecesAndFilesOperation, FileValidationOperation};
+    use crate::channel::ChannelSender;
+    use crate::operation::CreatePiecesAndFilesOperation;
     use crate::storage::DiskStorage;
     use crate::tests::copy_test_file;
     use crate::tests::helpers::wait_for_torrent_pieces;
+    use crate::torrent_data::DataPool;
+    use crate::{PieceIndex, TorrentCommand};
     use futures::StreamExt;
+    use std::time::Duration;
     use tempfile::tempdir;
+    use tokio::time::timeout;
 
     #[tokio::test]
     async fn test_stream_next() {
@@ -270,39 +321,53 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
-            vec![
-                CreatePiecesAndFilesOperation::new().into(),
-                FileValidationOperation::new().into(),
-            ],
+            vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![],
             |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
             None
         );
 
-        // wait for the file to be validated
+        // wait for the pieces to be created
         wait_for_torrent_pieces(&torrent).await;
 
         // create the stream
         let file = torrent.file(&0).await.unwrap();
         let mut stream = torrent.stream(&file).await.unwrap();
 
-        // try to stream the first 30 pieces (which should be available after validation)
-        for piece in 0..30 {
-            let result = timeout!(
-                Duration::from_millis(500),
-                stream.next(),
-                format!("time-out streaming piece {}", piece).as_str()
-            );
-            match result {
-                Some(Ok(_)) => {
-                    assert_eq!(
-                        piece * stream.stream_buffer_len,
-                        stream.cursor,
-                        "expected the stream cursor to be updated"
-                    );
-                }
-                _ => assert!(false, "expected Some(Ok()), but got {:?}", result),
+        // set piece 0 as completed
+        piece_completed(&stream.command_sender, &stream.data_pool, 0).await;
+
+        // get the next buffer, which should complete instantly
+        let result =
+            timeout!(Duration::from_millis(500), stream.next()).expect("expected buffer data");
+        match result {
+            Ok(_) => {
+                assert_eq!(
+                    stream.stream_buffer_len, stream.cursor,
+                    "expected the stream cursor to be updated"
+                );
             }
+            _ => assert!(false, "expected Ok(), but got {:?}", result),
+        }
+
+        // try to get the next buffer, which should be blocked
+        let command_sender = stream.command_sender.clone();
+        let data_pool = stream.data_pool.clone();
+        let mut future = stream.next();
+        let result = timeout(Duration::from_millis(250), &mut future).await;
+        match result {
+            Err(_) => {}
+            _ => assert!(false, "expected Err(Elapsed), but got {:?}", result),
+        }
+
+        // complete the piece
+        piece_completed(&command_sender, &data_pool, 1).await;
+
+        // try to complete the previous future instantly
+        let result = timeout!(Duration::from_millis(500), future).unwrap();
+        match result {
+            Ok(_) => {}
+            _ => assert!(false, "expected Ok(), but got {:?}", result),
         }
     }
 
@@ -321,24 +386,24 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
-            vec![
-                CreatePiecesAndFilesOperation::new().into(),
-                FileValidationOperation::new().into(),
-            ],
+            vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![],
             |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
             None
         );
 
-        // wait for the file to be validated
+        // wait for the pieces to be created
         wait_for_torrent_pieces(&torrent).await;
 
         // create the stream
         let file = torrent.file(&0).await.unwrap();
         let mut stream = torrent.stream(&file).await.unwrap();
 
+        // set the next piece as completed
+        piece_completed(&stream.command_sender, &stream.data_pool, 0).await;
+
         // read the next stream buffer
-        let result = timeout!(Duration::from_secs(1), stream.next());
+        let result = timeout!(Duration::from_millis(750), stream.next());
         match result {
             Some(Ok(_)) => {
                 assert_eq!(
@@ -369,24 +434,24 @@ mod tests {
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
-            vec![
-                CreatePiecesAndFilesOperation::new().into(),
-                FileValidationOperation::new().into(),
-            ],
+            vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![],
             |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
             None
         );
 
-        // wait for the file to be validated
+        // wait for the pieces to be created
         wait_for_torrent_pieces(&torrent).await;
 
         // create the stream
         let file = torrent.file(&0).await.unwrap();
         let mut stream = torrent.stream(&file).await.unwrap();
 
+        // set the next piece as completed
+        piece_completed(&stream.command_sender, &stream.data_pool, 0).await;
+
         // read the next stream buffer
-        let result = timeout!(Duration::from_secs(1), stream.next());
+        let result = timeout!(Duration::from_millis(750), stream.next());
         match result {
             Some(Ok(_)) => {
                 assert_eq!(
@@ -404,5 +469,20 @@ mod tests {
             stream.cursor,
             "expected the cursor to have been reset"
         );
+    }
+
+    async fn piece_completed(
+        command_sender: &ChannelSender<TorrentCommand>,
+        data_pool: &DataPool,
+        index: PieceIndex,
+    ) {
+        let piece = data_pool.piece(&index).await.unwrap();
+        command_sender
+            .fire_and_forget(TorrentCommand::PieceVerified {
+                piece: piece.index,
+                v1_hash: Some(piece.hash.hash_v1().unwrap()),
+                v2_hash: None,
+            })
+            .await;
     }
 }

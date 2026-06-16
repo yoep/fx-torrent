@@ -1948,7 +1948,7 @@ impl TorrentContext {
         }
         self.data_pool.close().await;
         self.cancellation_token.cancel();
-        self.update_state(TorrentState::Stopped).await;
+        self.update_state(TorrentState::Stopped);
         trace!("Torrent {} main loop ended", self);
     }
 
@@ -2183,7 +2183,7 @@ impl TorrentContext {
         let is_not_init_state = !self.state.is_initializing_phase();
         if is_not_init_state {
             let new_state = self.determine_state().await;
-            self.update_state(new_state).await;
+            self.update_state(new_state);
         }
     }
 
@@ -2622,7 +2622,7 @@ impl TorrentContext {
     /// Update the state of this torrent.
     /// If the torrent is already in the given state, this will be a no-op.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn update_state(&mut self, state: TorrentState) {
+    pub fn update_state(&mut self, state: TorrentState) {
         // check if we're already in the expected state
         // if so, ignore this update
         if self.state == state {
@@ -2814,7 +2814,7 @@ impl TorrentContext {
         let is_completed = self.is_completed().await;
         if is_completed {
             // offload the state change to the main loop
-            self.update_state(TorrentState::Finished).await;
+            self.update_state(TorrentState::Finished);
         }
     }
 
@@ -3206,7 +3206,7 @@ impl TorrentContext {
         let is_not_init_state = !self.state.is_initializing_phase();
         if is_not_init_state {
             let state = self.determine_state().await;
-            self.update_state(state).await;
+            self.update_state(state);
         }
     }
 
@@ -4141,7 +4141,7 @@ mod tests {
         let mut receiver = context.subscribe();
 
         // reset the state to Initializing
-        context.update_state(TorrentState::Initializing).await;
+        context.update_state(TorrentState::Initializing);
         let result = context.is_download_allowed();
         assert_eq!(false, result, "expected downloading to not be allowed");
 
@@ -4155,7 +4155,7 @@ mod tests {
         assert_eq!(false, result, "expected downloading to not be allowed");
 
         let result = async {
-            context.update_state(TorrentState::Finished).await;
+            context.update_state(TorrentState::Finished);
             context.is_download_allowed()
         }
         .await;
@@ -4302,7 +4302,7 @@ mod tests {
 
         context.remove_options(TorrentFlags::UploadMode);
         context.add_options(TorrentFlags::DownloadMode);
-        context.update_state(TorrentState::Paused).await;
+        context.update_state(TorrentState::Paused);
         let result = context.determine_state().await;
         assert_eq!(TorrentState::Downloading, result);
     }
@@ -4396,7 +4396,7 @@ mod tests {
             }
         });
 
-        context.update_state(expected_state).await;
+        context.update_state(expected_state);
 
         let result = timeout!(
             Duration::from_millis(200),
