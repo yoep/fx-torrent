@@ -1,5 +1,5 @@
 use crate::peer::webseed::HttpPeer;
-use crate::peer::{BitTorrentPeer, Metrics, PeerClientInfo, PeerEvent, PeerState, Result};
+use crate::peer::{BitTorrentPeer, CloseReason, Metrics, PeerClientInfo, PeerState, Result};
 use crate::{BitVec, PieceBlock, PieceIndex};
 use async_trait::async_trait;
 use crc::{Crc, CRC_32_ISCSI};
@@ -16,6 +16,22 @@ const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 /// The peer's unique identifier handle.
 pub type PeerHandle = Handle;
 
+#[derive(Debug, Clone)]
+pub enum PeerEvent {
+    /// Invoked when the choke state of the client peer has changed.
+    ClientChokeStateChanged(ChokeState),
+    /// Invoked when the choke state of the remote peer has changed.
+    RemoteChokeStateChanged(ChokeState),
+    /// Invoked when the state of this peer has changed.
+    StateChanged(PeerState),
+    /// Invoked when the seed state of the remote peer has changed.
+    SeedStateChanged(bool),
+    /// Invoked when the peer metrics have been updated.
+    Stats(Metrics),
+    /// Invoked when the peer connection is closed.
+    Closed(CloseReason),
+}
+
 /// The choke state of a peer, indicating if data can be sent or not.
 /// See BEP3.
 #[repr(u8)]
@@ -25,6 +41,58 @@ pub enum ChokeState {
     Choked = 0,
     #[display("un-choked")]
     UnChoked = 1,
+}
+
+impl PartialOrd for ChokeState {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self == other {
+            Some(Ordering::Equal)
+        } else if self == &ChokeState::Choked && other == &ChokeState::UnChoked {
+            Some(Ordering::Less)
+        } else {
+            Some(Ordering::Greater)
+        }
+    }
+}
+
+impl Ord for ChokeState {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
+
+/// The interest states of a peer.
+#[repr(u8)]
+#[derive(Debug, Display, Clone, Copy, PartialEq, Eq)]
+pub enum InterestState {
+    #[display("not interested")]
+    NotInterested = 0,
+    #[display("interested")]
+    Interested = 1,
+}
+
+impl PartialOrd<Self> for InterestState {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self == other {
+            Some(Ordering::Equal)
+        } else if self == &InterestState::NotInterested && other == &InterestState::Interested {
+            Some(Ordering::Less)
+        } else {
+            Some(Ordering::Greater)
+        }
+    }
+}
+
+impl Ord for InterestState {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if self == other {
+            Ordering::Equal
+        } else if self == &InterestState::NotInterested && other == &InterestState::Interested {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }
+    }
 }
 
 /// The peer connection to a remote peer for exchanging piece data of a specific torrent.
@@ -94,12 +162,41 @@ impl Peer {
         }
     }
 
+    /// Set the choke state of the client peer.
+    pub async fn set_choke_state(&self, state: ChokeState) {
+        match self {
+            Peer::BitTorrent(peer) => peer.set_choke_state(state).await,
+            Peer::Http(_) => {}
+            Peer::Other(peer) => peer.set_choke_state(state).await,
+        }
+    }
+
+    /// Returns the choke state of the client peer,
+    /// indicating if data can be sent to the remote peer or not.
+    pub async fn choke_state(&self) -> ChokeState {
+        match self {
+            Peer::BitTorrent(peer) => peer.choke_state().await,
+            Peer::Http(_) => ChokeState::Choked,
+            Peer::Other(peer) => peer.choke_state().await,
+        }
+    }
+
     /// Returns the choke state of the remote peer, indicating if data can be sent or not.
     pub async fn remote_choke_state(&self) -> ChokeState {
         match self {
             Peer::BitTorrent(peer) => peer.remote_choke_state().await,
             Peer::Http(_) => ChokeState::UnChoked,
             Peer::Other(peer) => peer.remote_choke_state().await,
+        }
+    }
+
+    /// Returns the interest state of the remote peer.
+    /// Indicating if the remote peer will start requesting piece data when unchoked.
+    pub async fn remote_interest_state(&self) -> InterestState {
+        match self {
+            Peer::BitTorrent(peer) => peer.remote_interest_state().await,
+            Peer::Http(_) => InterestState::NotInterested,
+            Peer::Other(peer) => peer.remote_interest_state().await,
         }
     }
 
@@ -249,10 +346,21 @@ pub trait Extension: Debug + Display + Send + Sync + Callback<PeerEvent> {
     /// even when [Extension::remote_choke_state] returns [ChokeState::Choked].
     async fn remote_fast_bitfield(&self) -> BitVec;
 
+    /// Set the choke state of the client peer.
+    async fn set_choke_state(&self, state: ChokeState);
+
+    /// Returns the choke state of the client peer,
+    /// indicating if data can be sent to the remote peer or not.
+    async fn choke_state(&self) -> ChokeState;
+
     /// Returns the choke state of the remote peer, indicating if data can be sent or not.
     ///
     /// Every peer should always start in the [ChokeState::Choked] state.
     async fn remote_choke_state(&self) -> ChokeState;
+
+    /// Returns the interest state of the remote peer.
+    /// Indicating if the remote peer will start requesting piece data when unchoked.
+    async fn remote_interest_state(&self) -> InterestState;
 
     /// Returns the suggested pieces by the remote peer for downloading.
     async fn suggested_pieces(&self) -> Vec<PieceIndex>;

@@ -37,7 +37,7 @@ impl TorrentInfoWidget {
                 info_hash: Some(metadata.info_hash.clone()),
                 path: torrent.path().await,
                 state: None,
-                total_pieces: 0,
+                total_pieces: torrent.total_pieces().await as u64,
                 completed_pieces: 0,
                 wanted_size: metadata
                     .info
@@ -45,7 +45,7 @@ impl TorrentInfoWidget {
                     .map(|e| e.len() as u64)
                     .unwrap_or_default(),
                 wanted_completed_size: 0,
-                total_files: 0,
+                total_files: files.len(),
                 peers: 0,
                 wasted: 0,
                 down: vec![],

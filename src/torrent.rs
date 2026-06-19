@@ -6,8 +6,8 @@ use crate::file::File;
 use crate::operation::{Operation, TorrentOperationResult};
 use crate::peer::extension::PeerExtension;
 use crate::peer::{
-    BitTorrentPeer, CloseReason, ConnectionProtocol, Peer, PeerClientInfo, PeerDiscovery,
-    PeerEntry, PeerHandle, PeerId, ProtocolExtensionFlags,
+    BitTorrentPeer, ChokeState, CloseReason, ConnectionProtocol, InterestState, Peer,
+    PeerClientInfo, PeerDiscovery, PeerEntry, PeerHandle, PeerId, ProtocolExtensionFlags,
 };
 use crate::peer_pool::PeerPool;
 use crate::piece_picker::strategy::{
@@ -43,7 +43,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot::Sender;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Notify;
 use tokio::time::timeout;
 use tokio::{select, time};
 use tokio_util::sync::{
@@ -1192,14 +1192,9 @@ impl InnerTorrent {
 
     /// Update the metadata of the torrent.
     pub async fn set_metadata(&self, metadata: TorrentMetadataInfo) {
-        let _ = self
-            .sender
-            .send(|tx| TorrentCommand::UpdateMetadata {
-                metadata,
-                response: tx,
-            })
+        self.sender
+            .fire_and_forget(TorrentCommand::SetMetadata { metadata })
             .await
-            .await;
     }
 
     /// Returns the completed pieces bitfield of the torrent.
@@ -1489,24 +1484,6 @@ impl InnerTorrent {
             .await
     }
 
-    /// Returns `true` if download data for the torrent is allowed, else `false`.
-    pub async fn is_download_allowed(&self) -> bool {
-        self.sender
-            .send(|tx| TorrentCommand::IsDownloadAllowed { response: tx })
-            .await
-            .await
-            .unwrap_or_default()
-    }
-
-    /// Returns `true` if uploading data for the torrent is allowed, else `false`.
-    pub async fn is_upload_allowed(&self) -> bool {
-        self.sender
-            .send(|tx| TorrentCommand::IsUploadAllowed { response: tx })
-            .await
-            .await
-            .unwrap_or_default()
-    }
-
     /// Returns `true` if the torrent is a partial seed, else `false`.
     ///
     /// Partial seed is when the torrent has some files completed but not all wanted.
@@ -1604,9 +1581,8 @@ pub enum TorrentCommand {
     Metadata {
         response: Reply<TorrentMetadata>,
     },
-    UpdateMetadata {
+    SetMetadata {
         metadata: TorrentMetadataInfo,
-        response: Reply<()>,
     },
     IsMetadataKnown {
         response: Reply<bool>,
@@ -1765,9 +1741,6 @@ pub enum TorrentCommand {
     Bitfield {
         response: Reply<BitVec>,
     },
-    RequestUploadPermit {
-        response: Reply<Option<OwnedSemaphorePermit>>,
-    },
     PickPieces {
         peer: PeerHandle,
     },
@@ -1784,12 +1757,6 @@ pub enum TorrentCommand {
     PieceBlockRejected {
         peer: PeerHandle,
         block: PieceBlock,
-    },
-    IsDownloadAllowed {
-        response: Reply<bool>,
-    },
-    IsUploadAllowed {
-        response: Reply<bool>,
     },
     IsPartialSeed {
         response: Reply<bool>,
@@ -1828,9 +1795,6 @@ pub struct TorrentContext {
     storage: Storage,
     /// The piece picker of the torrent.
     piece_picker: PiecePicker,
-
-    /// The permit counter for uploading pieces to remote peers
-    request_upload_permits: Arc<Semaphore>,
 
     /// The immutable enabled protocol extensions for this torrent
     protocol_extensions: ProtocolExtensionFlags,
@@ -1880,7 +1844,6 @@ impl TorrentContext {
             data_pool,
             storage,
             piece_picker,
-            request_upload_permits: Arc::new(Semaphore::new(config.peers_upload_slots)),
             protocol_extensions,
             extensions,
             state: Default::default(),
@@ -2925,9 +2888,7 @@ impl TorrentContext {
             TorrentCommand::Metadata { response } => {
                 response.send(self.metadata.clone());
             }
-            TorrentCommand::UpdateMetadata { metadata, response } => {
-                response.send(self.set_metadata(metadata))
-            }
+            TorrentCommand::SetMetadata { metadata } => self.set_metadata(metadata),
             TorrentCommand::IsMetadataKnown { response } => {
                 response.send(self.is_metadata_known());
             }
@@ -3085,20 +3046,11 @@ impl TorrentContext {
                 response.send(self.extensions(protocol))
             }
             TorrentCommand::Bitfield { response } => response.send(self.data_pool.bitfield().await),
-            TorrentCommand::RequestUploadPermit { response } => {
-                response.send(self.request_upload_permit().await);
-            }
             TorrentCommand::PieceBlockReceived { peer, block, data } => {
                 self.on_piece_block_received(peer, block, data).await
             }
             TorrentCommand::PieceBlockRejected { peer, block } => {
                 self.on_piece_block_rejected(peer, block).await
-            }
-            TorrentCommand::IsDownloadAllowed { response } => {
-                response.send(self.is_download_allowed());
-            }
-            TorrentCommand::IsUploadAllowed { response } => {
-                response.send(self.is_upload_allowed());
             }
             TorrentCommand::IsPartialSeed { response } => {
                 response.send(self.is_partial_seed().await);
@@ -3251,16 +3203,6 @@ impl TorrentContext {
         self.data_pool.num_completed_pieces().await
     }
 
-    /// Get a request permit to upload piece data to a remote peer.
-    /// A permit is peer based and should only be requested when trying to unchoke the client peer.
-    pub async fn request_upload_permit(&self) -> Option<OwnedSemaphorePermit> {
-        if !self.is_upload_allowed() {
-            return None;
-        }
-
-        self.request_upload_permits.clone().try_acquire_owned().ok()
-    }
-
     /// Try to read the bytes from the given torrent file.
     /// This reads all available bytes of the file stored within the [StorageExtension].
     ///
@@ -3410,6 +3352,7 @@ impl TorrentContext {
             .await;
         self.piece_picker_tick().await;
         self.peer_pool.tick().await;
+        self.on_upload_tick().await;
     }
 
     /// Execute the torrent operations chain.
@@ -3446,6 +3389,39 @@ impl TorrentContext {
         }
 
         self.piece_picker.tick(self.peer_pool.peers()).await;
+    }
+
+    /// Execute an upload tick, managing the upload slots of the torrent.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    async fn on_upload_tick(&mut self) {
+        // early exit if uploading is currently not allowed
+        if !self.is_upload_allowed() {
+            return;
+        }
+        let remaining_upload_slots = self
+            .config
+            .peers_upload_slots
+            .saturating_sub(self.peer_pool.upload_slots_len());
+
+        let peer_addrs = futures::future::join_all(self.peer_pool.peers().map(|peer| async {
+            if peer.remote_interest_state().await == InterestState::NotInterested {
+                return None;
+            }
+            if peer.choke_state().await == ChokeState::UnChoked {
+                return None;
+            }
+
+            Some(peer.addr().clone())
+        }))
+        .await;
+
+        for addr in peer_addrs
+            .into_iter()
+            .filter_map(|e| e)
+            .take(remaining_upload_slots)
+        {
+            self.peer_pool.unchoke_peer(&addr).await;
+        }
     }
 }
 
@@ -3565,7 +3541,7 @@ mod tests {
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
             let tracker_server = TrackerServer::new().await.unwrap();
-            let tracker_manager = TrackerClient::new(Duration::from_secs(2));
+            let tracker_manager = TrackerClient::new(Duration::from_secs(3));
             let torrent = torrent!(
                 "debian-udp.torrent",
                 temp_path,
@@ -4087,7 +4063,7 @@ mod tests {
                 .await;
 
             // wait for the pieces to be completed internally
-            timeout!(
+            let _ = timeout!(
                 Duration::from_millis(500),
                 rx,
                 "expected a TorrentEvent::PieceCompleted"

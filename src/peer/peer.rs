@@ -6,12 +6,14 @@ use crate::peer::peer_connection::PeerConnection;
 use crate::peer::protocol::{CloseReason, UtpStream};
 use crate::peer::protocol::{ExtendedHandshake, Handshake, HashRequest, Message, Piece, Request};
 use crate::peer::{
-    extension, ChokeState, Error, Metrics, PeerHandle, PeerId, PeerPriority, Result,
+    extension, ChokeState, Error, InterestState, Metrics, PeerEvent, PeerHandle, PeerId,
+    PeerPriority, Result,
 };
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
 use crate::{
-    BitVec, CompactIp, PieceBlock, PieceIndex, TorrentEvent, TorrentMetadata, TorrentMetadataInfo,
+    BitVec, CompactIp, PieceBlock, PieceIndex, TorrentError, TorrentEvent, TorrentMetadata,
+    TorrentMetadataInfo,
 };
 use bitmask_enum::bitmask;
 use byteorder::BigEndian;
@@ -20,7 +22,7 @@ use derive_more::Display;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use itertools::Itertools;
 use log::{debug, error, trace, warn};
-use std::cmp::{max, Ordering};
+use std::cmp::max;
 use std::collections::{HashSet, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
 use std::net::SocketAddr;
@@ -70,58 +72,6 @@ impl From<TcpStream> for PeerStream {
 impl From<UtpStream> for PeerStream {
     fn from(stream: UtpStream) -> Self {
         Self::Utp(stream)
-    }
-}
-
-impl PartialOrd for ChokeState {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self == other {
-            Some(Ordering::Equal)
-        } else if self == &ChokeState::Choked && other == &ChokeState::UnChoked {
-            Some(Ordering::Less)
-        } else {
-            Some(Ordering::Greater)
-        }
-    }
-}
-
-impl Ord for ChokeState {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap()
-    }
-}
-
-/// The interest states of a peer.
-#[repr(u8)]
-#[derive(Debug, Display, Clone, Copy, PartialEq, Eq)]
-pub enum InterestState {
-    #[display("not interested")]
-    NotInterested = 0,
-    #[display("interested")]
-    Interested = 1,
-}
-
-impl PartialOrd<Self> for InterestState {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self == other {
-            Some(Ordering::Equal)
-        } else if self == &InterestState::NotInterested && other == &InterestState::Interested {
-            Some(Ordering::Less)
-        } else {
-            Some(Ordering::Greater)
-        }
-    }
-}
-
-impl Ord for InterestState {
-    fn cmp(&self, other: &Self) -> Ordering {
-        if self == other {
-            Ordering::Equal
-        } else if self == &InterestState::NotInterested && other == &InterestState::Interested {
-            Ordering::Less
-        } else {
-            Ordering::Greater
-        }
     }
 }
 
@@ -243,18 +193,6 @@ pub struct RemotePeer {
     pub extended_handshake: bool,
     /// Indicates that the connection has been upgraded to v2
     pub is_v2: bool,
-}
-
-#[derive(Debug, Clone)]
-pub enum PeerEvent {
-    /// Invoked when the state of this peer has changed.
-    StateChanged(PeerState),
-    /// Invoked when the seed state of the remote peer has changed.
-    SeedStateChanged(bool),
-    /// Invoked when the peer metrics have been updated.
-    Stats(Metrics),
-    /// Invoked when the peer connection is closed.
-    Closed(CloseReason),
 }
 
 #[derive(Debug, Default, Clone)]
@@ -501,6 +439,24 @@ impl BitTorrentPeer {
             .unwrap_or(ProtocolExtensionFlags::none())
     }
 
+    /// Set the choke state of the client peer.
+    pub async fn set_choke_state(&self, state: ChokeState) {
+        self.sender
+            .fire_and_forget(PeerCommand::SetChokeState { state })
+            .await
+    }
+
+    /// Returns the choke state of the client peer,
+    /// indicating if data can be sent to the remote peer or not.
+    pub async fn choke_state(&self) -> ChokeState {
+        self.sender
+            .send(|tx| PeerCommand::GetChokeState { response: tx })
+            .await
+            .await
+            .ok()
+            .unwrap_or(ChokeState::Choked)
+    }
+
     /// Get the remote peer choke state.
     pub async fn remote_choke_state(&self) -> ChokeState {
         self.sender
@@ -598,15 +554,6 @@ impl BitTorrentPeer {
             .await
             .await
             .unwrap_or(PeerState::Closed)
-    }
-
-    /// Returns the current client choke state of the peer.
-    pub async fn choke_state(&self) -> ChokeState {
-        self.sender
-            .send(|tx| PeerCommand::GetClientChokeState { response: tx })
-            .await
-            .await
-            .unwrap_or(ChokeState::Choked)
     }
 
     /// Verify if the peer supports the given extension name with the remote peer.
@@ -742,7 +689,7 @@ impl BitTorrentPeer {
         metrics: Metrics,
         timeout: Duration,
     ) -> Result<Self> {
-        let (command_sender, command_receiver) = channel!(64);
+        let (command_sender, command_receiver) = channel!(128);
         metrics.client_choked.set(true);
         metrics.remote_choked.set(true);
 
@@ -813,6 +760,13 @@ enum PeerCommand {
     GetRemoteSupportedExtensions {
         response: Reply<Option<ProtocolExtensionFlags>>,
     },
+    SetChokeState {
+        state: ChokeState,
+    },
+    /// Returns the choke state of the client peer.
+    GetChokeState {
+        response: Reply<ChokeState>,
+    },
     /// Returns the remote peer choke state, if known.
     GetRemoteChokeState {
         response: Reply<ChokeState>,
@@ -845,10 +799,6 @@ enum PeerCommand {
     /// Returns the state of the peer.
     GetState {
         response: Reply<PeerState>,
-    },
-    /// Returns the state of the client choke state.
-    GetClientChokeState {
-        response: Reply<ChokeState>,
     },
     /// Returns the bitfield of the client pieces that have been completed.
     GetClientBitfield {
@@ -1418,7 +1368,6 @@ impl PeerContext {
             }
             TorrentEvent::OptionsChanged => {
                 self.determine_client_interest_state().await;
-                self.request_upload_permit_if_needed(false).await;
             }
             TorrentEvent::PieceCompleted(piece) => {
                 self.update_client_piece_availability(piece).await;
@@ -1432,7 +1381,6 @@ impl PeerContext {
         let start = Instant::now();
 
         self.on_stats_update(interval);
-        self.request_upload_permit_if_needed(false).await;
         self.on_extensions_tick(extensions, interval).await;
         self.send_queued_requests().await;
         self.process_remote_pending_requests().await;
@@ -1549,9 +1497,16 @@ impl PeerContext {
     /// Handle a received hash request from the remote peer.
     async fn handle_hash_request(&self, _request: HashRequest) {
         // check if the torrent hash is a v2
-        let metadata = match self.torrent.metadata().await {
+        let metadata = match timeout(Duration::from_millis(500), self.torrent.metadata())
+            .await
+            .map_err(|_| TorrentError::Timeout)
+            .flatten()
+        {
             Ok(metadata) => metadata,
-            Err(_) => return,
+            Err(e) => {
+                trace!("Peer {} failed to retrieve metadata, {}", self, e);
+                return;
+            }
         };
         let metadata_version = metadata.metadata_version().unwrap_or(0);
         if metadata_version != 2 {
@@ -1572,6 +1527,8 @@ impl PeerContext {
             PeerCommand::GetRemoteSupportedExtensions { response } => {
                 response.send(self.remote.as_ref().map(|e| e.protocol_extensions))
             }
+            PeerCommand::SetChokeState { state } => self.update_client_choke_state(state).await,
+            PeerCommand::GetChokeState { response } => response.send(self.client_choke_state),
             PeerCommand::GetRemoteChokeState { response } => response.send(self.remote_choke_state),
             PeerCommand::GetRemoteInterestState { response } => {
                 response.send(self.remote_interest_state)
@@ -1593,7 +1550,6 @@ impl PeerContext {
             }
             PeerCommand::IsSeed { response } => response.send(self.remote_has_all_pieces().await),
             PeerCommand::GetState { response } => response.send(self.state),
-            PeerCommand::GetClientChokeState { response } => response.send(self.client_choke_state),
             PeerCommand::GetClientBitfield { response } => {
                 response.send(self.client_pieces.clone())
             }
@@ -1641,9 +1597,16 @@ impl PeerContext {
 
     /// Check if v2 hashes should be requested for the current torrent.
     async fn should_request_hashes(&self) -> bool {
-        let metadata = match self.torrent.metadata().await {
+        let metadata = match timeout(Duration::from_millis(500), self.torrent.metadata())
+            .await
+            .map_err(|_| TorrentError::Timeout)
+            .flatten()
+        {
             Ok(metadata) => metadata,
-            Err(_) => return false,
+            Err(e) => {
+                trace!("Peer {} failed to retrieve metadata, {}", self, e);
+                return false;
+            }
         };
         if let Some(metadata_version) = metadata.metadata_version() {
             return metadata_version == 2 && self.is_v2_supported();
@@ -1654,9 +1617,16 @@ impl PeerContext {
 
     /// Request any missing hashes from the remote peer.
     async fn request_missing_hashes(&self) {
-        let metadata = match self.torrent.metadata().await {
+        let metadata = match timeout(Duration::from_millis(500), self.torrent.metadata())
+            .await
+            .map_err(|_| TorrentError::Timeout)
+            .flatten()
+        {
             Ok(metadata) => metadata,
-            Err(_) => return,
+            Err(e) => {
+                trace!("Peer {} failed to retrieve metadata, {}", self, e);
+                return;
+            }
         };
         if let Some(info) = metadata.info {
             trace!("Peer {} is requesting missing v2 hashes", self);
@@ -1673,7 +1643,8 @@ impl PeerContext {
     /// Determine if our peer client is interested in pieces from the remote peer.
     async fn determine_client_interest_state(&mut self) {
         let state: InterestState;
-        let is_download_allowed = self.torrent.is_download_allowed().await;
+        // FIXME: torrent should inform the peer about the state
+        let is_download_allowed = true;
 
         // check if downloading is allowed by the torrent
         if is_download_allowed {
@@ -1688,50 +1659,6 @@ impl PeerContext {
         }
 
         self.update_client_interest_state(state).await;
-    }
-
-    /// Try to retrieve an upload permit from the torrent.
-    /// If the peer already has an upload permit, this call will be a no-op.
-    async fn request_upload_permit(&mut self) {
-        if self.client_choke_state == ChokeState::UnChoked {
-            return;
-        }
-
-        let is_upload_allowed = self.torrent.is_upload_allowed().await;
-        if !is_upload_allowed {
-            return;
-        }
-
-        debug!(
-            "Peer {} acquired torrent {} upload permit",
-            self, self.torrent
-        );
-        // unchoke the client peer to accept incoming requests from the remote peer
-        // don't put the state change on the command channel as requests might have already been queued
-        self.update_client_choke_state(ChokeState::UnChoked).await;
-    }
-
-    /// Request an upload permit from the torrent if needed.
-    ///
-    /// If the remote peer is [InterestState::Interested] and the torrent allows uploads,
-    /// then we queue the command to try to obtain an upload permit.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn request_upload_permit_if_needed(&mut self, ignore_remote_interest_state: bool) {
-        if self.client_choke_state == ChokeState::UnChoked {
-            return;
-        }
-
-        let is_interested =
-            ignore_remote_interest_state || self.remote_interest_state == InterestState::Interested;
-        let is_upload_allowed =
-            match timeout(Duration::from_millis(500), self.torrent.is_upload_allowed()).await {
-                Err(_) => return,
-                Ok(e) => e,
-            };
-
-        if is_interested && is_upload_allowed {
-            self.request_upload_permit().await;
-        }
     }
 
     /// Try to receive/read the incoming handshake from the remote peer.
@@ -1859,6 +1786,8 @@ impl PeerContext {
             return;
         }
 
+        self.callbacks
+            .invoke(PeerEvent::ClientChokeStateChanged(self.client_choke_state));
         debug!("Peer {} client entered {} state", self, state);
     }
 
@@ -1886,6 +1815,8 @@ impl PeerContext {
             self.torrent.pick_pieces(&self.client.handle).await;
         }
 
+        self.callbacks
+            .invoke(PeerEvent::RemoteChokeStateChanged(self.client_choke_state));
         trace!("Peer {} remote entered {} state", self, state);
     }
 
@@ -1930,13 +1861,11 @@ impl PeerContext {
             .remote_interested
             .set(state == InterestState::Interested);
 
-        // if the remote peer is no longer interested
+        // if the remote peer is no longer interested,
         // choke the client so that another peer can obtain the permit
         if state == InterestState::NotInterested {
-            self.update_client_choke_state(ChokeState::Choked).await;
+            // FIXME: inform the torrent that the peer is no longer interested
         }
-
-        self.request_upload_permit_if_needed(false).await;
     }
 
     /// Updates the state of the peer.
@@ -1972,8 +1901,6 @@ impl PeerContext {
                 self, piece, e
             ),
         }
-
-        self.request_upload_permit_if_needed(false).await;
     }
 
     /// Update the remote piece availabilities with given piece.
@@ -2731,6 +2658,7 @@ mod tests {
     use crate::tests::copy_test_file;
     use crate::tests::helpers::wait_for_torrent_pieces;
     use crate::DEFAULT_TORRENT_PROTOCOL_EXTENSIONS;
+    use std::cmp::Ordering;
     use tempfile::tempdir;
 
     mod new {
