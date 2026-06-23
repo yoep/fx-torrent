@@ -76,7 +76,7 @@ impl HttpPeer {
         });
 
         let main_inner = inner.clone();
-        tokio::spawn(async move { main_inner.start().await });
+        tokio::spawn(async move { main_inner.run().await });
 
         Ok(Self { inner })
     }
@@ -162,7 +162,7 @@ struct HttpPeerContext {
 }
 
 impl HttpPeerContext {
-    async fn start(&self) {
+    async fn run(&self) {
         let mut stats_interval = interval(STATUS_INTERVAL);
 
         loop {

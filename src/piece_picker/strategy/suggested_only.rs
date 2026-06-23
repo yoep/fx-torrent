@@ -1,6 +1,5 @@
 use crate::piece_picker::{PickerOptions, PieceBlockState, PiecePickerBlock};
 use crate::PieceIndex;
-use itertools::Itertools;
 
 #[derive(Debug)]
 pub struct SuggestedOnlyStrategy;

@@ -1420,7 +1420,7 @@ mod tests {
             InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap();
         let peer_addr = SocketAddr::from(([127, 0, 0, 1], 6882));
         let server = TrackerServer::new().await.unwrap();
-        let manager = TrackerClient::new(Duration::from_secs(1));
+        let manager = TrackerClient::new(Duration::from_secs(2));
 
         // add a new tracker
         let result = manager

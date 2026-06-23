@@ -84,6 +84,7 @@ macro_rules! piece_infos {
     ($num_of_pieces:expr, $total_len:expr, $piece_len:expr) => {{
         use crate::piece_picker::PiecePickerBlock;
         use crate::Piece;
+        use itertools::Itertools;
 
         let pieces: Vec<Piece> = pieces!($num_of_pieces, $total_len, $piece_len);
 

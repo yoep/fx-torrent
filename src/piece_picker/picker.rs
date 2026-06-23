@@ -9,7 +9,8 @@ use derive_more::Display;
 use itertools::Itertools;
 use log::{debug, trace, warn};
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::time::timeout;
 
 /// The FX piece picker implementation for retrieving pieces from peers.
 ///
@@ -207,12 +208,31 @@ impl FxPiecePicker {
         let start_time = Instant::now();
 
         // early exit if the peer is unable to queue any requests
-        let mut target_queue_len = peer.target_request_queue_len().await;
+        let mut target_queue_len =
+            match timeout(Duration::from_millis(250), peer.target_request_queue_len()).await {
+                Ok(len) => len,
+                Err(_) => {
+                    warn!(
+                        "Piece picker {} failed to get queue len for {}, timed-out",
+                        self, peer
+                    );
+                    return;
+                }
+            };
         if target_queue_len == 0 {
             return;
         }
 
-        let state = peer.remote_choke_state().await;
+        let state = match timeout(Duration::from_millis(250), peer.remote_choke_state()).await {
+            Ok(state) => state,
+            Err(_) => {
+                warn!(
+                    "Piece picker {} failed to get remote choke state for {}, timed-out",
+                    self, peer
+                );
+                return;
+            }
+        };
 
         // use the fast bitfield if the remote peer is still choked
         // early exit if the peer has no pieces we're interested in
@@ -226,7 +246,16 @@ impl FxPiecePicker {
             return;
         }
 
-        let suggested = peer.suggested_pieces().await;
+        let suggested = match timeout(Duration::from_millis(250), peer.suggested_pieces()).await {
+            Ok(suggested) => suggested,
+            Err(_) => {
+                warn!(
+                    "Piece picker {} failed to get suggested pieces for {}, timed-out",
+                    self, peer
+                );
+                return;
+            }
+        };
         let is_end_game = self.is_end_game();
 
         let mut num_requested_blocks = 0usize;
@@ -242,16 +271,14 @@ impl FxPiecePicker {
             }
 
             let strategy_start_time = Instant::now();
-            let picked_blocks = strategy
-                .pick_pieces(
-                    peer,
-                    &interested_pieces,
-                    target_queue_len,
-                    suggested.as_slice(),
-                    is_end_game,
-                    self.options,
-                )
-                .await;
+            let picked_blocks = strategy.pick_pieces(
+                peer,
+                &interested_pieces,
+                target_queue_len,
+                suggested.as_slice(),
+                is_end_game,
+                self.options,
+            );
             let elapsed = strategy_start_time.elapsed();
             trace!(
                 "Piece picker {} strategy {} picked {} blocks in {:.3}ms",
@@ -322,8 +349,19 @@ impl FxPiecePicker {
     pub async fn tick<'a, P: Iterator<Item = &'a Peer>>(&mut self, peers: P) {
         let start_time = Instant::now();
         for peer in peers {
+            let state = match timeout(Duration::from_millis(500), peer.state()).await {
+                Ok(state) => state,
+                Err(_) => {
+                    trace!(
+                        "Piece picker {} timed out waiting for peer {} state, skipping",
+                        self,
+                        peer
+                    );
+                    continue;
+                }
+            };
             if matches!(
-                peer.state().await,
+                state,
                 PeerState::Handshake | PeerState::Error | PeerState::Closed
             ) {
                 continue;

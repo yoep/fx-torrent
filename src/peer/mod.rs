@@ -53,7 +53,10 @@ pub mod tests {
             async fn is_seed(&self) -> bool;
             async fn remote_piece_bitfield(&self) -> BitVec;
             async fn remote_fast_bitfield(&self) -> BitVec;
+            async fn set_choke_state(&self, state: ChokeState);
+            async fn choke_state(&self) -> ChokeState;
             async fn remote_choke_state(&self) -> ChokeState;
+            async fn remote_interest_state(&self) -> InterestState;
             async fn suggested_pieces(&self) -> Vec<PieceIndex>;
             async fn request(&self, blocks: &[PieceBlock]) -> Result<()>;
             async fn target_request_queue_len(&self) -> usize;

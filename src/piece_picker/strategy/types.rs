@@ -41,7 +41,7 @@ impl Strategy {
     ///
     /// Picking `blocks` which are already being [crate::piece_picker::PieceBlockState::Requested]
     /// is allowed, especially during the endgame phase of the torrent.
-    pub async fn pick_pieces<'a>(
+    pub fn pick_pieces<'a>(
         &self,
         peer: &Peer,
         blocks: &'a Vec<PiecePickerBlock>,
@@ -67,18 +67,14 @@ impl Strategy {
             Strategy::Sequential(strategy) => {
                 strategy.pick_pieces(blocks, target_queue_len, is_end_game, options)
             }
-            Strategy::Other(strategy) => {
-                strategy
-                    .pick_pieces(
-                        peer,
-                        blocks,
-                        target_queue_len,
-                        suggested_pieces,
-                        is_end_game,
-                        options,
-                    )
-                    .await
-            }
+            Strategy::Other(strategy) => strategy.pick_pieces(
+                peer,
+                blocks,
+                target_queue_len,
+                suggested_pieces,
+                is_end_game,
+                options,
+            ),
         }
     }
 }
@@ -127,7 +123,7 @@ pub trait Extension: Debug + Send + Sync {
     /// The `blocks` are already filtered on peer availability and
     /// not [crate::piece_picker::PieceBlockState::Finished] therefore,
     /// they should not be filtered again on these criteria.
-    async fn pick_pieces<'a>(
+    fn pick_pieces<'a>(
         &self,
         peer: &Peer,
         blocks: &'a Vec<PiecePickerBlock>,

@@ -1,4 +1,4 @@
-use crate::peer::{CloseReason, Peer, PeerEvent, PeerHandle, PeerPriority, PeerState};
+use crate::peer::{ChokeState, CloseReason, Peer, PeerEvent, PeerHandle, PeerPriority, PeerState};
 use crate::TorrentHandle;
 use derive_more::Display;
 use fx_callback::{Callback, Subscription};
@@ -95,10 +95,10 @@ impl PeerPool {
     pub fn add_peer(&mut self, peer: Peer) -> Result<(), AddReason> {
         let handle = peer.handle();
         // early exit if the pool is full
-        if self.peers.len() >= self.limit {
+        if self.peers().count() >= self.limit {
             debug!(
-                "Torrent {} is unable to add peer {}, pool limit reached",
-                self, handle
+                "Torrent {} is unable to add peer {}, pool limit ({}) reached",
+                self, handle, self.limit
             );
             return Err(AddReason::LimitReached);
         }
@@ -112,6 +112,7 @@ impl PeerPool {
             peer,
             receiver,
             state: PeerState::Handshake,
+            upload_acquired: false,
         });
         Ok(())
     }
@@ -295,6 +296,31 @@ impl PeerPool {
         debug!("Cleaned a total of {} peers", total_cleaned_peers);
         self.last_cleanup = Instant::now();
         removed_peers
+    }
+
+    /// Returns the total number of upload slots currently in use.
+    pub fn upload_slots_len(&self) -> usize {
+        self.peers
+            .values()
+            .filter_map(|e| e.connection.as_ref())
+            .filter(|c| c.upload_acquired)
+            .count()
+    }
+
+    /// Choke the given client peer address.
+    pub async fn choke_peer(&mut self, addr: &SocketAddr) {
+        if let Some(conn) = self.peers.get_mut(addr).and_then(|e| e.connection.as_mut()) {
+            conn.peer.set_choke_state(ChokeState::Choked).await;
+            conn.upload_acquired = false;
+        }
+    }
+
+    /// Unchoke the given client peer address.
+    pub async fn unchoke_peer(&mut self, addr: &SocketAddr) {
+        if let Some(conn) = self.peers.get_mut(addr).and_then(|e| e.connection.as_mut()) {
+            conn.peer.set_choke_state(ChokeState::UnChoked).await;
+            conn.upload_acquired = true;
+        }
     }
 
     /// Execute a period tick within the peer pool.
@@ -513,6 +539,7 @@ struct PeerConnection {
     peer: Peer,
     receiver: Subscription<PeerEvent>,
     state: PeerState,
+    upload_acquired: bool,
 }
 
 /// The state of the hole punch operation for the peer.
@@ -671,6 +698,129 @@ mod tests {
                     info.last_connected.is_some(),
                     "expected the last connected time to be set"
                 );
+            }
+        }
+
+        mod upload_slots {
+            use super::*;
+            use tokio::sync::{broadcast, oneshot};
+
+            #[tokio::test]
+            async fn test_upload_slots() {
+                init_logger!();
+                let peer1_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
+                let mut peer1 = MockPeer::new();
+                peer1.expect_handle().return_const(PeerHandle::new());
+                peer1.expect_addr().return_const(peer1_addr.clone());
+                peer1.expect_set_choke_state().return_const(());
+                peer1.expect_subscribe().returning(|| {
+                    let (_, rx) = broadcast::channel(1);
+                    rx
+                });
+                let peer2_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6882));
+                let mut peer2 = MockPeer::new();
+                peer2.expect_handle().return_const(PeerHandle::new());
+                peer2.expect_addr().return_const(peer2_addr.clone());
+                peer2.expect_set_choke_state().return_const(());
+                peer2.expect_subscribe().returning(|| {
+                    let (_, rx) = broadcast::channel(1);
+                    rx
+                });
+                let mut pool = PeerPool::new(TorrentHandle::new(), 2);
+
+                // add the peers to the pool
+                pool.add_peer(peer1.into())
+                    .expect("expected the peer to have been added");
+                pool.add_peer(peer2.into())
+                    .expect("expected the peer to have been added");
+
+                let result = pool.upload_slots_len();
+                assert_eq!(0, result, "expected no upload slots to have been assigned");
+
+                // unchoke peers
+                pool.unchoke_peer(&peer1_addr).await;
+                let result = pool.upload_slots_len();
+                assert_eq!(1, result, "expected 1 upload slot to have been assigned");
+
+                pool.unchoke_peer(&peer2_addr).await;
+                let result = pool.upload_slots_len();
+                assert_eq!(2, result, "expected 2 upload slots to have been assigned");
+
+                // choke peer
+                pool.choke_peer(&peer1_addr).await;
+                let result = pool.upload_slots_len();
+                assert_eq!(1, result, "expected 1 upload slot to have been assigned");
+            }
+
+            #[tokio::test]
+            async fn test_choke_peer() {
+                init_logger!();
+                let peer_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
+                let (tx, rx) = oneshot::channel();
+                let mut peer = MockPeer::new();
+                peer.expect_handle().return_const(PeerHandle::new());
+                peer.expect_addr().return_const(peer_addr.clone());
+                peer.expect_set_choke_state()
+                    .times(1)
+                    .return_once(move |state| {
+                        tx.send(state).unwrap();
+                    });
+                peer.expect_subscribe().returning(|| {
+                    let (_, rx) = broadcast::channel(1);
+                    rx
+                });
+                let mut pool = PeerPool::new(TorrentHandle::new(), 2);
+
+                // add the peer to the pool
+                pool.add_peer(peer.into())
+                    .expect("expected the peer to have been added");
+
+                // choke the peer
+                pool.choke_peer(&peer_addr).await;
+
+                // check the invocation
+                let result = timeout!(Duration::from_millis(200), rx).unwrap();
+                assert_eq!(ChokeState::Choked, result);
+            }
+
+            #[tokio::test]
+            async fn test_unchoke_peer() {
+                init_logger!();
+                let peer_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
+                let (tx, rx) = oneshot::channel();
+                let mut peer = MockPeer::new();
+                peer.expect_handle().return_const(PeerHandle::new());
+                peer.expect_addr().return_const(peer_addr.clone());
+                peer.expect_set_choke_state()
+                    .times(1)
+                    .return_once(move |state| {
+                        tx.send(state).unwrap();
+                    });
+                peer.expect_subscribe().returning(|| {
+                    let (_, rx) = broadcast::channel(1);
+                    rx
+                });
+                let mut pool = PeerPool::new(TorrentHandle::new(), 2);
+
+                // add the peer to the pool
+                pool.add_peer(peer.into())
+                    .expect("expected the peer to have been added");
+
+                // choke the peer
+                pool.unchoke_peer(&peer_addr).await;
+
+                // check the upload slot state of the peer
+                let result = pool
+                    .peers
+                    .get(&peer_addr)
+                    .and_then(|e| e.connection.as_ref())
+                    .map(|c| c.upload_acquired)
+                    .expect("expected the peer connection to have been found");
+                assert_eq!(true, result, "expected the upload_acquired flag to be set");
+
+                // check the invocation
+                let result = timeout!(Duration::from_millis(200), rx).unwrap();
+                assert_eq!(ChokeState::UnChoked, result);
             }
         }
 

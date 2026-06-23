@@ -59,6 +59,11 @@ impl AppLogger {
                         level: Level::Info,
                     },
                     Logger {
+                        name: "Piece picker".to_string(),
+                        target: "fx_torrent::piece_picker".to_string(),
+                        level: Level::Info,
+                    },
+                    Logger {
                         name: "Session".to_string(),
                         target: "fx_torrent::session".to_string(),
                         level: Level::Info,
