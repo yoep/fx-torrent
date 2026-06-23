@@ -1860,12 +1860,6 @@ impl PeerContext {
         self.metrics
             .remote_interested
             .set(state == InterestState::Interested);
-
-        // if the remote peer is no longer interested,
-        // choke the client so that another peer can obtain the permit
-        if state == InterestState::NotInterested {
-            // FIXME: inform the torrent that the peer is no longer interested
-        }
     }
 
     /// Updates the state of the peer.

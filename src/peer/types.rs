@@ -45,19 +45,19 @@ pub enum ChokeState {
 
 impl PartialOrd for ChokeState {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self == other {
-            Some(Ordering::Equal)
-        } else if self == &ChokeState::Choked && other == &ChokeState::UnChoked {
-            Some(Ordering::Less)
-        } else {
-            Some(Ordering::Greater)
-        }
+        Some(self.cmp(other))
     }
 }
 
 impl Ord for ChokeState {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap()
+        if self == other {
+            Ordering::Equal
+        } else if self == &ChokeState::Choked && other == &ChokeState::UnChoked {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }
     }
 }
 
@@ -73,13 +73,7 @@ pub enum InterestState {
 
 impl PartialOrd<Self> for InterestState {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self == other {
-            Some(Ordering::Equal)
-        } else if self == &InterestState::NotInterested && other == &InterestState::Interested {
-            Some(Ordering::Less)
-        } else {
-            Some(Ordering::Greater)
-        }
+        Some(self.cmp(other))
     }
 }
 
@@ -735,6 +729,53 @@ mod tests {
                 .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
                 .collect::<Option<Vec<_>>>()?;
             Some(CRC32.checksum(&buffer))
+        }
+    }
+
+    mod choke_state {
+        use super::*;
+
+        #[test]
+        fn test_partial_order() {
+            let state1 = ChokeState::Choked;
+            let state2 = ChokeState::UnChoked;
+
+            assert_eq!(Some(Ordering::Less), state1.partial_cmp(&state2));
+            assert_eq!(Some(Ordering::Greater), state2.partial_cmp(&state1));
+            assert_eq!(Some(Ordering::Equal), state2.partial_cmp(&state2));
+        }
+
+        #[test]
+        fn test_order() {
+            let state1 = ChokeState::Choked;
+            let state2 = ChokeState::UnChoked;
+
+            assert_eq!(Ordering::Less, state1.cmp(&state2));
+            assert_eq!(Ordering::Greater, state2.cmp(&state1));
+        }
+    }
+
+    mod interest_state {
+        use super::*;
+
+        #[test]
+        fn test_partial_order() {
+            let state1 = InterestState::Interested;
+            let state2 = InterestState::NotInterested;
+
+            assert_eq!(Some(Ordering::Less), state2.partial_cmp(&state1));
+            assert_eq!(Some(Ordering::Greater), state1.partial_cmp(&state2));
+            assert_eq!(Some(Ordering::Equal), state2.partial_cmp(&state2));
+            assert_eq!(Some(Ordering::Equal), state1.partial_cmp(&state1));
+        }
+
+        #[test]
+        fn test_order() {
+            let state1 = InterestState::Interested;
+            let state2 = InterestState::NotInterested;
+
+            assert_eq!(Ordering::Less, state2.cmp(&state1));
+            assert_eq!(Ordering::Greater, state1.cmp(&state2));
         }
     }
 }
