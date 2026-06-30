@@ -120,7 +120,7 @@ impl DhtTracker {
         );
 
         // start the context in a separate task
-        tokio::spawn(async move {
+        spawn!("TrackerContext::run", async move {
             context
                 .run(
                     config.info_hash_indexing_interval,
@@ -1439,7 +1439,7 @@ impl TrackerContext {
         // start the reader in a separate task
         let reader_socket = socket.clone();
         let reader_cancellation_token = cancellation_token.clone();
-        tokio::spawn(async move {
+        spawn!("NodeReader::run", async move {
             let reader = NodeReader {
                 socket: reader_socket,
                 addr_port: socket_addr.port(),

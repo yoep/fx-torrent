@@ -723,7 +723,7 @@ impl BitTorrentPeer {
         context.exchange_handshake().await?;
 
         // run the peer context in a separate task
-        tokio::spawn(async move {
+        spawn!("PeerContext::run", async move {
             context
                 .run(command_receiver, torrent_event_receiver, extensions)
                 .await
@@ -1903,7 +1903,11 @@ impl PeerContext {
     /// If the piece is out-of-range, the update will be ignored.
     pub(crate) async fn set_remote_has_piece(&mut self, piece: PieceIndex, has_piece: bool) {
         let total_pieces = self.data_pool.num_of_pieces().await;
-        let is_metadata_known = self.torrent.is_metadata_known().await;
+        let is_metadata_known =
+            match timeout(Duration::from_millis(500), self.torrent.is_metadata_known()).await {
+                Ok(metadata) => metadata,
+                Err(_) => false,
+            };
 
         // ensure the BitVec is large enough to accommodate the piece index
         if piece >= self.remote_pieces.len() {

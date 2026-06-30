@@ -49,12 +49,15 @@ mod tracing {
     use std::time::Duration;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::Layer;
 
     pub fn init_tracing(app_logger: AppLogger) {
         let console_layer = ConsoleLayer::builder()
             .with_default_env()
             .retention(Duration::from_secs(60))
-            .spawn();
+            .spawn()
+            .with_filter(EnvFilter::new("trace"));
 
         tracing_subscriber::registry()
             .with(console_layer)

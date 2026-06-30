@@ -429,10 +429,11 @@ use std::ops::Range;
 #[macro_use]
 mod test_macros;
 #[macro_use]
-mod channel;
+mod macros;
 
 pub mod bencode;
 mod bloom_filter;
+mod channel;
 mod compact;
 mod config;
 #[cfg(feature = "dht")]

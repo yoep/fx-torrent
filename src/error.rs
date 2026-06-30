@@ -71,6 +71,7 @@ pub enum TorrentError {
     Dht(dht::Error),
     #[error("an io error occurred, {0}")]
     Io(io::Error),
+    // TODO: refactor to io::ErrorKind::TimedOut with context info
     #[error("the torrent operation has timed out")]
     Timeout,
     #[error("a torrent piece error occurred, {0}")]

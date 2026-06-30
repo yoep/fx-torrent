@@ -106,7 +106,7 @@ impl TrackerServer {
         });
 
         let main_inner = inner.clone();
-        tokio::spawn(async move {
+        spawn!("InnerServer::run", async move {
             main_inner.run(listeners).await;
         });
 

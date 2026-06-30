@@ -1,10 +1,15 @@
 use futures::FutureExt;
+use log::warn;
 use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use std::{io, result};
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::{sleep, Sleep};
+
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The result type of channel operations.
 pub type Result<T> = result::Result<T, io::Error>;
@@ -25,6 +30,7 @@ impl<T> ChannelSender<T> {
     /// Send the given message closure to the channel.
     ///
     /// The `M` message mapper accepts a reply sender to send the result of the channel operation.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn send<M, R, E, S>(&self, message: M) -> Response<R, E>
     where
         M: FnOnce(Reply<S>) -> T,
@@ -38,6 +44,7 @@ impl<T> ChannelSender<T> {
     }
 
     /// Send the given message to the channel without waiting for a response.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn fire_and_forget(&self, message: T) {
         let _ = self.inner.send(message).await;
     }
@@ -106,6 +113,7 @@ impl<T> ChannelReceiver<T> {
 #[derive(Debug)]
 pub struct Response<T, E> {
     inner: InnerResponse<T, E>,
+    timeout: Option<Pin<Box<Sleep>>>,
 }
 
 impl<T, E> Response<T, E> {
@@ -113,6 +121,7 @@ impl<T, E> Response<T, E> {
     pub fn err(e: E) -> Self {
         Self {
             inner: InnerResponse::Err(Some(e)),
+            timeout: Default::default(),
         }
     }
 
@@ -120,6 +129,7 @@ impl<T, E> Response<T, E> {
     pub fn closed() -> Self {
         Self {
             inner: InnerResponse::Closed,
+            timeout: Default::default(),
         }
     }
 }
@@ -132,7 +142,21 @@ where
     type Output = result::Result<T, E>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.get_mut().inner).poll(cx)
+        let this = self.get_mut();
+
+        let timeout = this
+            .timeout
+            .get_or_insert_with(|| Box::pin(sleep(RESPONSE_TIMEOUT)));
+        if timeout.as_mut().poll(cx).is_ready() {
+            warn!("Channel detected potential deadlock");
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "potential channel deadlock",
+            )
+            .into()));
+        }
+
+        Pin::new(&mut this.inner).poll(cx)
     }
 }
 
@@ -140,6 +164,7 @@ impl<T> From<oneshot::Receiver<T>> for Response<T, io::Error> {
     fn from(rx: oneshot::Receiver<T>) -> Self {
         Self {
             inner: InnerResponse::PendingMapper(rx),
+            timeout: Default::default(),
         }
     }
 }
@@ -148,6 +173,7 @@ impl<T, E> From<oneshot::Receiver<result::Result<T, E>>> for Response<T, E> {
     fn from(rx: oneshot::Receiver<result::Result<T, E>>) -> Self {
         Self {
             inner: InnerResponse::Pending(rx),
+            timeout: Default::default(),
         }
     }
 }
@@ -274,21 +300,6 @@ impl<T> InnerReceiverChannel<T> {
     async fn recv(&mut self) -> Option<T> {
         self.0.recv().await
     }
-}
-
-/// Create a new channel for sending and receiving messages between torrent tasks.
-///
-/// This macro supports:
-/// - `channel!()` for a bounded (backpressure) channel with default capacity `256`.
-/// - `channel!(N)` for a bounded (backpressure) channel with capacity `N`.
-macro_rules! channel {
-    () => {{
-        channel!(256)
-    }};
-    ($limit:expr) => {{
-        let limit: usize = $limit;
-        crate::channel::channel(limit)
-    }};
 }
 
 /// Create a new backpressure channel for sending and receiving messages between torrent tasks.

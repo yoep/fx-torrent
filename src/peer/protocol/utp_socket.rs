@@ -165,7 +165,9 @@ impl UtpSocket {
 
         // start the main loop of the socket a new thread
         let inner_main_loop = inner.clone();
-        tokio::spawn(async move { inner_main_loop.run(&inner_main_loop).await });
+        spawn!("UtpSocket::run", async move {
+            inner_main_loop.run(&inner_main_loop).await
+        });
 
         Ok(Self { inner })
     }

@@ -30,7 +30,7 @@ impl DataPool {
     /// Create a new data pool for the given pieces.
     fn new_with_pieces(pieces: Vec<Piece>) -> Self {
         let (sender, rx) = channel!(256);
-        tokio::spawn(async move {
+        spawn!("InnerDataPool::run", async move {
             let mut inner = InnerDataPool::new(pieces);
             inner.run(rx).await;
         });

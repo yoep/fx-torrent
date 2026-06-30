@@ -125,7 +125,7 @@ impl TrackerClient {
         let cancellation_token = inner.cancellation_token.clone();
 
         // spawn the main loop in a separate task
-        tokio::spawn(async move {
+        spawn!("TrackerClient::run", async move {
             inner.run(command_receiver).await;
         });
 

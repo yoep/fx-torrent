@@ -325,7 +325,7 @@ impl FxSession {
         });
 
         let main_inner = inner.clone();
-        tokio::spawn(async move {
+        spawn!("InnerSession::run", async move {
             main_inner.run(command_receiver).await;
         });
 
@@ -409,6 +409,7 @@ impl FxSession {
     /// # Arguments
     ///
     /// * `torrent_info` - The metadata information of the torrent to check.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub async fn torrent_health_from_info(
         &self,
         torrent_info: &TorrentMetadata,
@@ -458,6 +459,7 @@ impl FxSession {
     /// # Arguments
     ///
     /// * `uri` - The uri of the torrent to check.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub async fn torrent_health_from_uri(&self, uri: &str) -> Result<TorrentHealth> {
         trace!(
             "Session {} is retrieving torrent health for {:?}",
@@ -491,6 +493,7 @@ impl FxSession {
     /// # Arguments
     ///
     /// * `uri` - The uri to resolve.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub fn resolve(&self, uri: &str) -> Result<TorrentMetadata> {
         if Magnet::has_magnet_scheme(uri) {
             trace!("Session {} is resolving torrent magnet uri {}", self, uri);
@@ -526,6 +529,7 @@ impl FxSession {
     ///
     /// * `magnet_uri` - The magnet URI of the torrent to fetch.
     /// * `timeout` - The timeout to use when fetching the torrent information.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub async fn fetch_magnet(
         &self,
         magnet_uri: &str,
@@ -574,6 +578,7 @@ impl FxSession {
     ///
     /// * `uri` - The uri of the torrent to add.
     /// * `options` - The torrent options to use when adding the torrent.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub async fn add_torrent_from_uri(&self, uri: &str, options: TorrentFlags) -> Result<Torrent> {
         let torrent_info = self.resolve(uri)?;
         self.add_torrent_from_info(torrent_info, options).await
@@ -585,6 +590,7 @@ impl FxSession {
     ///
     /// * `torrent_info` - The metadata information of the torrent to add.
     /// * `options` - The torrent options to use when adding the torrent.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self, torrent_info)))]
     pub async fn add_torrent_from_info(
         &self,
         torrent_info: TorrentMetadata,
@@ -599,6 +605,7 @@ impl FxSession {
     /// # Arguments
     ///
     /// * `handle` - The handle of the torrent to remove.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub async fn remove_torrent(&self, handle: &TorrentHandle) {
         self.inner.remove_torrent(handle).await
     }

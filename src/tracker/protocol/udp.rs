@@ -360,7 +360,7 @@ mod server {
             });
 
             let main_inner = inner.clone();
-            tokio::spawn(async move { main_inner.run().await });
+            spawn!("UdpServer::run", async move { main_inner.run().await });
 
             Ok(Self { inner })
         }

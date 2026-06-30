@@ -47,7 +47,9 @@ impl LocalServiceDiscovery {
         });
 
         let inner_main = inner.clone();
-        tokio::spawn(async move { inner_main.run().await });
+        spawn!("InnerLocalServiceDiscovery::run", async move {
+            inner_main.run().await
+        });
 
         Ok(Self { inner })
     }
