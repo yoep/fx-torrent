@@ -87,6 +87,11 @@ impl FileStream {
         }
     }
 
+    /// Returns the total number of bytes in the stream.
+    pub fn len(&self) -> usize {
+        self.file.len()
+    }
+
     /// Reset the stream progress back to the start.
     pub fn reset(&mut self) {
         self.cursor = 0;
@@ -105,6 +110,22 @@ impl FileStream {
         self.cursor = offset;
         self.state = StreamState::Idle;
         Ok(())
+    }
+
+    /// Returns the current byte range of the stream.
+    pub fn range(&self) -> Range<usize> {
+        self.cursor..self.file.len()
+    }
+
+    /// Returns the [Content-Range](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Range)
+    /// information in bytes for the stream.
+    pub fn content_range(&self) -> String {
+        format!(
+            "bytes {}-{}/{}",
+            self.cursor,
+            self.file.len() - 1,
+            self.file.len()
+        )
     }
 
     fn next_buffer(&self) -> Buffer {
@@ -258,6 +279,15 @@ impl Stream for FileStream {
             }
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.stream_buffer_len == 0 || self.len() == 0 {
+            return (0, Some(0));
+        }
+
+        let upper_bound = self.len().div_ceil(self.stream_buffer_len);
+        (0, Some(upper_bound))
+    }
 }
 
 impl Drop for FileStream {
@@ -301,7 +331,7 @@ mod tests {
     use crate::tests::helpers::wait_for_torrent_pieces;
     use crate::torrent_data::DataPool;
     use crate::{PieceIndex, TorrentCommand};
-    use futures::StreamExt;
+    use futures::{Stream, StreamExt};
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::time::timeout;
@@ -372,7 +402,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stream_reset() {
+    async fn test_len() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        copy_test_file(
+            temp_path,
+            "piece-1_30.iso",
+            Some("debian-12.4.0-amd64-DVD-1.iso"),
+        );
+        let torrent = torrent!(
+            "debian-udp.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![CreatePiecesAndFilesOperation::new().into(),],
+            vec![],
+            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            None
+        );
+
+        // wait for the pieces to be created
+        wait_for_torrent_pieces(&torrent).await;
+
+        // create the stream
+        let file = torrent.file(&0).await.unwrap();
+        let stream = torrent.stream(&file).await.unwrap();
+
+        let result = stream.len();
+        assert_eq!(file.len(), result, "expected the file length to match");
+    }
+
+    #[tokio::test]
+    async fn test_reset() {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
@@ -420,7 +482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stream_seek() {
+    async fn test_seek() {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
@@ -469,6 +531,130 @@ mod tests {
             stream.cursor,
             "expected the cursor to have been reset"
         );
+    }
+
+    #[tokio::test]
+    async fn test_range() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        copy_test_file(
+            temp_path,
+            "piece-1_30.iso",
+            Some("debian-12.4.0-amd64-DVD-1.iso"),
+        );
+        let torrent = torrent!(
+            "debian-udp.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![CreatePiecesAndFilesOperation::new().into(),],
+            vec![],
+            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            None
+        );
+
+        // wait for the pieces to be created
+        wait_for_torrent_pieces(&torrent).await;
+
+        // create the stream
+        let file = torrent.file(&0).await.unwrap();
+        let mut stream = torrent.stream(&file).await.unwrap();
+
+        // seek an offset within the stream
+        let offset = stream.stream_buffer_len * 5;
+        stream.seek(offset).unwrap();
+        let result = stream.range();
+        assert_eq!(
+            offset..file.len(),
+            result,
+            "expected the stream range to match"
+        );
+
+        // reset the stream
+        stream.reset();
+        let result = stream.range();
+        assert_eq!(0..file.len(), result, "expected the stream range to match");
+    }
+
+    #[tokio::test]
+    async fn test_content_range() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        copy_test_file(
+            temp_path,
+            "piece-1_30.iso",
+            Some("debian-12.4.0-amd64-DVD-1.iso"),
+        );
+        let torrent = torrent!(
+            "debian-udp.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![CreatePiecesAndFilesOperation::new().into(),],
+            vec![],
+            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            None
+        );
+
+        // wait for the pieces to be created
+        wait_for_torrent_pieces(&torrent).await;
+
+        // create the stream
+        let file = torrent.file(&0).await.unwrap();
+        let mut stream = torrent.stream(&file).await.unwrap();
+
+        // seek an offset within the stream
+        let offset = stream.stream_buffer_len * 9;
+        stream.seek(offset).unwrap();
+        let result = stream.content_range();
+        assert_eq!(
+            format!("bytes {}-{}/{}", offset, file.len() - 1, file.len()),
+            result,
+            "expected the stream range to match"
+        );
+
+        // reset the stream
+        stream.reset();
+        let result = stream.content_range();
+        assert_eq!(
+            format!("bytes 0-{}/{}", file.len() - 1, file.len()),
+            result,
+            "expected the stream range to match"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_size_hint() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        copy_test_file(
+            temp_path,
+            "piece-1_30.iso",
+            Some("debian-12.4.0-amd64-DVD-1.iso"),
+        );
+        let torrent = torrent!(
+            "debian-udp.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![CreatePiecesAndFilesOperation::new().into(),],
+            vec![],
+            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            None
+        );
+
+        // wait for the pieces to be created
+        wait_for_torrent_pieces(&torrent).await;
+
+        // create the stream
+        let file = torrent.file(&0).await.unwrap();
+        let stream = torrent.stream(&file).await.unwrap();
+
+        let result = stream.size_hint();
+        assert_eq!((0, Some(15237)), result, "expected the size hint to match");
     }
 
     async fn piece_completed(

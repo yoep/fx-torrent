@@ -67,7 +67,7 @@ impl TcpPeerDiscovery {
         });
 
         let inner_loop = inner.clone();
-        tokio::spawn(async move {
+        spawn!("TcpPeerDiscovery::run", async move {
             inner_loop.run(sender, sockets).await;
         });
 

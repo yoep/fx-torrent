@@ -111,7 +111,7 @@ impl TrackersOperation {
             context.callbacks().clone(),
         );
         let total_entries = entries.len();
-        tokio::spawn(async move {
+        spawn!("TrackersOperation::add_trackers", async move {
             Self::add_trackers(torrent, entries, tracker).await;
         });
 

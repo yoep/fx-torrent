@@ -69,7 +69,7 @@ impl UtpPeerDiscovery {
         });
 
         let inner_main_loop = inner.clone();
-        tokio::spawn(async move {
+        spawn!("UtpPeerDiscovery::run", async move {
             inner_main_loop.run(sender).await;
         });
 

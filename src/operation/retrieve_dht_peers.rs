@@ -107,21 +107,22 @@ impl DhtPeersOperation {
             context.callbacks().clone(),
         );
         let timeout = self.retrieve_timeout;
-        self.active_tasks.push(tokio::spawn(async move {
-            let result = dht
-                .get_peers(&info_hash, 5, timeout)
-                .await
-                .map_err(|_| Error::Timeout);
-            match result {
-                Ok(peers) => {
-                    debug!("Torrent {} discovered {} DHT peers", torrent, peers.len());
-                    torrent.add_peers(peers).await;
+        self.active_tasks
+            .push(spawn!("DhtPeersOperation::retrieve_peers", async move {
+                let result = dht
+                    .get_peers(&info_hash, 5, timeout)
+                    .await
+                    .map_err(|_| Error::Timeout);
+                match result {
+                    Ok(peers) => {
+                        debug!("Torrent {} discovered {} DHT peers", torrent, peers.len());
+                        torrent.add_peers(peers).await;
+                    }
+                    Err(err) => {
+                        debug!("Torrent {} failed to retrieve peers, {}", torrent, err);
+                    }
                 }
-                Err(err) => {
-                    debug!("Torrent {} failed to retrieve peers, {}", torrent, err);
-                }
-            }
-        }));
+            }));
 
         self.last_executed = Some(Instant::now());
     }

@@ -243,6 +243,11 @@ impl FxPiecePicker {
         };
         let mut interested_pieces = self.interested_piece_blocks(&piece_bitfield);
         if interested_pieces.len() == 0 {
+            trace!(
+                "Piece picker {} found no interested pieces for peer {}",
+                self,
+                peer
+            );
             return;
         }
 

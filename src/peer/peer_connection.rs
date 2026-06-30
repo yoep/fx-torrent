@@ -40,7 +40,7 @@ impl PeerConnection {
             metrics,
             cancellation_token.clone(),
         );
-        tokio::spawn(async move { reader.run().await });
+        spawn!("PeerReader::run", async move { reader.run().await });
 
         Self::Tcp(InnerConnection::<TcpStream> {
             id,
@@ -66,7 +66,7 @@ impl PeerConnection {
             metrics,
             cancellation_token.clone(),
         );
-        tokio::spawn(async move { reader.run().await });
+        spawn!("PeerReader::run", async move { reader.run().await });
 
         Self::Utp(InnerConnection::<UtpStream> {
             id,

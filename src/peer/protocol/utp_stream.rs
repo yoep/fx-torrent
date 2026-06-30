@@ -90,7 +90,7 @@ impl UtpStream {
         let read_buffer = inner.read_buffer.clone();
         let cancellation_token = inner.cancellation_token.clone();
 
-        tokio::spawn(async move {
+        spawn!("UtpStream::run", async move {
             inner.run(message_receiver, receiver).await;
         });
 
@@ -130,7 +130,7 @@ impl UtpStream {
         let read_buffer = inner.read_buffer.clone();
         let cancellation_token = inner.cancellation_token.clone();
 
-        tokio::spawn(async move {
+        spawn!("UtpStream::run", async move {
             inner.run(message_receiver, receiver).await;
         });
 

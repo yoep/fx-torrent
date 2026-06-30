@@ -121,34 +121,37 @@ impl MetadataOperation {
             torrent.callbacks().clone(),
         );
         let timeout = self.retrieve_timeout;
-        self.active_tasks.push(tokio::spawn(async move {
-            trace!("Torrent {} retrieving metadata from DHT network", torrent);
-            let result = dht
-                .get::<TorrentMetadataInfo>(info_hash.short_info_hash_bytes(), timeout, 5)
-                .await;
+        self.active_tasks.push(spawn!(
+            "MetadataOperation::retrieve_dht_metadata",
+            async move {
+                trace!("Torrent {} retrieving metadata from DHT network", torrent);
+                let result = dht
+                    .get::<TorrentMetadataInfo>(info_hash.short_info_hash_bytes(), timeout, 5)
+                    .await;
 
-            match result {
-                Ok(Some(metadata)) => {
-                    torrent.set_metadata(metadata).await;
-                    info!(
-                        "Torrent {} DHT network retrieved metadata for {}",
-                        torrent, info_hash
-                    );
-                }
-                Ok(None) => {
-                    debug!(
-                        "Torrent {} DHT network couldn't find metadata for {}",
-                        torrent, info_hash
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "Torrent {} DHT network failed to retrieve metadata for {}, {}",
-                        torrent, info_hash, e
-                    );
-                }
-            };
-        }));
+                match result {
+                    Ok(Some(metadata)) => {
+                        torrent.set_metadata(metadata).await;
+                        info!(
+                            "Torrent {} DHT network retrieved metadata for {}",
+                            torrent, info_hash
+                        );
+                    }
+                    Ok(None) => {
+                        debug!(
+                            "Torrent {} DHT network couldn't find metadata for {}",
+                            torrent, info_hash
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Torrent {} DHT network failed to retrieve metadata for {}, {}",
+                            torrent, info_hash, e
+                        );
+                    }
+                };
+            }
+        ));
     }
 
     #[cfg(not(feature = "dht"))]

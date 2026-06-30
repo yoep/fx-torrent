@@ -511,7 +511,7 @@ impl Torrent {
             cancellation_token: context.cancellation_token.clone(),
         };
 
-        tokio::spawn(async move {
+        spawn!("TorrentContext::run", async move {
             context
                 .run(operations, command_receiver, peer_discoveries)
                 .await;
@@ -751,11 +751,7 @@ impl Torrent {
             .await;
     }
 
-    /// Get if the given piece index has completed downloading, validating, and written to the storage.
-    ///
-    /// # Returns
-    ///
-    /// Returns true if the piece has been downloaded, validated, and written to storage, else false.
+    /// Returns `true` if the piece index has been downloaded, validated, and written to storage.
     pub async fn has_piece(&self, piece: &PieceIndex) -> bool {
         self.inner
             .sender

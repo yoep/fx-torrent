@@ -127,7 +127,7 @@ impl FileValidationOperation {
 
         let (tx, rx) = oneshot::channel();
         self.ready_signal = Some(rx);
-        tokio::spawn(async move {
+        spawn!("ValidateFilesOperation::validate_files", async move {
             Self::run_validation(
                 torrent,
                 storage,
