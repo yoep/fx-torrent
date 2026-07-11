@@ -473,7 +473,7 @@ mod tests {
     use super::*;
     use crate::peer;
     use crate::peer::extension::{DontHaveExtension, MetadataExtension};
-    use crate::peer::{MockDiscovery, PeerDiscovery};
+    use crate::peer::{ConnectionProtocol, MockDiscovery, PeerDiscovery};
     use std::net::Ipv4Addr;
     use tempfile::tempdir;
     use tokio::time;
@@ -569,6 +569,9 @@ mod tests {
                 "timeout",
             )))
         });
+        dialer
+            .expect_protocol()
+            .return_const(ConnectionProtocol::Tcp);
         let dialers: Vec<PeerDiscovery> = vec![dialer.into()];
         let (mut context, mut receiver) = torrent_context!(
             "debian.torrent",

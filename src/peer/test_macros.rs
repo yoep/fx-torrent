@@ -74,7 +74,7 @@ macro_rules! peer_context_pair {
         let torrent: &InnerTorrent = $torrent;
         let extensions: &[PeerExtension] = $extensions;
 
-        peer_context_pair!($torrent, $torrent, extensions, extensions)
+        peer_context_pair!(torrent, torrent, extensions, extensions)
     }};
     ($incoming:expr, $outgoing:expr, $incoming_extensions:expr, $outgoing_Extensions:expr) => {{
         use crate::peer::extension::PeerExtension;

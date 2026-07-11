@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn test_discovery_close() {
         let mut discovery = MockDiscovery::new();
-        discovery.expect_close().times(1);
+        discovery.expect_close().times(1).return_const(());
         let discovery: PeerDiscovery = discovery.into();
 
         discovery.close();
