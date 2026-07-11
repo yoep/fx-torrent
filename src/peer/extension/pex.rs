@@ -448,6 +448,8 @@ mod tests {
         let (source, in_between) = tcp_peer_pair!(
             &source_torrent,
             &in_between_torrent,
+            vec![PexExtension::new(Duration::from_secs(1)).into()],
+            vec![PexExtension::new(Duration::from_secs(1)).into()],
             ProtocolExtensionFlags::LTEP
         );
         source_torrent.inner.peer_connected(source.into()).await;
@@ -465,6 +467,8 @@ mod tests {
         let (in_between, target) = tcp_peer_pair!(
             &in_between_torrent,
             &target_torrent,
+            vec![PexExtension::new(Duration::from_secs(1)).into()],
+            vec![PexExtension::new(Duration::from_secs(1)).into()],
             ProtocolExtensionFlags::LTEP
         );
         in_between_torrent

@@ -2676,7 +2676,7 @@ mod tests {
                 vec![],
                 vec![]
             );
-            let (outgoing, incoming) = tcp_peer_pair!(&torrent);
+            let (outgoing, incoming) = tcp_peer_pair!(&torrent, vec![]);
 
             let result = incoming.state().await;
             assert_ne!(PeerState::Error, result);
@@ -2905,8 +2905,13 @@ mod tests {
         source.pause().await;
 
         // create the peer pair
-        let (_source_peer, target_peer) =
-            tcp_peer_pair!(&source, &target, ProtocolExtensionFlags::LTEP);
+        let (_source_peer, target_peer) = tcp_peer_pair!(
+            &source,
+            &target,
+            vec![],
+            vec![],
+            ProtocolExtensionFlags::LTEP
+        );
 
         // check if the target peer has wanted pieces from the source
         // as the bitfield is sent after the handshake, it might not have been received yet
@@ -2930,7 +2935,7 @@ mod tests {
             vec![CreatePiecesAndFilesOperation::new().into()],
             vec![]
         );
-        let (outgoing, _incoming) = tcp_peer_pair!(&torrent);
+        let (outgoing, _incoming) = tcp_peer_pair!(&torrent, vec![]);
 
         // create the pieces for the torrent
         wait_for_torrent_pieces(&torrent).await;

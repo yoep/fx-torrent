@@ -312,17 +312,18 @@ macro_rules! torrent {
 
 /// Create a new pair of TCP peers.
 macro_rules! tcp_peer_pair {
-    ($torrent:expr) => {{
-        tcp_peer_pair!($torrent, $torrent, crate::peer::ProtocolExtensionFlags::none())
+    ($torrent:expr, $extensions:expr) => {{
+        tcp_peer_pair!($torrent, $extensions, crate::peer::ProtocolExtensionFlags::none())
     }};
-    ($torrent:expr, $protocol_extensions:expr) => {{
-        tcp_peer_pair!($torrent, $torrent, $protocol_extensions)
+    ($torrent:expr, $extensions:expr, $protocol_extensions:expr) => {{
+        tcp_peer_pair!($torrent, $torrent, $extensions, $extensions, $protocol_extensions)
     }};
-    ($incoming_torrent:expr, $outgoing_torrent:expr, $protocol_extensions:expr) => {{
+    ($incoming_torrent:expr, $outgoing_torrent:expr, $incoming_extensions:expr, $outgoing_extensions:expr, $protocol_extensions:expr) => {{
         use crate::Torrent;
         use crate::peer::BitTorrentPeer;
         use crate::peer::PeerId;
         use crate::peer::ProtocolExtensionFlags;
+        use crate::peer::extension::PeerExtension;
         use std::net::Ipv4Addr;
         use std::time::Duration;
         use tokio::net::{TcpListener, TcpStream};
@@ -330,6 +331,8 @@ macro_rules! tcp_peer_pair {
 
         let incoming_torrent: &Torrent = $incoming_torrent;
         let outgoing_torrent: &Torrent = $outgoing_torrent;
+        let incoming_extensions: Vec<PeerExtension> = $incoming_extensions;
+        let outgoing_extensions: Vec<PeerExtension> = $outgoing_extensions;
         let protocol_extensions: ProtocolExtensionFlags = $protocol_extensions;
 
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -346,7 +349,7 @@ macro_rules! tcp_peer_pair {
             incoming_torrent.inner.clone(),
             incoming_torrent.inner.data_pool().await.unwrap(),
             protocol_extensions,
-            vec![],
+            incoming_extensions,
             Duration::from_secs(2),
         );
         let (tx, rx) = oneshot::channel();
@@ -362,7 +365,7 @@ macro_rules! tcp_peer_pair {
             outgoing_torrent.inner.clone(),
             outgoing_torrent.inner.data_pool().await.unwrap(),
             protocol_extensions,
-            vec![],
+            outgoing_extensions,
             Duration::from_secs(2),
         ).await.expect("expected the outgoing peer to have been created");
 
