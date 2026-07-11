@@ -1368,18 +1368,6 @@ impl InnerTorrent {
             .await
     }
 
-    /// Returns the extensions of the torrent.
-    pub async fn extensions(&self, protocol: ConnectionProtocol) -> Result<Vec<PeerExtension>> {
-        Ok(self
-            .sender
-            .send(|tx| TorrentCommand::Extensions {
-                protocol,
-                response: tx,
-            })
-            .await
-            .await?)
-    }
-
     /// Request the torrent piece picker to pick pieces for the given peer.
     pub async fn pick_pieces(&self, peer: &PeerHandle) {
         self.sender
@@ -1729,10 +1717,6 @@ pub enum TorrentCommand {
     },
     ProtocolExtensions {
         response: Reply<ProtocolExtensionFlags>,
-    },
-    Extensions {
-        protocol: ConnectionProtocol,
-        response: Reply<Vec<PeerExtension>>,
     },
     Bitfield {
         response: Reply<BitVec>,
@@ -3038,9 +3022,6 @@ impl TorrentContext {
             TorrentCommand::ProtocolExtensions { response } => {
                 response.send(self.protocol_extensions())
             }
-            TorrentCommand::Extensions { protocol, response } => {
-                response.send(self.extensions(protocol))
-            }
             TorrentCommand::Bitfield { response } => response.send(self.data_pool.bitfield().await),
             TorrentCommand::PieceBlockReceived { peer, block, data } => {
                 self.on_piece_block_received(peer, block, data).await
@@ -3072,6 +3053,7 @@ impl TorrentContext {
         let peer_id = self.peer_id;
         let data_pool = self.data_pool.clone();
         let protocol_extensions = self.protocol_extensions();
+        let extensions = self.extensions(entry.protocol());
         let command_sender = self.command_sender.clone();
         let callbacks = self.callbacks.clone();
         tokio::spawn(async move {
@@ -3086,6 +3068,7 @@ impl TorrentContext {
                 },
                 data_pool.clone(),
                 protocol_extensions,
+                extensions,
                 timeout,
             )
             .await

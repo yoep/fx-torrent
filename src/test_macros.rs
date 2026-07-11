@@ -323,7 +323,7 @@ macro_rules! tcp_peer_pair {
         use crate::peer::BitTorrentPeer;
         use crate::peer::PeerId;
         use crate::peer::ProtocolExtensionFlags;
-        use std::net::{Ipv4Addr};
+        use std::net::Ipv4Addr;
         use std::time::Duration;
         use tokio::net::{TcpListener, TcpStream};
         use tokio::sync::oneshot;
@@ -346,6 +346,7 @@ macro_rules! tcp_peer_pair {
             incoming_torrent.inner.clone(),
             incoming_torrent.inner.data_pool().await.unwrap(),
             protocol_extensions,
+            vec![],
             Duration::from_secs(2),
         );
         let (tx, rx) = oneshot::channel();
@@ -361,6 +362,7 @@ macro_rules! tcp_peer_pair {
             outgoing_torrent.inner.clone(),
             outgoing_torrent.inner.data_pool().await.unwrap(),
             protocol_extensions,
+            vec![],
             Duration::from_secs(2),
         ).await.expect("expected the outgoing peer to have been created");
 
@@ -371,12 +373,12 @@ macro_rules! tcp_peer_pair {
 
 /// Create a new pair of uTP peers.
 macro_rules! utp_peer_pair {
-    ($torrent:expr) => {{
+    ($torrent:expr, $extensions:expr) => {{
         use crate::peer::ProtocolExtensionFlags;
 
-        utp_peer_pair!($torrent, $torrent, ProtocolExtensionFlags::none())
+        utp_peer_pair!($torrent, $torrent, $extensions, $extensions, ProtocolExtensionFlags::none())
     }};
-    ($incoming_torrent:expr, $outgoing_torrent:expr, $protocol_extensions:expr) => {{
+    ($incoming_torrent:expr, $outgoing_torrent:expr, $incoming_extensions:expr, $outgoing_extensions:expr, $protocol_extensions:expr) => {{
         use core::net::{SocketAddr, Ipv4Addr};
 
         let incoming_socket = crate::peer::protocol::UtpSocket::bind(
@@ -391,6 +393,8 @@ macro_rules! utp_peer_pair {
         let pair = utp_peer_pair!(
             $incoming_torrent,
             $outgoing_torrent,
+            $incoming_extensions,
+            $outgoing_extensions,
             $protocol_extensions,
             &incoming_socket,
             &outgoing_socket
@@ -398,8 +402,9 @@ macro_rules! utp_peer_pair {
 
         (pair.0, pair.1, incoming_socket, outgoing_socket)
     }};
-    ($incoming_torrent:expr, $outgoing_torrent:expr, $protocol_extensions:expr, $in_socket:expr, $out_socket:expr) => {{
+    ($incoming_torrent:expr, $outgoing_torrent:expr, $incoming_extensions:expr, $outgoing_extensions:expr, $protocol_extensions:expr, $in_socket:expr, $out_socket:expr) => {{
         use crate::Torrent;
+        use crate::peer::extension::PeerExtension;
         use crate::peer::protocol::UtpSocket;
         use crate::peer::{BitTorrentPeer, PeerId, ProtocolExtensionFlags};
         use std::time::Duration;
@@ -407,6 +412,8 @@ macro_rules! utp_peer_pair {
 
         let incoming_torrent: &Torrent = $incoming_torrent;
         let outgoing_torrent: &Torrent = $outgoing_torrent;
+        let incoming_extensions: Vec<PeerExtension> = $incoming_extensions;
+        let outgoing_extensions: Vec<PeerExtension> = $outgoing_extensions;
         let protocol_extensions: ProtocolExtensionFlags = $protocol_extensions;
 
         let incoming_socket: &UtpSocket = $in_socket;
@@ -430,6 +437,7 @@ macro_rules! utp_peer_pair {
             incoming_torrent.inner.clone(),
             incoming_torrent.inner.data_pool().await.unwrap(),
             protocol_extensions,
+            incoming_extensions,
             Duration::from_secs(2),
         );
         let (tx, rx) = oneshot::channel();
@@ -445,6 +453,7 @@ macro_rules! utp_peer_pair {
             outgoing_torrent.inner.clone(),
             outgoing_torrent.inner.data_pool().await.unwrap(),
             protocol_extensions,
+            outgoing_extensions,
             Duration::from_secs(2),
         ).await.expect("expected the outgoing peer to have been created");
 

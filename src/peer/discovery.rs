@@ -1,5 +1,7 @@
+use crate::peer::extension::PeerExtension;
 use crate::peer::{
-    Peer, PeerId, PeerStream, ProtocolExtensionFlags, Result, TcpPeerDiscovery, UtpPeerDiscovery,
+    ConnectionProtocol, Peer, PeerId, PeerStream, ProtocolExtensionFlags, Result, TcpPeerDiscovery,
+    UtpPeerDiscovery,
 };
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
@@ -18,6 +20,16 @@ pub struct PeerEntry {
     pub socket_addr: SocketAddr,
     /// The peer incoming tcp stream
     pub stream: PeerStream,
+}
+
+impl PeerEntry {
+    /// Returns the connection protocol of the peer entry.
+    pub fn protocol(&self) -> ConnectionProtocol {
+        match &self.stream {
+            PeerStream::Tcp(_) => ConnectionProtocol::Tcp,
+            PeerStream::Utp(_) => ConnectionProtocol::Utp,
+        }
+    }
 }
 
 impl PartialEq for PeerStream {
@@ -48,6 +60,15 @@ impl PeerDiscovery {
         }
     }
 
+    /// Returns the underlying protocol of the peer discovery.
+    pub fn protocol(&self) -> ConnectionProtocol {
+        match self {
+            PeerDiscovery::Tcp(_) => ConnectionProtocol::Tcp,
+            PeerDiscovery::Utp(_) => ConnectionProtocol::Utp,
+            PeerDiscovery::Other(discovery) => discovery.protocol(),
+        }
+    }
+
     /// Try to dial (_create outgoing connection with_) to the target peer address.
     pub async fn dial(
         &self,
@@ -56,6 +77,7 @@ impl PeerDiscovery {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
+        extensions: Vec<PeerExtension>,
         connection_timeout: Duration,
     ) -> Result<Peer> {
         match self {
@@ -67,6 +89,7 @@ impl PeerDiscovery {
                         torrent,
                         data_pool,
                         protocol_extensions,
+                        extensions,
                         connection_timeout,
                     )
                     .await
@@ -79,6 +102,7 @@ impl PeerDiscovery {
                         torrent,
                         data_pool,
                         protocol_extensions,
+                        extensions,
                         connection_timeout,
                     )
                     .await
@@ -91,6 +115,7 @@ impl PeerDiscovery {
                         torrent,
                         data_pool,
                         protocol_extensions,
+                        extensions,
                         connection_timeout,
                     )
                     .await
@@ -145,6 +170,9 @@ pub trait Discovery: Debug + Send + Sync {
     /// Get the address on which this peer listener is listening on.
     fn addr(&self) -> &SocketAddr;
 
+    /// Returns the underlying protocol of the peer discovery.
+    fn protocol(&self) -> ConnectionProtocol;
+
     /// Tries to dial (_create outgoing connection with_) the given peer address.
     ///
     /// # Arguments
@@ -154,6 +182,7 @@ pub trait Discovery: Debug + Send + Sync {
     /// * `torrent` - The torrent to use for the connection.
     /// * `data_pool` - The torrent data pool to use for the connection.
     /// * `protocol_extensions` - The peer protocol extensions that should be enabled for the connection. (BEP4)
+    /// * `extensions` - The peer extensions that should be enabled for the connection. (BEP10)
     /// * `connection_timeout` - The timeout of a peer connection.
     ///
     /// # Returns
@@ -166,6 +195,7 @@ pub trait Discovery: Debug + Send + Sync {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
+        extensions: Vec<PeerExtension>,
         connection_timeout: Duration,
     ) -> Result<Peer>;
 
@@ -194,6 +224,7 @@ pub mod mock {
         #[async_trait]
         impl Discovery for Discovery {
             fn addr(&self) -> &SocketAddr;
+            fn protocol(&self) -> ConnectionProtocol;
             async fn dial(
                 &self,
                 peer_id: PeerId,
@@ -201,6 +232,7 @@ pub mod mock {
                 torrent: InnerTorrent,
                 data_pool: DataPool,
                 protocol_extensions: ProtocolExtensionFlags,
+                extensions: Vec<PeerExtension>,
                 connection_timeout: Duration,
             ) -> Result<Peer>;
             async fn recv(&self) -> Option<PeerEntry>;
@@ -212,47 +244,37 @@ pub mod mock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer::tests::MockPeer;
 
-    #[derive(Debug)]
-    struct TestDiscovery {
-        addr: SocketAddr,
-    }
+    #[test]
+    fn test_discovery_addr() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 6881));
+        let mut discovery = MockDiscovery::new();
+        discovery.expect_addr().times(1).return_const(addr);
+        let discovery: PeerDiscovery = discovery.into();
 
-    #[async_trait]
-    impl Discovery for TestDiscovery {
-        fn addr(&self) -> &SocketAddr {
-            &self.addr
-        }
-
-        async fn dial(
-            &self,
-            _: PeerId,
-            _: SocketAddr,
-            _: InnerTorrent,
-            _: DataPool,
-            _: ProtocolExtensionFlags,
-            _: Duration,
-        ) -> Result<Peer> {
-            Ok(MockPeer::new().into())
-        }
-
-        async fn recv(&self) -> Option<PeerEntry> {
-            None
-        }
-
-        fn close(&self) {
-            // no-op
-        }
+        let result = discovery.addr();
+        assert_eq!(&addr, result);
     }
 
     #[test]
-    fn test_from_custom_peer_discovery() {
-        let addr = SocketAddr::from(([127, 0, 0, 1], 6881));
-        let discovery = TestDiscovery { addr };
-
+    fn test_discovery_protocol() {
+        let mut discovery = MockDiscovery::new();
+        discovery
+            .expect_protocol()
+            .times(1)
+            .return_const(ConnectionProtocol::Tcp);
         let discovery: PeerDiscovery = discovery.into();
 
-        assert_eq!(discovery.addr(), &addr);
+        let result = discovery.protocol();
+        assert_eq!(ConnectionProtocol::Tcp, result);
+    }
+
+    #[test]
+    fn test_discovery_close() {
+        let mut discovery = MockDiscovery::new();
+        discovery.expect_close().times(1);
+        let discovery: PeerDiscovery = discovery.into();
+
+        discovery.close();
     }
 }

@@ -306,11 +306,19 @@ impl ConnectPeersOperation {
             context.callbacks().clone(),
         );
         let data_pool = context.data_pool().clone();
-        let dialers = dialers.iter().cloned().collect_vec();
+        let dialers = dialers
+            .iter()
+            .map(|dialer| {
+                let protocol = dialer.protocol();
+                let extensions = context.extensions(protocol);
+
+                (dialer.clone(), extensions)
+            })
+            .collect_vec();
         let command_sender = context.command_sender().clone();
         self.in_flight.spawn(async move {
             let mut peer = None;
-            for dialer in dialers {
+            for (dialer, extensions) in dialers {
                 match dialer
                     .dial(
                         peer_id,
@@ -318,6 +326,7 @@ impl ConnectPeersOperation {
                         torrent.clone(),
                         data_pool.clone(),
                         protocol_extensions,
+                        extensions,
                         peer_connection_timeout,
                     )
                     .await
@@ -554,7 +563,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let mut dialer = MockDiscovery::new();
-        dialer.expect_dial().returning(|_, _, _, _, _, _| {
+        dialer.expect_dial().returning(|_, _, _, _, _, _, _| {
             Err(peer::Error::Io(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "timeout",
