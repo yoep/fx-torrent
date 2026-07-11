@@ -67,21 +67,14 @@ macro_rules! create_utp_stream_pair {
 
 /// Create a new peer context instance.
 macro_rules! peer_context_pair {
-    ($torrent:expr) => {{
+    ($torrent:expr, $extensions:expr) => {{
         use crate::peer::extension::PeerExtension;
-        use crate::peer::ConnectionProtocol;
         use crate::InnerTorrent;
 
         let torrent: &InnerTorrent = $torrent;
-        let extensions: Vec<PeerExtension> =
-            torrent.extensions(ConnectionProtocol::Tcp).await.unwrap();
+        let extensions: &[PeerExtension] = $extensions;
 
-        peer_context_pair!(
-            $torrent,
-            $torrent,
-            extensions.as_slice(),
-            extensions.as_slice()
-        )
+        peer_context_pair!(torrent, torrent, extensions, extensions)
     }};
     ($incoming:expr, $outgoing:expr, $incoming_extensions:expr, $outgoing_Extensions:expr) => {{
         use crate::peer::extension::PeerExtension;

@@ -1,3 +1,4 @@
+use crate::peer::extension::PeerExtension;
 use crate::peer::{
     BitTorrentPeer, Error, Peer, PeerEntry, PeerId, PeerStream, ProtocolExtensionFlags, Result,
 };
@@ -87,6 +88,7 @@ impl TcpPeerDiscovery {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
+        extensions: Vec<PeerExtension>,
         connection_timeout: Duration,
     ) -> Result<Peer> {
         select! {
@@ -101,6 +103,7 @@ impl TcpPeerDiscovery {
                     torrent,
                     data_pool,
                     protocol_extensions,
+                    extensions,
                     connection_timeout
                 ).await,
         }
@@ -124,6 +127,7 @@ impl TcpPeerDiscovery {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
+        extensions: Vec<PeerExtension>,
         connection_timeout: Duration,
     ) -> Result<Peer> {
         Ok(BitTorrentPeer::new_outbound(
@@ -133,6 +137,7 @@ impl TcpPeerDiscovery {
             torrent,
             data_pool,
             protocol_extensions,
+            extensions,
             connection_timeout,
         )
         .await?
@@ -287,6 +292,7 @@ mod tests {
                 torrent.inner.clone(),
                 data_pool,
                 protocol_extensions,
+                vec![],
                 Duration::from_secs(1),
             )
         )

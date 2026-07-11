@@ -107,6 +107,7 @@ pub mod tests {
                 incoming_context,
                 incoming_data_pool,
                 protocols,
+                vec![],
                 Duration::from_secs(50),
             )
             .await
@@ -121,6 +122,7 @@ pub mod tests {
             outgoing_context,
             outgoing_data_pool,
             protocols,
+            vec![],
             Duration::from_secs(50),
         )
         .await

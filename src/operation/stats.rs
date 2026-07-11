@@ -170,7 +170,7 @@ mod tests {
             vec![],
             None
         );
-        let (source, _target) = tcp_peer_pair!(&torrent);
+        let (source, _target) = tcp_peer_pair!(&torrent, vec![]);
         let mut operation = StatsOperation::new();
 
         // initialize the operation

@@ -290,6 +290,7 @@ impl BitTorrentPeer {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
+        extensions: Vec<PeerExtension>,
         timeout: Duration,
     ) -> Result<Self> {
         trace!(
@@ -315,6 +316,7 @@ impl BitTorrentPeer {
             torrent,
             data_pool,
             protocol_extensions,
+            extensions,
             metrics,
             timeout,
         )
@@ -329,6 +331,7 @@ impl BitTorrentPeer {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
+        extensions: Vec<PeerExtension>,
         timeout: Duration,
     ) -> Result<Self> {
         let metrics = Metrics::new();
@@ -358,6 +361,7 @@ impl BitTorrentPeer {
                 torrent,
                 data_pool,
                 protocol_extensions,
+                extensions,
                 metrics,
                 timeout,
             ) => result
@@ -686,6 +690,7 @@ impl BitTorrentPeer {
         torrent: InnerTorrent,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
+        extensions: Vec<PeerExtension>,
         metrics: Metrics,
         timeout: Duration,
     ) -> Result<Self> {
@@ -693,10 +698,6 @@ impl BitTorrentPeer {
         metrics.client_choked.set(true);
         metrics.remote_choked.set(true);
 
-        let extensions = match torrent.extensions(connection.protocol()).await {
-            Ok(extensions) => extensions,
-            Err(_) => return Err(Error::Closed),
-        };
         let torrent_event_receiver = torrent.subscribe();
         let mut context = PeerContext::new(
             peer_id,
@@ -2675,7 +2676,7 @@ mod tests {
                 vec![],
                 vec![]
             );
-            let (outgoing, incoming) = tcp_peer_pair!(&torrent);
+            let (outgoing, incoming) = tcp_peer_pair!(&torrent, vec![]);
 
             let result = incoming.state().await;
             assert_ne!(PeerState::Error, result);
@@ -2781,6 +2782,7 @@ mod tests {
                     inner,
                     data_pool,
                     ProtocolExtensionFlags::none(),
+                    vec![],
                     Duration::from_secs(5),
                 )
                 .await
@@ -2903,8 +2905,13 @@ mod tests {
         source.pause().await;
 
         // create the peer pair
-        let (_source_peer, target_peer) =
-            tcp_peer_pair!(&source, &target, ProtocolExtensionFlags::LTEP);
+        let (_source_peer, target_peer) = tcp_peer_pair!(
+            &source,
+            &target,
+            vec![],
+            vec![],
+            ProtocolExtensionFlags::LTEP
+        );
 
         // check if the target peer has wanted pieces from the source
         // as the bitfield is sent after the handshake, it might not have been received yet
@@ -2928,7 +2935,7 @@ mod tests {
             vec![CreatePiecesAndFilesOperation::new().into()],
             vec![]
         );
-        let (outgoing, _incoming) = tcp_peer_pair!(&torrent);
+        let (outgoing, _incoming) = tcp_peer_pair!(&torrent, vec![]);
 
         // create the pieces for the torrent
         wait_for_torrent_pieces(&torrent).await;
@@ -2980,7 +2987,7 @@ mod tests {
                 |_| MemoryStorage::new().into(),
                 None
             );
-            let (mut peer, _target) = peer_context_pair!(&torrent.inner);
+            let (mut peer, _target) = peer_context_pair!(&torrent.inner, &[]);
 
             // update the target queue len when the download rate is 0
             peer.update_target_request_queue_len();
@@ -3017,7 +3024,7 @@ mod tests {
                 |_| MemoryStorage::new().into(),
                 None
             );
-            let (mut peer, _target) = peer_context_pair!(&torrent.inner);
+            let (mut peer, _target) = peer_context_pair!(&torrent.inner, &[]);
 
             // set the download rate to a ridiculously high value
             peer.metrics.bytes_in_useful.inc_by(100_000_000);

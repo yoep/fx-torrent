@@ -457,6 +457,8 @@ mod tests {
         let (source, target) = tcp_peer_pair!(
             &source_torrent,
             &target_torrent,
+            vec![MetadataExtension::new().into()],
+            vec![MetadataExtension::new().into()],
             ProtocolExtensionFlags::LTEP
         );
 

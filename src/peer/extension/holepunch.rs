@@ -436,6 +436,8 @@ mod tests {
             let (initiating_peer, relay_peer1, _in_socket, _out_socket) = utp_peer_pair!(
                 &initiating_torrent,
                 &relay_torrent,
+                vec![HolepunchExtension::new().into()],
+                vec![HolepunchExtension::new().into()],
                 ProtocolExtensionFlags::LTEP
             );
             initiating_torrent
@@ -477,6 +479,7 @@ mod tests {
                     relay_torrent.inner.clone(),
                     relay_data_pool,
                     ProtocolExtensionFlags::LTEP,
+                    vec![HolepunchExtension::new().into()],
                     Duration::from_millis(250),
                 )
                 .await
@@ -537,6 +540,8 @@ mod tests {
             let (initiating_peer, relay_peer1, _in_socket, _out_socket) = utp_peer_pair!(
                 &initiating_torrent,
                 &relay_torrent,
+                vec![HolepunchExtension::new().into()],
+                vec![HolepunchExtension::new().into()],
                 ProtocolExtensionFlags::LTEP
             );
             initiating_torrent
@@ -571,6 +576,7 @@ mod tests {
 
             // connect the relay torrent to the target torrent
             let relay_data_pool = relay_torrent.inner.data_pool().await.unwrap();
+            let extensions = vec![HolepunchExtension::new().into()];
             let peer = relay_discovery
                 .dial(
                     PeerId::new(),
@@ -578,6 +584,7 @@ mod tests {
                     relay_torrent.inner.clone(),
                     relay_data_pool,
                     ProtocolExtensionFlags::LTEP,
+                    extensions,
                     Duration::from_millis(250),
                 )
                 .await

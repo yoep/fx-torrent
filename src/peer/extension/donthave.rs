@@ -61,7 +61,7 @@ mod tests {
             |_| MemoryStorage::new().into(),
             None
         );
-        let (mut incoming, _outgoing) = peer_context_pair!(&torrent.inner);
+        let (mut incoming, _outgoing) = peer_context_pair!(&torrent.inner, &[]);
         let extension = DontHaveExtension::new();
 
         // wait for the pieces to be created
