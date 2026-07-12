@@ -1,4 +1,4 @@
-use crate::peer::{ChokeState, Peer, PeerHandle, PeerState};
+use crate::peer::{ChokeState, Peer, PeerHandle};
 use crate::piece_picker::cache::PickerCache;
 use crate::piece_picker::strategy::Strategy;
 use crate::piece_picker::PickerOptions;
@@ -345,28 +345,10 @@ impl FxPiecePicker {
     pub async fn tick<'a, P: Iterator<Item = &'a Peer>>(&mut self, peers: P) {
         let start_time = Instant::now();
         for peer in peers {
-            let state = match timeout(Duration::from_millis(500), peer.state()).await {
-                Ok(state) => state,
-                Err(_) => {
-                    trace!(
-                        "Piece picker {} timed out waiting for peer {} state, skipping",
-                        self,
-                        peer
-                    );
-                    continue;
-                }
-            };
-            if matches!(
-                state,
-                PeerState::Handshake | PeerState::Error | PeerState::Closed
-            ) {
-                trace!(
-                    "Piece picker {} skipping peer {} in state {:?}",
-                    self,
-                    peer,
-                    state
-                );
-                continue;
+            let elapsed = start_time.elapsed();
+            if elapsed > Duration::from_secs(1) {
+                trace!("Piece picker {} has reached time-limit", self);
+                break;
             }
 
             self.pick_pieces(peer).await;

@@ -148,7 +148,6 @@ where
             .timeout
             .get_or_insert_with(|| Box::pin(sleep(RESPONSE_TIMEOUT)));
         if timeout.as_mut().poll(cx).is_ready() {
-            warn!("Channel detected potential deadlock");
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "potential channel deadlock",
