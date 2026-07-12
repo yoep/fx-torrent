@@ -5,6 +5,7 @@ use crate::peer::{
 };
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
+use crate::TorrentMetadata;
 use derive_more::Display;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -88,6 +89,7 @@ impl UtpPeerDiscovery {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         torrent: InnerTorrent,
+        metadata: TorrentMetadata,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
@@ -107,6 +109,7 @@ impl UtpPeerDiscovery {
                 peer_addr,
                 stream.into(),
                 torrent,
+                metadata,
                 data_pool,
                 protocol_extensions,
                 extensions,
@@ -285,6 +288,7 @@ mod tests {
                 PeerId::new(),
                 SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
                 torrent.inner.clone(),
+                torrent.inner.metadata().await.unwrap(),
                 torrent.inner.data_pool().await.unwrap(),
                 protocol_extensions,
                 vec![],

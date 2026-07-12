@@ -4,6 +4,7 @@ use crate::peer::{
 };
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
+use crate::TorrentMetadata;
 use derive_more::Display;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -86,6 +87,7 @@ impl TcpPeerDiscovery {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         torrent: InnerTorrent,
+        metadata: TorrentMetadata,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
@@ -101,6 +103,7 @@ impl TcpPeerDiscovery {
                     peer_addr,
                     stream?,
                     torrent,
+                metadata,
                     data_pool,
                     protocol_extensions,
                     extensions,
@@ -125,6 +128,7 @@ impl TcpPeerDiscovery {
         peer_addr: SocketAddr,
         stream: TcpStream,
         torrent: InnerTorrent,
+        metadata: TorrentMetadata,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
@@ -135,6 +139,7 @@ impl TcpPeerDiscovery {
             peer_addr,
             stream.into(),
             torrent,
+            metadata,
             data_pool,
             protocol_extensions,
             extensions,
@@ -278,6 +283,7 @@ mod tests {
             .expect("expected a new tcp peer dialer");
 
         // try to create an outgoing peer connection through the dialer
+        let metadata = torrent.inner.metadata().await.unwrap();
         let data_pool = timeout!(
             Duration::from_millis(100),
             torrent.inner.data_pool(),
@@ -290,6 +296,7 @@ mod tests {
                 PeerId::new(),
                 SocketAddr::from((Ipv4Addr::LOCALHOST, listener_port)),
                 torrent.inner.clone(),
+                metadata,
                 data_pool,
                 protocol_extensions,
                 vec![],

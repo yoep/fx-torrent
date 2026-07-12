@@ -5,6 +5,7 @@ use crate::peer::{
 };
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
+use crate::TorrentMetadata;
 use async_trait::async_trait;
 #[cfg(test)]
 pub use mock::*;
@@ -75,6 +76,7 @@ impl PeerDiscovery {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         torrent: InnerTorrent,
+        metadata: TorrentMetadata,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
@@ -87,6 +89,7 @@ impl PeerDiscovery {
                         peer_id,
                         peer_addr,
                         torrent,
+                        metadata,
                         data_pool,
                         protocol_extensions,
                         extensions,
@@ -100,6 +103,7 @@ impl PeerDiscovery {
                         peer_id,
                         peer_addr,
                         torrent,
+                        metadata,
                         data_pool,
                         protocol_extensions,
                         extensions,
@@ -113,6 +117,7 @@ impl PeerDiscovery {
                         peer_id,
                         peer_addr,
                         torrent,
+                        metadata,
                         data_pool,
                         protocol_extensions,
                         extensions,
@@ -180,6 +185,7 @@ pub trait Discovery: Debug + Send + Sync {
     /// * `peer_id` - The unique peer identifier of the torrent.
     /// * `peer_addr` - The address of the peer to dial.
     /// * `torrent` - The torrent to use for the connection.
+    /// * `metadata` - The current known metadata of the torrent.
     /// * `data_pool` - The torrent data pool to use for the connection.
     /// * `protocol_extensions` - The peer protocol extensions that should be enabled for the connection. (BEP4)
     /// * `extensions` - The peer extensions that should be enabled for the connection. (BEP10)
@@ -193,6 +199,7 @@ pub trait Discovery: Debug + Send + Sync {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         torrent: InnerTorrent,
+        metadata: TorrentMetadata,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
@@ -230,6 +237,7 @@ pub mod mock {
                 peer_id: PeerId,
                 peer_addr: SocketAddr,
                 torrent: InnerTorrent,
+                metadata: TorrentMetadata,
                 data_pool: DataPool,
                 protocol_extensions: ProtocolExtensionFlags,
                 extensions: Vec<PeerExtension>,
