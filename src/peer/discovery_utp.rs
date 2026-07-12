@@ -3,6 +3,7 @@ use crate::peer::protocol::{UtpSocket, UtpStream};
 use crate::peer::{
     BitTorrentPeer, Error, Peer, PeerEntry, PeerId, PeerStream, ProtocolExtensionFlags, Result,
 };
+use crate::storage::Storage;
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
 use crate::TorrentMetadata;
@@ -91,6 +92,7 @@ impl UtpPeerDiscovery {
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
+        storage: Storage,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
         connection_timeout: Duration,
@@ -111,6 +113,7 @@ impl UtpPeerDiscovery {
                 torrent,
                 metadata,
                 data_pool,
+                storage,
                 protocol_extensions,
                 extensions,
                 connection_timeout,
@@ -290,6 +293,7 @@ mod tests {
                 torrent.inner.clone(),
                 torrent.inner.metadata().await.unwrap(),
                 torrent.inner.data_pool().await.unwrap(),
+                torrent.inner.storage().await.unwrap(),
                 protocol_extensions,
                 vec![],
                 Duration::from_secs(2),

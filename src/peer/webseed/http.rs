@@ -9,7 +9,7 @@ use derive_more::Display;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use fx_handle::Handle;
 use itertools::Itertools;
-use log::debug;
+use log::{debug, warn};
 use percent_encoding::{percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use reqwest::redirect::Policy;
 use reqwest::Client;
@@ -116,8 +116,20 @@ impl HttpPeer {
     }
 
     /// Request one or more piece blocks from the remote peer.
-    pub async fn request(&self, blocks: &[PieceBlock]) -> Result<()> {
-        let metadata = self.inner.torrent.metadata().await?;
+    pub async fn request(&self, blocks: &[PieceBlock]) {
+        let metadata = match self.inner.torrent.metadata().await {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                warn!("Peer {} failed to retrieve metadata", self);
+                for block in blocks {
+                    self.inner
+                        .torrent
+                        .piece_block_rejected(&self.inner.handle, block)
+                        .await;
+                }
+                return;
+            }
+        };
         let requests = blocks
             .into_iter()
             .map(|block| (block.piece, block))
@@ -125,10 +137,23 @@ impl HttpPeer {
 
         // TODO: move the actual requests to a separate task with download queue
         for (piece, blocks) in requests {
-            self.inner.request_piece(&piece, blocks, &metadata).await?;
+            if let Err(e) = self
+                .inner
+                .request_piece(&piece, blocks.clone(), &metadata)
+                .await
+            {
+                debug!(
+                    "Peer {} failed to request piece {} blocks, {}",
+                    self, piece, e
+                );
+                for block in blocks {
+                    self.inner
+                        .torrent
+                        .piece_block_rejected(&self.inner.handle, block)
+                        .await;
+                }
+            }
         }
-
-        Ok(())
     }
 
     /// Close the peer connection.

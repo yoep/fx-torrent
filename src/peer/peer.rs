@@ -9,6 +9,7 @@ use crate::peer::{
     extension, ChokeState, Error, InterestState, Metrics, PeerEvent, PeerHandle, PeerId,
     PeerPriority, Result,
 };
+use crate::storage::Storage;
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
 use crate::{
@@ -289,6 +290,7 @@ impl BitTorrentPeer {
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
+        storage: Storage,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
         timeout: Duration,
@@ -316,6 +318,7 @@ impl BitTorrentPeer {
             torrent,
             metadata,
             data_pool,
+            storage,
             protocol_extensions,
             extensions,
             metrics,
@@ -332,6 +335,7 @@ impl BitTorrentPeer {
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
+        storage: Storage,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
         timeout: Duration,
@@ -363,6 +367,7 @@ impl BitTorrentPeer {
                 torrent,
                 metadata,
                 data_pool,
+                storage,
                 protocol_extensions,
                 extensions,
                 metrics,
@@ -632,13 +637,11 @@ impl BitTorrentPeer {
     }
 
     /// Request one or more piece blocks from the remote peer.
-    pub async fn request(&self, blocks: &[PieceBlock]) -> Result<()> {
+    pub async fn request(&self, blocks: &[PieceBlock]) {
         self.sender
-            .send(|tx| PeerCommand::Request {
+            .fire_and_forget(PeerCommand::Request {
                 blocks: blocks.to_vec(),
-                response: tx,
             })
-            .await
             .await
     }
 
@@ -693,6 +696,7 @@ impl BitTorrentPeer {
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
+        storage: Storage,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
         metrics: Metrics,
@@ -711,6 +715,7 @@ impl BitTorrentPeer {
             torrent,
             metadata,
             data_pool,
+            storage,
             protocol_extensions,
             extensions.as_slice(),
             metrics,
@@ -835,7 +840,6 @@ enum PeerCommand {
     /// Request one or more piece blocks from the remote peer.
     Request {
         blocks: Vec<PieceBlock>,
-        response: Reply<Result<()>>,
     },
     TargetRequestQueueLen {
         response: Reply<usize>,
@@ -868,6 +872,8 @@ pub struct PeerContext {
     metadata: TorrentMetadata,
     /// The data pool of the torrent
     data_pool: DataPool,
+    /// The storage of the torrent
+    storage: Storage,
     /// The state of the client peer connection with the remote peer
     state: PeerState,
     /// The peer client supported/enabled protocol extensions
@@ -930,6 +936,7 @@ impl PeerContext {
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
+        storage: Storage,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: &[PeerExtension],
         metrics: Metrics,
@@ -952,6 +959,7 @@ impl PeerContext {
             torrent,
             metadata,
             data_pool,
+            storage,
             state: PeerState::Handshake,
             protocol_extensions,
             metrics,
@@ -1317,32 +1325,37 @@ impl PeerContext {
             self.update_state(PeerState::Uploading);
         }
 
-        let request_end = request.begin + request.length;
+        let mut buffer = vec![0u8; request.length];
         match self
-            .torrent
-            .read_piece_bytes(&request.index, request.begin..request_end)
+            .storage
+            .read(&mut buffer, &request.index, request.begin)
             .await
         {
-            Ok(data) => {
-                let data_len = data.len();
+            Ok(len) => {
+                if len != request.length {
+                    warn!("Peer {} failed to read piece {} data", self, request.index);
+                    self.send_reject_request(request).await;
+                    return;
+                }
+
                 match self
                     .send(Message::Piece(Piece {
                         index: request.index,
                         begin: request.begin,
-                        data,
+                        data: buffer,
                     }))
                     .await
                 {
                     Ok(_) => {
                         debug!(
                             "Peer {} sent piece {} data block (offset {}, size {}) to remote peer",
-                            self, request.index, request.begin, data_len
+                            self, request.index, request.begin, len
                         );
-                        self.metrics.bytes_out_useful.inc_by(data_len as u64);
+                        self.metrics.bytes_out_useful.inc_by(len as u64);
                     }
                     Err(e) => warn!(
                         "Peer {} failed to sent piece {} data part (size {}) to remote peer, {}",
-                        self, request.index, data_len, e
+                        self, request.index, len, e
                     ),
                 }
             }
@@ -1571,9 +1584,7 @@ impl PeerContext {
             PeerCommand::SuggestedPieces { response } => {
                 response.send(self.remote_suggested_pieces.iter().cloned().collect())
             }
-            PeerCommand::Request { blocks, response } => {
-                response.send(self.on_request(blocks).await)
-            }
+            PeerCommand::Request { blocks } => self.on_request(blocks).await,
             PeerCommand::TargetRequestQueueLen { response } => {
                 response.send(self.target_request_queue_len())
             }
@@ -2097,10 +2108,11 @@ impl PeerContext {
     }
 
     /// Process piece block requests, which need to be queued for downloading from the remote peer.
-    async fn on_request(&mut self, blocks: Vec<PieceBlock>) -> Result<()> {
+    async fn on_request(&mut self, blocks: Vec<PieceBlock>) {
         // early exit if the peer is being closed
         if self.cancellation_token.is_cancelled() {
-            return Err(Error::Closed);
+            self.reject_block_requests(blocks.into_iter()).await;
+            return;
         }
 
         let mut requests_added = 0usize;
@@ -2130,7 +2142,6 @@ impl PeerContext {
             self,
             requests_added
         );
-        Ok(())
     }
 
     fn target_request_queue_len(&self) -> usize {
@@ -2149,22 +2160,28 @@ impl PeerContext {
         self.target_queue_len = target_queue_len.min(MAX_TARGET_QUEUE_LEN);
     }
 
-    /// Reject the current in-flight block requests to the remote peer.
-    async fn reject_pending_requests(&mut self) {
-        for pending in std::mem::take(&mut self.pending_requests) {
-            self.torrent
-                .piece_block_rejected(&self.client.handle, &pending.block)
-                .await
-        }
-    }
-
-    /// Reject the queued piece blocks within the download queue.
-    async fn reject_download_queue(&mut self) {
-        for block in std::mem::take(&mut self.download_queue) {
+    /// Reject the given piece block requests.
+    /// This informs the piece picker that the peer was unable to fulfill the requests.
+    async fn reject_block_requests(&self, blocks: impl Iterator<Item = PieceBlock>) {
+        for block in blocks {
             self.torrent
                 .piece_block_rejected(&self.client.handle, &block)
                 .await
         }
+    }
+
+    /// Reject the current in-flight block requests to the remote peer.
+    async fn reject_pending_requests(&mut self) {
+        let blocks = std::mem::take(&mut self.pending_requests)
+            .into_iter()
+            .map(|e| e.block);
+        self.reject_block_requests(blocks).await;
+    }
+
+    /// Reject the queued piece blocks within the download queue.
+    async fn reject_download_queue(&mut self) {
+        let blocks = std::mem::take(&mut self.download_queue).into_iter();
+        self.reject_block_requests(blocks).await;
     }
 
     /// Try to sent one or more queued requests to the remote peer.
@@ -2762,6 +2779,7 @@ mod tests {
             // this peer is responsible for starting the handshake
             let inner = torrent.inner.clone();
             let data_pool = torrent.inner.data_pool().await.unwrap();
+            let storage = torrent.inner.storage().await.unwrap();
 
             // subscribe to the peer and listen for the handshake completed event
             let metadata = torrent.inner.metadata().await.unwrap();
@@ -2774,6 +2792,7 @@ mod tests {
                     inner,
                     metadata,
                     data_pool,
+                    storage,
                     ProtocolExtensionFlags::none(),
                     vec![],
                     Duration::from_secs(5),

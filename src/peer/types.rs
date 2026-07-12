@@ -1,5 +1,5 @@
 use crate::peer::webseed::HttpPeer;
-use crate::peer::{BitTorrentPeer, CloseReason, Metrics, PeerClientInfo, PeerState, Result};
+use crate::peer::{BitTorrentPeer, CloseReason, Metrics, PeerClientInfo, PeerState};
 use crate::{BitVec, PieceBlock, PieceIndex};
 use async_trait::async_trait;
 use crc::{Crc, CRC_32_ISCSI};
@@ -222,7 +222,7 @@ impl Peer {
     }
 
     /// Request the given piece blocks to be downloaded from the remote peer.
-    pub async fn request(&self, blocks: &[PieceBlock]) -> Result<()> {
+    pub async fn request(&self, blocks: &[PieceBlock]) {
         match self {
             Peer::BitTorrent(peer) => peer.request(blocks).await,
             Peer::Http(peer) => peer.request(blocks).await,
@@ -360,7 +360,12 @@ pub trait Extension: Debug + Display + Send + Sync + Callback<PeerEvent> {
     async fn suggested_pieces(&self) -> Vec<PieceIndex>;
 
     /// Request the given piece blocks to be downloaded from the remote peer.
-    async fn request(&self, blocks: &[PieceBlock]) -> Result<()>;
+    ///
+    /// ## Remarks
+    ///
+    /// When a block fails to be requested, use [InnerTorrent::piece_block_rejected] to inform the
+    /// torrent about it.
+    async fn request(&self, blocks: &[PieceBlock]);
 
     /// Returns the target number of requests which should be queued for the remote peer.
     async fn target_request_queue_len(&self) -> usize;
