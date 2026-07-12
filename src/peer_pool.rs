@@ -329,6 +329,7 @@ impl PeerPool {
         let start_time = Instant::now();
         self.process_peer_events();
         if self.last_cleanup.elapsed() >= CLEANUP_INTERVAL {
+            trace!("Torrent {} is cleaning peer pool", self);
             self.clean().await;
         }
         let elapsed = start_time.elapsed();

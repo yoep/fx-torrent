@@ -360,6 +360,12 @@ impl FxPiecePicker {
                 state,
                 PeerState::Handshake | PeerState::Error | PeerState::Closed
             ) {
+                trace!(
+                    "Piece picker {} skipping peer {} in state {:?}",
+                    self,
+                    peer,
+                    state
+                );
                 continue;
             }
 

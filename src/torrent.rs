@@ -3387,6 +3387,7 @@ impl TorrentContext {
             return;
         }
 
+        trace!("Torrent {} is ticking piece picker", self);
         self.piece_picker.tick(self.peer_pool.peers()).await;
     }
 
