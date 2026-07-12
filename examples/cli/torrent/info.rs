@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use crossterm::event::KeyCode;
 use fx_callback::{Callback, Subscription};
 use fx_torrent::prelude::*;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use ratatui::layout::Constraint::{Fill, Length, Percentage};
 use ratatui::layout::{Layout, Rect};
 use ratatui::prelude::{Color, Line, Span, Style};
@@ -14,6 +14,8 @@ use ratatui::style::Stylize;
 use ratatui::widgets::{Block, Paragraph, Sparkline, Widget};
 use ratatui::Frame;
 use std::net::SocketAddr;
+use std::time::Duration;
+use tokio::time::timeout;
 
 #[derive(Debug)]
 pub struct TorrentInfoWidget {
@@ -90,12 +92,35 @@ impl TorrentInfoWidget {
                 }
             }
             TorrentEvent::PeerConnected(peer) => {
-                data.peers = self.torrent.active_peer_connections().await;
+                data.peers = match timeout(
+                    Duration::from_millis(250),
+                    self.torrent.active_peer_connections(),
+                )
+                .await
+                {
+                    Ok(num_of_peers) => num_of_peers,
+                    Err(_) => {
+                        debug!(
+                            "Torrent {} timed out waiting for active peer connections",
+                            self.torrent
+                        );
+                        return;
+                    }
+                };
 
-                if let Some(peer) = self.torrent.peer(&peer.handle).await {
-                    self.content_widget.add_peer(peer).await;
-                } else {
-                    warn!("Torrent {} failed to find peer {}", self.torrent, peer);
+                match timeout(Duration::from_millis(500), self.torrent.peer(&peer.handle)).await {
+                    Ok(Some(peer)) => {
+                        self.content_widget.add_peer(peer).await;
+                    }
+                    Ok(None) => {
+                        warn!("Torrent {} failed to find peer {}", self.torrent, peer);
+                    }
+                    Err(_) => {
+                        debug!(
+                            "Torrent {} timed out waiting for peer {}",
+                            self.torrent, peer
+                        );
+                    }
                 }
             }
             TorrentEvent::PeerDisconnected(peer) => {

@@ -124,6 +124,8 @@ impl PiecePicker {
     }
 
     /// Execute a periodic tick for the piece picker.
+    /// The peer iterator is filtered to only include peers that
+    /// have a valid state for the piece picker.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn tick<'a, P: Iterator<Item = &'a Peer>>(&mut self, peers: P) {
         match self {
@@ -196,6 +198,11 @@ pub trait Extension: Debug + Send + Sync {
 
     /// Execute a periodic tick for the piece picker.
     /// This tick can be used to request pieces from the list of available peers.
+    ///
+    /// ## Remarks
+    ///
+    /// The peer iterator is filtered to only include peers that
+    /// have a valid state for the piece picker.
     async fn tick<'a>(&'a mut self, peers: Vec<&'a Peer>);
 }
 

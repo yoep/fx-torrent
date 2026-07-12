@@ -7,7 +7,8 @@ use crate::operation::{Operation, TorrentOperationResult};
 use crate::peer::extension::PeerExtension;
 use crate::peer::{
     BitTorrentPeer, ChokeState, CloseReason, ConnectionProtocol, InterestState, Peer,
-    PeerClientInfo, PeerDiscovery, PeerEntry, PeerHandle, PeerId, ProtocolExtensionFlags,
+    PeerClientInfo, PeerDiscovery, PeerEntry, PeerHandle, PeerId, PeerState,
+    ProtocolExtensionFlags,
 };
 use crate::peer_pool::PeerPool;
 use crate::piece_picker::strategy::{
@@ -3319,8 +3320,8 @@ impl TorrentContext {
     ) {
         self.execute_operations_chain(operations, peer_discoveries)
             .await;
-        self.piece_picker_tick().await;
         self.peer_pool.tick().await;
+        self.piece_picker_tick().await;
         self.on_upload_tick().await;
     }
 
@@ -3357,8 +3358,15 @@ impl TorrentContext {
             return;
         }
 
-        trace!("Torrent {} is ticking piece picker", self);
-        self.piece_picker.tick(self.peer_pool.peers()).await;
+        trace!("Torrent {} is picking pieces", self);
+        self.piece_picker
+            .tick(self.peer_pool.peers_with(|conn| {
+                !matches!(
+                    conn.state(),
+                    PeerState::Handshake | PeerState::Error | PeerState::Closed
+                )
+            }))
+            .await;
     }
 
     /// Execute an upload tick, managing the upload slots of the torrent.

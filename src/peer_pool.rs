@@ -76,9 +76,18 @@ impl PeerPool {
 
     /// Returns an iterator over the peers in the pool.
     pub fn peers(&self) -> impl Iterator<Item = &Peer> {
+        self.peers_with(|_| true)
+    }
+
+    /// Returns a filtered iterator over the peer connections in the pool.
+    pub fn peers_with<'a, F>(&'a self, filter: F) -> impl Iterator<Item = &'a Peer>
+    where
+        F: Fn(&PeerConnection) -> bool + 'a,
+    {
         self.peers
             .values()
             .filter_map(|e| e.connection.as_ref())
+            .filter(move |e| filter(e))
             .map(|e| &e.peer)
     }
 
@@ -245,11 +254,7 @@ impl PeerPool {
 
     /// Returns the number of total healthy peer connections from the pool.
     pub fn active_peer_connections(&self) -> usize {
-        self.peers
-            .values()
-            .filter_map(|e| e.connection.as_ref())
-            .map(|conn| conn.state)
-            .filter(|state| *state != PeerState::Closed && *state != PeerState::Error)
+        self.peers_with(|conn| !matches!(conn.state, PeerState::Closed | PeerState::Error))
             .count()
     }
 
@@ -534,13 +539,25 @@ impl Ord for PeerInfo {
     }
 }
 
-/// The data of an active peer connection.
+/// The data of an active connection within the peer pool.
 #[derive(Debug)]
-struct PeerConnection {
+pub struct PeerConnection {
     peer: Peer,
     receiver: Subscription<PeerEvent>,
     state: PeerState,
     upload_acquired: bool,
+}
+
+impl PeerConnection {
+    /// Returns the peer associated with this connection.
+    pub fn peer(&self) -> &Peer {
+        &self.peer
+    }
+
+    /// Returns the state of the peer connection.
+    pub fn state(&self) -> &PeerState {
+        &self.state
+    }
 }
 
 /// The state of the hole punch operation for the peer.
