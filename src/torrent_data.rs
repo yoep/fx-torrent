@@ -353,6 +353,16 @@ impl DataPool {
         rx.await.unwrap_or_default()
     }
 
+    /// Returns `true` if the torrent is a partial seed.
+    /// This means that the torrent has completed some files, but not all files are wanted.
+    pub async fn is_partial_seed(&self) -> bool {
+        self.sender
+            .send(|tx| DataPoolCommand::IsPartialSeed { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
     /// Close the data pool.
     /// This terminates the pool and prevents any further operations.
     pub async fn close(&self) {
@@ -471,6 +481,9 @@ enum DataPoolCommand {
     FileIndexFor {
         piece: PieceIndex,
         response: Reply<Option<FileIndex>>,
+    },
+    IsPartialSeed {
+        response: Reply<bool>,
     },
     Close,
 }
@@ -611,6 +624,9 @@ impl InnerDataPool {
                 }
                 DataPoolCommand::HasBytes { bytes, response } => {
                     response.send(self.has_bytes(&bytes));
+                }
+                DataPoolCommand::IsPartialSeed { response } => {
+                    response.send(self.is_partial_seed());
                 }
                 DataPoolCommand::Close => break,
             }
@@ -813,6 +829,19 @@ impl InnerDataPool {
                 .map(|bit| *bit)
                 .unwrap_or_default()
                 == false
+    }
+
+    fn is_partial_seed(&self) -> bool {
+        // early exit if the torrent is a single-file torrent
+        if self.files.len() <= 1 {
+            return false;
+        }
+
+        let total_pieces = self.pieces.len();
+        let wanted_pieces = self.wanted_pieces().len();
+        let completed_pieces = self.completed_pieces.count_ones();
+
+        total_pieces != completed_pieces && wanted_pieces == 0
     }
 }
 
@@ -1276,6 +1305,78 @@ mod tests {
 
             let result = pool.completed_size().await;
             assert_eq!(1_536, result, "expected the completed size to match");
+        }
+    }
+
+    mod is_partial_seed {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_single_file_torrent() {
+            init_logger!();
+            let pieces = vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+                create_piece(3, 1024),
+            ];
+            let pool = DataPool::new();
+
+            // set the pieces and file
+            pool.set_pieces(pieces).await;
+            pool.set_files(vec![create_file(0, 0, 4096, 0..4)]).await;
+
+            // complete all pieces of the file
+            pool.set_completed(&[0, 1, 2, 3], true).await;
+
+            let result = pool.is_partial_seed().await;
+            assert_eq!(
+                false, result,
+                "expected the torrent to not be a partial seed"
+            );
+        }
+        #[tokio::test]
+        async fn test_multi_file_torrent() {
+            init_logger!();
+            let pieces = vec![
+                create_piece(0, 1024),
+                create_piece(1, 1024),
+                create_piece(2, 1024),
+                create_piece(3, 1024),
+            ];
+            let pool = DataPool::new();
+
+            // set the pieces and file
+            pool.set_pieces(pieces).await;
+            pool.set_files(vec![
+                create_file(0, 0, 2048, 0..2),
+                create_file(1, 2048, 2048, 2..4),
+            ])
+            .await;
+
+            // check if partial seed is false, if none of the files have been completed
+            let result = pool.is_partial_seed().await;
+            assert_eq!(
+                false, result,
+                "expected the torrent to not be a partial seed"
+            );
+
+            // complete all pieces of file 1
+            pool.set_completed(&[0, 1], true).await;
+
+            // check if partial seed is false, if none of the files have been completed
+            let result = pool.is_partial_seed().await;
+            assert_eq!(
+                false, result,
+                "expected the torrent to not be a partial seed"
+            );
+
+            // set file 2 as not wanted
+            pool.set_file_priorities(&[(1, FilePriority::None)]).await;
+
+            // check if partial seed is true, if none of the files have been completed
+            let result = pool.is_partial_seed().await;
+            assert_eq!(true, result, "expected the torrent to be a partial seed");
         }
     }
 

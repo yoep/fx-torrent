@@ -1468,18 +1468,6 @@ impl InnerTorrent {
             .await
     }
 
-    /// Returns `true` if the torrent is a partial seed, else `false`.
-    ///
-    /// Partial seed is when the torrent has some files completed but not all wanted.
-    /// In this case, the torrent has completed its download process, and will never reach the full seed status.
-    pub async fn is_partial_seed(&self) -> bool {
-        self.sender
-            .send(|tx| TorrentCommand::IsPartialSeed { response: tx })
-            .await
-            .await
-            .unwrap_or_default()
-    }
-
     /// Returns `true` if the torrent is in the end-game phase, else `false`.
     pub async fn is_end_game(&self) -> bool {
         self.sender
@@ -1747,9 +1735,6 @@ pub enum TorrentCommand {
     PieceBlockRejected {
         peer: PeerHandle,
         block: PieceBlock,
-    },
-    IsPartialSeed {
-        response: Reply<bool>,
     },
     IsEndGame {
         response: Reply<bool>,
@@ -2177,18 +2162,6 @@ impl TorrentContext {
             || self.options.contains(TorrentFlags::SeedMode);
 
         is_uploading_mode && is_not_paused
-    }
-
-    /// Check if the torrent is a partial seed.
-    /// A partial seed is a torrent that is seeding only a selection of a multi file torrent.
-    pub async fn is_partial_seed(&self) -> bool {
-        // check if this a multi file torrent
-        if self.total_files().await <= 1 {
-            return false;
-        }
-
-        // check if all wanted pieces have been downloaded
-        self.total_wanted_pieces().await == 0
     }
 
     /// Check if the torrent is currently paused.
@@ -3042,9 +3015,6 @@ impl TorrentContext {
             }
             TorrentCommand::PieceBlockRejected { peer, block } => {
                 self.on_piece_block_rejected(peer, block).await
-            }
-            TorrentCommand::IsPartialSeed { response } => {
-                response.send(self.is_partial_seed().await);
             }
             TorrentCommand::IsEndGame { response } => {
                 response.send(self.piece_picker.is_end_game());

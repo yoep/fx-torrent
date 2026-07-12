@@ -2253,16 +2253,7 @@ impl PeerContext {
 
     async fn send_extended_handshake(&self) -> Result<()> {
         let extension_registry = self.extension_registry.clone();
-        let is_partial_seed =
-            match timeout(Duration::from_millis(250), self.torrent.is_partial_seed()).await {
-                Ok(is_partial_seed) => is_partial_seed,
-                Err(_) => {
-                    return Err(Error::Io(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "is_partial_seed timed-out",
-                    )))
-                }
-            };
+        let is_partial_seed = self.data_pool.is_partial_seed().await;
         let peer_port = match timeout(Duration::from_millis(250), self.torrent.peer_port()).await {
             Ok(port) => port,
             Err(_) => {
