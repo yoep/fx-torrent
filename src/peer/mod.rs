@@ -58,7 +58,7 @@ pub mod tests {
             async fn remote_choke_state(&self) -> ChokeState;
             async fn remote_interest_state(&self) -> InterestState;
             async fn suggested_pieces(&self) -> Vec<PieceIndex>;
-            async fn request(&self, blocks: &[PieceBlock]) -> Result<()>;
+            async fn request(&self, blocks: &[PieceBlock]);
             async fn target_request_queue_len(&self) -> usize;
             async fn close(&self);
         }
@@ -83,8 +83,10 @@ pub mod tests {
     ) -> (BitTorrentPeer, BitTorrentPeer) {
         let incoming_context = incoming_torrent.inner.clone();
         let incoming_data_pool = incoming_context.data_pool().await.unwrap();
+        let incoming_storage = incoming_context.storage().await.unwrap();
         let outgoing_context = outgoing_torrent.inner.clone();
         let outgoing_data_pool = outgoing_context.data_pool().await.unwrap();
+        let outgoing_storage = outgoing_context.storage().await.unwrap();
         let (tx, mut rx) = unbounded_channel();
 
         // create the uTP stream pair
@@ -108,6 +110,7 @@ pub mod tests {
                 incoming_context,
                 metadata,
                 incoming_data_pool,
+                incoming_storage,
                 protocols,
                 vec![],
                 Duration::from_secs(50),
@@ -125,6 +128,7 @@ pub mod tests {
             outgoing_context,
             metadata,
             outgoing_data_pool,
+            outgoing_storage,
             protocols,
             vec![],
             Duration::from_secs(50),

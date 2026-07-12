@@ -300,45 +300,36 @@ impl FxPiecePicker {
                 .iter()
                 .map(|block| block.piece_block)
                 .collect_vec();
-            match peer.request(blocks.as_slice()).await {
-                Ok(_) => {
-                    debug!(
-                        "Piece picker {} requested {} blocks from peer {}",
-                        self,
-                        picked_blocks.len(),
-                        peer
-                    );
+            peer.request(blocks.as_slice()).await;
+            debug!(
+                "Piece picker {} requested {} blocks from peer {}",
+                self,
+                picked_blocks.len(),
+                peer
+            );
 
-                    let mut picked_piece_blocks = vec![];
-                    for block in picked_blocks {
-                        let block = match self
-                            .downloads
-                            .get_mut(block.piece())
-                            .and_then(|blocks| blocks.get_mut(*block.block()))
-                        {
-                            None => continue,
-                            Some(block) => block,
-                        };
+            let mut picked_piece_blocks = vec![];
+            for block in picked_blocks {
+                let block = match self
+                    .downloads
+                    .get_mut(block.piece())
+                    .and_then(|blocks| blocks.get_mut(*block.block()))
+                {
+                    None => continue,
+                    Some(block) => block,
+                };
 
-                        block.state = PieceBlockState::Requested;
-                        block.requested_from.insert(*peer.handle());
+                block.state = PieceBlockState::Requested;
+                block.requested_from.insert(*peer.handle());
 
-                        // remove the block from the list of interesting pieces
-                        picked_piece_blocks.push(block.piece_block);
+                // remove the block from the list of interesting pieces
+                picked_piece_blocks.push(block.piece_block);
 
-                        num_requested_blocks += 1;
-                        target_queue_len -= 1;
-                    }
-
-                    interested_pieces.retain(|e| !picked_piece_blocks.contains(&e.piece_block));
-                }
-                Err(e) => {
-                    debug!(
-                        "Piece picker {} failed to request blocks from peer {}, {}",
-                        self, peer, e
-                    );
-                }
+                num_requested_blocks += 1;
+                target_queue_len -= 1;
             }
+
+            interested_pieces.retain(|e| !picked_piece_blocks.contains(&e.piece_block));
         }
 
         let elapsed = start_time.elapsed();

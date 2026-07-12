@@ -1505,6 +1505,16 @@ impl InnerTorrent {
             .await
             .await?)
     }
+
+    /// Returns the storage of the torrent.
+    #[cfg(test)]
+    pub async fn storage(&self) -> Result<Storage> {
+        Ok(self
+            .sender
+            .send(|tx| TorrentCommand::Storage { response: tx })
+            .await
+            .await?)
+    }
 }
 
 impl Callback<TorrentEvent> for InnerTorrent {
@@ -1747,6 +1757,10 @@ pub enum TorrentCommand {
     #[cfg(test)]
     DataPool {
         response: Reply<DataPool>,
+    },
+    #[cfg(test)]
+    Storage {
+        response: Reply<Storage>,
     },
 }
 
@@ -3037,6 +3051,8 @@ impl TorrentContext {
             }
             #[cfg(test)]
             TorrentCommand::DataPool { response } => response.send(self.data_pool.clone()),
+            #[cfg(test)]
+            TorrentCommand::Storage { response } => response.send(self.storage.clone()),
         }
     }
 
@@ -3053,6 +3069,7 @@ impl TorrentContext {
         let peer_id = self.peer_id;
         let metadata = self.metadata.clone();
         let data_pool = self.data_pool.clone();
+        let storage = self.storage.clone();
         let protocol_extensions = self.protocol_extensions();
         let extensions = self.extensions(entry.protocol());
         let command_sender = self.command_sender.clone();
@@ -3069,6 +3086,7 @@ impl TorrentContext {
                 },
                 metadata,
                 data_pool,
+                storage,
                 protocol_extensions,
                 extensions,
                 timeout,

@@ -2,6 +2,7 @@ use crate::peer::extension::PeerExtension;
 use crate::peer::{
     BitTorrentPeer, Error, Peer, PeerEntry, PeerId, PeerStream, ProtocolExtensionFlags, Result,
 };
+use crate::storage::Storage;
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
 use crate::TorrentMetadata;
@@ -89,6 +90,7 @@ impl TcpPeerDiscovery {
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
+        storage: Storage,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
         connection_timeout: Duration,
@@ -103,8 +105,9 @@ impl TcpPeerDiscovery {
                     peer_addr,
                     stream?,
                     torrent,
-                metadata,
+                    metadata,
                     data_pool,
+                    storage,
                     protocol_extensions,
                     extensions,
                     connection_timeout
@@ -130,6 +133,7 @@ impl TcpPeerDiscovery {
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
+        storage: Storage,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
         connection_timeout: Duration,
@@ -141,6 +145,7 @@ impl TcpPeerDiscovery {
             torrent,
             metadata,
             data_pool,
+            storage,
             protocol_extensions,
             extensions,
             connection_timeout,
@@ -284,12 +289,8 @@ mod tests {
 
         // try to create an outgoing peer connection through the dialer
         let metadata = torrent.inner.metadata().await.unwrap();
-        let data_pool = timeout!(
-            Duration::from_millis(100),
-            torrent.inner.data_pool(),
-            "expected the torrent data pool"
-        )
-        .unwrap();
+        let data_pool = torrent.inner.data_pool().await.unwrap();
+        let storage = torrent.inner.storage().await.unwrap();
         let result = timeout!(
             Duration::from_millis(250),
             dialer.dial(
@@ -298,6 +299,7 @@ mod tests {
                 torrent.inner.clone(),
                 metadata,
                 data_pool,
+                storage,
                 protocol_extensions,
                 vec![],
                 Duration::from_secs(1),

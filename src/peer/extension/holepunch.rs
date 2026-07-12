@@ -472,6 +472,7 @@ mod tests {
 
             // connect the relay torrent to the target torrent
             let relay_data_pool = relay_torrent.inner.data_pool().await.unwrap();
+            let relay_storage = relay_torrent.inner.storage().await.unwrap();
             let peer = relay_discovery
                 .dial(
                     PeerId::new(),
@@ -479,6 +480,7 @@ mod tests {
                     relay_torrent.inner.clone(),
                     relay_torrent.metadata().await.unwrap(),
                     relay_data_pool,
+                    relay_storage,
                     ProtocolExtensionFlags::LTEP,
                     vec![HolepunchExtension::new().into()],
                     Duration::from_millis(250),
@@ -577,6 +579,7 @@ mod tests {
 
             // connect the relay torrent to the target torrent
             let relay_data_pool = relay_torrent.inner.data_pool().await.unwrap();
+            let relay_storage = relay_torrent.inner.storage().await.unwrap();
             let extensions = vec![HolepunchExtension::new().into()];
             let peer = relay_discovery
                 .dial(
@@ -585,6 +588,7 @@ mod tests {
                     relay_torrent.inner.clone(),
                     relay_torrent.metadata().await.unwrap(),
                     relay_data_pool,
+                    relay_storage,
                     ProtocolExtensionFlags::LTEP,
                     extensions,
                     Duration::from_millis(250),

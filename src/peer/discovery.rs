@@ -3,6 +3,7 @@ use crate::peer::{
     ConnectionProtocol, Peer, PeerId, PeerStream, ProtocolExtensionFlags, Result, TcpPeerDiscovery,
     UtpPeerDiscovery,
 };
+use crate::storage::Storage;
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
 use crate::TorrentMetadata;
@@ -78,6 +79,7 @@ impl PeerDiscovery {
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
+        storage: Storage,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
         connection_timeout: Duration,
@@ -91,6 +93,7 @@ impl PeerDiscovery {
                         torrent,
                         metadata,
                         data_pool,
+                        storage,
                         protocol_extensions,
                         extensions,
                         connection_timeout,
@@ -105,6 +108,7 @@ impl PeerDiscovery {
                         torrent,
                         metadata,
                         data_pool,
+                        storage,
                         protocol_extensions,
                         extensions,
                         connection_timeout,
@@ -119,6 +123,7 @@ impl PeerDiscovery {
                         torrent,
                         metadata,
                         data_pool,
+                        storage,
                         protocol_extensions,
                         extensions,
                         connection_timeout,
@@ -187,6 +192,7 @@ pub trait Discovery: Debug + Send + Sync {
     /// * `torrent` - The torrent to use for the connection.
     /// * `metadata` - The current known metadata of the torrent.
     /// * `data_pool` - The torrent data pool to use for the connection.
+    /// * `storage` - The storage of the torrent.
     /// * `protocol_extensions` - The peer protocol extensions that should be enabled for the connection. (BEP4)
     /// * `extensions` - The peer extensions that should be enabled for the connection. (BEP10)
     /// * `connection_timeout` - The timeout of a peer connection.
@@ -201,6 +207,7 @@ pub trait Discovery: Debug + Send + Sync {
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
+        storage: Storage,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
         connection_timeout: Duration,
@@ -239,6 +246,7 @@ pub mod mock {
                 torrent: InnerTorrent,
                 metadata: TorrentMetadata,
                 data_pool: DataPool,
+                storage: Storage,
                 protocol_extensions: ProtocolExtensionFlags,
                 extensions: Vec<PeerExtension>,
                 connection_timeout: Duration,
