@@ -3040,7 +3040,7 @@ impl TorrentContext {
         }
     }
 
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     async fn on_incoming_peer_connection(&mut self, entry: PeerEntry) {
         trace!(
             "Torrent {} is trying to accept incoming {} peer connection",
@@ -3051,12 +3051,13 @@ impl TorrentContext {
 
         let handle = self.handle;
         let peer_id = self.peer_id;
+        let metadata = self.metadata.clone();
         let data_pool = self.data_pool.clone();
         let protocol_extensions = self.protocol_extensions();
         let extensions = self.extensions(entry.protocol());
         let command_sender = self.command_sender.clone();
         let callbacks = self.callbacks.clone();
-        tokio::spawn(async move {
+        spawn!("TorrentContext::on_incoming_peer_connection", async move {
             match BitTorrentPeer::new_inbound(
                 peer_id,
                 entry.socket_addr,
@@ -3066,7 +3067,8 @@ impl TorrentContext {
                     sender: command_sender.clone(),
                     callbacks,
                 },
-                data_pool.clone(),
+                metadata,
+                data_pool,
                 protocol_extensions,
                 extensions,
                 timeout,

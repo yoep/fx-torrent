@@ -12,8 +12,7 @@ use crate::peer::{
 use crate::torrent::InnerTorrent;
 use crate::torrent_data::DataPool;
 use crate::{
-    BitVec, CompactIp, PieceBlock, PieceIndex, TorrentError, TorrentEvent, TorrentMetadata,
-    TorrentMetadataInfo,
+    BitVec, CompactIp, PieceBlock, PieceIndex, TorrentEvent, TorrentMetadata, TorrentMetadataInfo,
 };
 use bitmask_enum::bitmask;
 use byteorder::BigEndian;
@@ -288,6 +287,7 @@ impl BitTorrentPeer {
         addr: SocketAddr,
         stream: PeerStream,
         torrent: InnerTorrent,
+        metadata: TorrentMetadata,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
@@ -314,6 +314,7 @@ impl BitTorrentPeer {
             connection,
             ConnectionDirection::Outbound,
             torrent,
+            metadata,
             data_pool,
             protocol_extensions,
             extensions,
@@ -329,6 +330,7 @@ impl BitTorrentPeer {
         addr: SocketAddr,
         stream: PeerStream,
         torrent: InnerTorrent,
+        metadata: TorrentMetadata,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
@@ -359,6 +361,7 @@ impl BitTorrentPeer {
                 connection,
                 ConnectionDirection::Inbound,
                 torrent,
+                metadata,
                 data_pool,
                 protocol_extensions,
                 extensions,
@@ -688,6 +691,7 @@ impl BitTorrentPeer {
         connection: PeerConnection,
         connection_type: ConnectionDirection,
         torrent: InnerTorrent,
+        metadata: TorrentMetadata,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: Vec<PeerExtension>,
@@ -705,6 +709,7 @@ impl BitTorrentPeer {
             connection,
             connection_type,
             torrent,
+            metadata,
             data_pool,
             protocol_extensions,
             extensions.as_slice(),
@@ -859,6 +864,9 @@ pub struct PeerContext {
     /// The remote peer information, known after the initial handshake.
     remote: Option<RemotePeer>,
     torrent: InnerTorrent,
+    /// The metadata of the torrent
+    metadata: TorrentMetadata,
+    /// The data pool of the torrent
     data_pool: DataPool,
     /// The state of the client peer connection with the remote peer
     state: PeerState,
@@ -920,6 +928,7 @@ impl PeerContext {
         connection: PeerConnection,
         connection_type: ConnectionDirection,
         torrent: InnerTorrent,
+        metadata: TorrentMetadata,
         data_pool: DataPool,
         protocol_extensions: ProtocolExtensionFlags,
         extensions: &[PeerExtension],
@@ -941,6 +950,7 @@ impl PeerContext {
             // the remote information is unknown until the handshake has been completed
             remote: None,
             torrent,
+            metadata,
             data_pool,
             state: PeerState::Handshake,
             protocol_extensions,
@@ -1135,8 +1145,8 @@ impl PeerContext {
 
     /// Get the known metadata from the torrent.
     /// This info is requested from the torrent that created this peer.
-    pub async fn metadata(&self) -> Result<TorrentMetadata> {
-        Ok(self.torrent.metadata().await?)
+    pub fn metadata(&self) -> &TorrentMetadata {
+        &self.metadata
     }
 
     /// Returns the completed pieces bitfield of the torrent.
@@ -1350,6 +1360,9 @@ impl PeerContext {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_torrent_event(&mut self, event: &TorrentEvent) {
         match event {
+            TorrentEvent::MetadataChanged(metadata) => {
+                self.metadata = metadata.clone();
+            }
             TorrentEvent::PiecesChanged(_) => {
                 trace!("Peer {} updating client piece bitfield", self);
                 // retrieve the torrent pieces bitfield and store it as the client bitfield
@@ -1498,18 +1511,7 @@ impl PeerContext {
     /// Handle a received hash request from the remote peer.
     async fn handle_hash_request(&self, _request: HashRequest) {
         // check if the torrent hash is a v2
-        let metadata = match timeout(Duration::from_millis(500), self.torrent.metadata())
-            .await
-            .map_err(|_| TorrentError::Timeout)
-            .flatten()
-        {
-            Ok(metadata) => metadata,
-            Err(e) => {
-                trace!("Peer {} failed to retrieve metadata, {}", self, e);
-                return;
-            }
-        };
-        let metadata_version = metadata.metadata_version().unwrap_or(0);
+        let metadata_version = self.metadata.metadata_version().unwrap_or(0);
         if metadata_version != 2 {
             warn!(
                 "Peer {} is unable to handle hash request for torrent with metadata version {}",
@@ -1598,18 +1600,7 @@ impl PeerContext {
 
     /// Check if v2 hashes should be requested for the current torrent.
     async fn should_request_hashes(&self) -> bool {
-        let metadata = match timeout(Duration::from_millis(500), self.torrent.metadata())
-            .await
-            .map_err(|_| TorrentError::Timeout)
-            .flatten()
-        {
-            Ok(metadata) => metadata,
-            Err(e) => {
-                trace!("Peer {} failed to retrieve metadata, {}", self, e);
-                return false;
-            }
-        };
-        if let Some(metadata_version) = metadata.metadata_version() {
+        if let Some(metadata_version) = self.metadata.metadata_version() {
             return metadata_version == 2 && self.is_v2_supported();
         }
 
@@ -1618,18 +1609,7 @@ impl PeerContext {
 
     /// Request any missing hashes from the remote peer.
     async fn request_missing_hashes(&self) {
-        let metadata = match timeout(Duration::from_millis(500), self.torrent.metadata())
-            .await
-            .map_err(|_| TorrentError::Timeout)
-            .flatten()
-        {
-            Ok(metadata) => metadata,
-            Err(e) => {
-                trace!("Peer {} failed to retrieve metadata, {}", self, e);
-                return;
-            }
-        };
-        if let Some(info) = metadata.info {
+        if let Some(info) = self.metadata.info.as_ref() {
             trace!("Peer {} is requesting missing v2 hashes", self);
             let piece_length = info.piece_length as usize;
             let _base_layer = (piece_length + LEAF_BLOCK_SIZE - 1) / LEAF_BLOCK_SIZE;
@@ -1691,12 +1671,6 @@ impl PeerContext {
         &mut self,
         handshake: Handshake,
     ) -> result::Result<(), CloseReason> {
-        let info_hash = match self.torrent.info_hash().await {
-            Ok(e) => e,
-            Err(_) => {
-                return Err(CloseReason::TorrentRemoved);
-            }
-        };
         let mut v2_enabled = false;
         let mut is_valid = false;
         trace!("Peer {} received handshake {:?}", self, handshake);
@@ -1710,7 +1684,7 @@ impl PeerContext {
                 .contains(ProtocolExtensionFlags::SupportV2)
         {
             // use the v2 info hash for validation
-            if let Some(v2_hash) = info_hash.v2_as_short() {
+            if let Some(v2_hash) = self.metadata.info_hash.v2_as_short() {
                 trace!("Peer {} is validating v2 handshake {:?}", self, v2_hash);
                 if v2_hash == handshake.info_hash.short_info_hash_bytes() {
                     debug!("Peer {} has successfully upgraded to v2", self);
@@ -1731,7 +1705,7 @@ impl PeerContext {
         }
 
         // check if the v2 handshake didn't succeed and we're using v1 handshake validation
-        if !is_valid && info_hash != handshake.info_hash {
+        if !is_valid && self.metadata.info_hash != handshake.info_hash {
             self.update_state(PeerState::Error);
             return Err(CloseReason::InvalidInfoHash);
         }
@@ -1904,11 +1878,7 @@ impl PeerContext {
     /// If the piece is out-of-range, the update will be ignored.
     pub(crate) async fn set_remote_has_piece(&mut self, piece: PieceIndex, has_piece: bool) {
         let total_pieces = self.data_pool.num_of_pieces().await;
-        let is_metadata_known =
-            match timeout(Duration::from_millis(500), self.torrent.is_metadata_known()).await {
-                Ok(metadata) => metadata,
-                Err(_) => false,
-            };
+        let is_metadata_known = self.metadata.info.is_some();
 
         // ensure the BitVec is large enough to accommodate the piece index
         if piece >= self.remote_pieces.len() {
@@ -2245,14 +2215,11 @@ impl PeerContext {
     /// Try to send the handshake information of our client peer to the remote peer.
     async fn send_handshake(&mut self) -> Result<()> {
         self.update_state(PeerState::Handshake);
-        let info_hash = match self.torrent.info_hash().await {
-            Ok(e) => e,
-            Err(_) => {
-                return Err(Error::Closed);
-            }
-        };
-
-        let handshake = Handshake::new(info_hash, self.client.id, self.protocol_extensions);
+        let handshake = Handshake::new(
+            self.metadata.info_hash.clone(),
+            self.client.id,
+            self.protocol_extensions,
+        );
         debug!("Peer {} is sending handshake {:?}", self, handshake);
         match self
             .send_raw_bytes(TryInto::<Vec<u8>>::try_into(handshake)?)
@@ -2269,10 +2236,34 @@ impl PeerContext {
 
     async fn send_extended_handshake(&self) -> Result<()> {
         let extension_registry = self.extension_registry.clone();
-        let is_partial_seed = self.torrent.is_partial_seed().await;
-        let peer_port = self.torrent.peer_port().await;
-        let config = match self.torrent.config().await {
-            Ok(e) => e,
+        let is_partial_seed =
+            match timeout(Duration::from_millis(250), self.torrent.is_partial_seed()).await {
+                Ok(is_partial_seed) => is_partial_seed,
+                Err(_) => {
+                    return Err(Error::Io(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "is_partial_seed timed-out",
+                    )))
+                }
+            };
+        let peer_port = match timeout(Duration::from_millis(250), self.torrent.peer_port()).await {
+            Ok(port) => port,
+            Err(_) => {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "peer_port timed-out",
+                )))
+            }
+        };
+        let config = match timeout(Duration::from_millis(250), self.torrent.config())
+            .await
+            .map_err(|_| {
+                Error::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "peer_port timed-out",
+                ))
+            })? {
+            Ok(config) => config,
             Err(_) => return Err(Error::Closed),
         };
         let message = Message::ExtendedHandshake(ExtendedHandshake {
@@ -2318,7 +2309,7 @@ impl PeerContext {
         let is_fast_enabled = self.is_protocol_enabled(ProtocolExtensionFlags::Fast);
         if is_fast_enabled && is_bitfield_known {
             let mut message: Option<Message> = None;
-            let is_metadata_known = self.metadata().await?.info.is_some();
+            let is_metadata_known = self.metadata.info.is_some();
 
             if is_metadata_known && bitfield.all() {
                 message = Some(Message::HaveAll);
@@ -2773,6 +2764,7 @@ mod tests {
             let data_pool = torrent.inner.data_pool().await.unwrap();
 
             // subscribe to the peer and listen for the handshake completed event
+            let metadata = torrent.inner.metadata().await.unwrap();
             tokio::spawn(async move {
                 // the peer is only returned after the handshake has been completed
                 let peer = BitTorrentPeer::new_outbound(
@@ -2780,6 +2772,7 @@ mod tests {
                     listener_addr,
                     PeerStream::Tcp(TcpStream::connect(listener_addr).await.unwrap()),
                     inner,
+                    metadata,
                     data_pool,
                     ProtocolExtensionFlags::none(),
                     vec![],

@@ -116,11 +116,7 @@ impl MetadataExtension {
 
     async fn send_metadata<'a>(&'a self, piece: PieceIndex, peer: &'a PeerContext) -> Result<()> {
         // retrieve the current known metadata
-        let metadata = peer
-            .metadata()
-            .await
-            .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?
-            .info;
+        let metadata = peer.metadata().info.as_ref();
         let extension_number = match peer.find_remote_extension_number(Self::NAME) {
             None => return Err(Error::Unsupported),
             Some(e) => e,
@@ -249,16 +245,7 @@ impl MetadataExtension {
 
     /// Check if the metadata should be requested for the torrent.
     async fn should_request_metadata<'a>(&'a self, peer: &'a PeerContext) -> bool {
-        match peer.metadata().await {
-            Ok(metadata) => metadata.info.is_none(),
-            Err(e) => {
-                warn!(
-                    "Peer {} failed to retrieve the torrent metadata, {}",
-                    peer, e
-                );
-                false
-            }
-        }
+        peer.metadata().info.is_none()
     }
 
     async fn initialize(&self, peer: &PeerContext) {
