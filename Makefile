@@ -5,13 +5,13 @@ prerequisites: ## Install the Cargo requirements for testing
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov
 
 test: prerequisites ## Test the cargo project
-	@cargo nextest run --features "ed25519-dalek"
+	@cargo nextest run
 
 test-coverage: prerequisites ## Test the cargo project with coverage report
-	@cargo llvm-cov --lcov --output-path target/lcov.info --features "ed25519-dalek" nextest
+	@cargo llvm-cov --lcov --output-path target/lcov.info nextest
 
 cov: ## Test the cargo project with coverage reporting to stdout
-	@cargo llvm-cov --features "ed25519-dalek" nextest
+	@cargo llvm-cov nextest
 
 build: ## Build the cargo project
 	@cargo build

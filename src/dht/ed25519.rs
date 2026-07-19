@@ -2,14 +2,8 @@ use crate::bencode;
 use crate::dht::{Error, Result};
 use ed25519::signature::{Signer, Verifier};
 use ed25519::{ComponentBytes, Signature, SignatureBytes};
-#[cfg(any(feature = "ed25519-dalek", test))]
-use ed25519_dalek::{SigningKey as DalekSigningKey, VerifyingKey as DalekVerifyingKey};
-#[cfg(any(feature = "ed25519-dalek", feature = "ring-compat", test))]
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, trace};
-#[cfg(feature = "ring-compat")]
-use ring_compat::signature::ed25519::{
-    SigningKey as RingCompatSigningKey, VerifyingKey as RingCompatVerifyingKey,
-};
 use serde::Serialize;
 
 /// The ed25519 public key format.
@@ -23,45 +17,17 @@ pub type SecretKey = ComponentBytes;
 /// This is a wrapper around an [ed25519] implementation that allows
 /// **signing** and **validating** item values.
 #[derive(Debug)]
-pub struct ItemSignature {
-    inner: InnerItemSignature,
-}
+pub struct ItemSignature {}
 
 impl ItemSignature {
-    /// Create a new verifier based on the enabled features, see `ed25519-dalek` or `ring-compat`.
-    /// If there are no providers enabled, [Error::MissingCryptoProvider] is returned.
-    ///
-    /// Priority is given to dalek if both are enabled.
+    /// Create a new verifier based on the enabled features, see `ed25519-dalek`.
     pub fn new() -> Result<Self> {
-        #[cfg(any(feature = "ed25519-dalek", test))]
-        {
-            return Ok(Self::new_dalek());
-        }
-        #[cfg(feature = "ring-compat")]
-        {
-            return Ok(Self::new_ring());
-        }
-
-        #[cfg(all(
-            not(feature = "ed25519-dalek"),
-            not(feature = "ring-compat"),
-            not(test)
-        ))]
-        Err(Error::MissingCryptoProvider)
+        Ok(Self::new_dalek())
     }
 
-    #[cfg(any(feature = "ed25519-dalek", test))]
+    /// Create a new `ed25519_dalek` based verifier.
     pub fn new_dalek() -> Self {
-        Self {
-            inner: InnerItemSignature::Dalek,
-        }
-    }
-
-    #[cfg(feature = "ring-compat")]
-    pub fn new_ring() -> Self {
-        Self {
-            inner: InnerItemSignature::RingCompat,
-        }
+        Self {}
     }
 
     /// Sign the given value with the secret key.
@@ -85,24 +51,11 @@ impl ItemSignature {
         };
         let item_signature_bytes = bencode::to_bytes(&item_signature)?;
 
-        match self.inner {
-            #[cfg(any(feature = "ed25519-dalek", test))]
-            InnerItemSignature::Dalek => {
-                let signer = DalekSigningKey::from_bytes(secret_key);
-                signer
-                    .try_sign(item_signature_bytes.as_slice())
-                    .map(|e| (e.to_bytes(), signer.verifying_key().to_bytes()))
-                    .map_err(|e| Error::InvalidMessage(e.to_string()))
-            }
-            #[cfg(feature = "ring-compat")]
-            InnerItemSignature::RingCompat => {
-                let signer = RingCompatSigningKey::from_bytes(secret_key);
-                signer
-                    .try_sign(item_signature_bytes.as_slice())
-                    .map(|e| (e.to_bytes(), signer.verifying_key().0))
-                    .map_err(|e| Error::InvalidMessage(e.to_string()))
-            }
-        }
+        let signer = SigningKey::from_bytes(secret_key);
+        signer
+            .try_sign(item_signature_bytes.as_slice())
+            .map(|e| (e.to_bytes(), signer.verifying_key().to_bytes()))
+            .map_err(|e| Error::InvalidMessage(e.to_string()))
     }
 
     /// Validate the signature of the given value.
@@ -126,32 +79,15 @@ impl ItemSignature {
         };
         let verification_item_bytes = bencode::to_bytes(&verification_item)?;
 
-        match self.inner {
-            #[cfg(any(feature = "ed25519-dalek", test))]
-            InnerItemSignature::Dalek => {
-                let key = DalekVerifyingKey::from_bytes(public_key).map_err(|e| {
-                    trace!("DHT item verifier failed to create key, {}", e);
-                    Error::InvalidSignature
-                })?;
-                key.verify(&verification_item_bytes, &signature)
-                    .map_err(|e| {
-                        debug!("DHT item verifier validation failed, {}", e);
-                        Error::InvalidSignature
-                    })
-            }
-            #[cfg(feature = "ring-compat")]
-            InnerItemSignature::RingCompat => {
-                let key = RingCompatVerifyingKey::from_slice(public_key).map_err(|e| {
-                    trace!("DHT item verifier failed to create key, {}", e);
-                    Error::InvalidSignature
-                })?;
-                key.verify(&verification_item_bytes, &signature)
-                    .map_err(|e| {
-                        debug!("DHT item verifier validation failed, {}", e);
-                        Error::InvalidSignature
-                    })
-            }
-        }
+        let key = VerifyingKey::from_bytes(public_key).map_err(|e| {
+            trace!("DHT item verifier failed to create key, {}", e);
+            Error::InvalidSignature
+        })?;
+        key.verify(&verification_item_bytes, &signature)
+            .map_err(|e| {
+                debug!("DHT item verifier validation failed, {}", e);
+                Error::InvalidSignature
+            })
     }
 }
 
@@ -166,14 +102,6 @@ where
     pub sequence_nr: u64,
     #[serde(rename = "v")]
     pub value: V,
-}
-
-#[derive(Debug)]
-enum InnerItemSignature {
-    #[cfg(any(feature = "ed25519-dalek", test))]
-    Dalek,
-    #[cfg(feature = "ring-compat")]
-    RingCompat,
 }
 
 #[cfg(test)]
