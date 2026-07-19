@@ -13,7 +13,6 @@ and is based on the `libtorrent` library for functionality and naming convention
 - [Getting Started](#getting-started)
 - [Features](#features)
 - [CLI example](#cli-example)
-- [DHT](#dht)
 - [Extensions](#extensions)
 
 ## Getting Started
@@ -120,15 +119,6 @@ fn axum_example(filename: &str) -> Response<Body> {
         .body(Body::from_stream(Box::into_pin(stream)))
 }
 ```
-
-## DHT
-
-When using the `dht` feature, enabled by default, one of the following additional features should be enabled:
-- `ed25519-dalek`
-- `ring-compat`
-
-These crypto providers are used within the DHT network to verify mutable items within the network.
-When both features are missing, a `Error::MissingCryptoProvider` error will be returned.
 
 ## Extensions
 
