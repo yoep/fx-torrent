@@ -89,6 +89,7 @@ impl UtpPeerDiscovery {
         &self,
         peer_id: PeerId,
         peer_addr: SocketAddr,
+        peer_port: Option<u16>,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
@@ -109,6 +110,7 @@ impl UtpPeerDiscovery {
             return Ok(BitTorrentPeer::new_outbound(
                 peer_id,
                 peer_addr,
+                peer_port,
                 stream.into(),
                 torrent,
                 metadata,
@@ -290,6 +292,7 @@ mod tests {
             .dial(
                 PeerId::new(),
                 SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                torrent.inner.peer_port().await,
                 torrent.inner.clone(),
                 torrent.inner.metadata().await.unwrap(),
                 torrent.inner.data_pool().await.unwrap(),

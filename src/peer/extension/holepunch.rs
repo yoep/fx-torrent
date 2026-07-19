@@ -217,6 +217,10 @@ impl HolepunchExtension {
             err_code: None,
         }) {
             Err(e) => {
+                debug!(
+                    "Peer {} failed to send holepunch rendezvous message to {}",
+                    peer, target
+                );
                 response.send(Err(Error::Parsing(e.to_string())));
                 return;
             }
@@ -477,6 +481,7 @@ mod tests {
                 .dial(
                     PeerId::new(),
                     target_addr,
+                    relay_torrent.inner.peer_port().await,
                     relay_torrent.inner.clone(),
                     relay_torrent.metadata().await.unwrap(),
                     relay_data_pool,
@@ -585,6 +590,7 @@ mod tests {
                 .dial(
                     PeerId::new(),
                     target_addr,
+                    relay_torrent.inner.peer_port().await,
                     relay_torrent.inner.clone(),
                     relay_torrent.metadata().await.unwrap(),
                     relay_data_pool,

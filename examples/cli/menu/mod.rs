@@ -188,7 +188,7 @@ pub enum MenuCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum MenuSection {
+pub enum MenuSection {
     Overview,
     AddTorrent,
     Settings,

@@ -118,6 +118,7 @@ macro_rules! peer_context_pair {
             PeerContext::new(
                 incoming_peer_id,
                 incoming_addr,
+                incoming_torrent.peer_port().await,
                 PeerConnection::new_tcp(
                     incoming_peer_id,
                     incoming_addr,
@@ -139,6 +140,7 @@ macro_rules! peer_context_pair {
             PeerContext::new(
                 outgoing_peer_id,
                 listener_addr,
+                outgoing_torrent.peer_port().await,
                 PeerConnection::new_tcp(
                     outgoing_peer_id,
                     listener_addr,

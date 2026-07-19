@@ -100,12 +100,14 @@ pub mod tests {
             .expect("expected an incoming uTP stream");
 
         // create the incoming uTP peer handler thread
+        let peer_port = incoming_context.peer_port().await;
         let metadata = incoming_context.metadata().await.unwrap();
         let incoming_addr = outgoing_socket.addr();
         tokio::spawn(async move {
             let peer = BitTorrentPeer::new_inbound(
                 PeerId::new(),
                 incoming_addr,
+                peer_port,
                 PeerStream::Utp(incoming_stream),
                 incoming_context,
                 metadata,
@@ -124,6 +126,7 @@ pub mod tests {
         let outgoing_peer = BitTorrentPeer::new_outbound(
             PeerId::new(),
             incoming_socket.addr(),
+            outgoing_context.peer_port().await,
             PeerStream::Utp(outgoing_stream),
             outgoing_context,
             metadata,

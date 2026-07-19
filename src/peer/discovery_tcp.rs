@@ -87,6 +87,7 @@ impl TcpPeerDiscovery {
         &self,
         peer_id: PeerId,
         peer_addr: SocketAddr,
+        peer_port: Option<u16>,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
@@ -103,6 +104,7 @@ impl TcpPeerDiscovery {
                 Self::create_peer_from_stream(
                     peer_id,
                     peer_addr,
+                    peer_port,
                     stream?,
                     torrent,
                     metadata,
@@ -129,6 +131,7 @@ impl TcpPeerDiscovery {
     async fn create_peer_from_stream(
         peer_id: PeerId,
         peer_addr: SocketAddr,
+        peer_port: Option<u16>,
         stream: TcpStream,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
@@ -141,6 +144,7 @@ impl TcpPeerDiscovery {
         Ok(BitTorrentPeer::new_outbound(
             peer_id,
             peer_addr,
+            peer_port,
             stream.into(),
             torrent,
             metadata,
@@ -296,6 +300,7 @@ mod tests {
             dialer.dial(
                 PeerId::new(),
                 SocketAddr::from((Ipv4Addr::LOCALHOST, listener_port)),
+                torrent.inner.peer_port().await,
                 torrent.inner.clone(),
                 metadata,
                 data_pool,
