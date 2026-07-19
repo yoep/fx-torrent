@@ -345,6 +345,7 @@ macro_rules! tcp_peer_pair {
         let incoming_peer = BitTorrentPeer::new_inbound(
             PeerId::new(),
             incoming_addr,
+            incoming_torrent.inner.peer_port().await,
             incoming_stream.into(),
             incoming_torrent.inner.clone(),
             incoming_torrent.metadata().await.unwrap(),
@@ -363,6 +364,7 @@ macro_rules! tcp_peer_pair {
         let outgoing_peer = BitTorrentPeer::new_outbound(
             PeerId::new(),
             outgoing_addr,
+            outgoing_torrent.inner.peer_port().await,
             outgoing_stream.into(),
             outgoing_torrent.inner.clone(),
             outgoing_torrent.metadata().await.unwrap(),
@@ -440,6 +442,7 @@ macro_rules! utp_peer_pair {
         let incoming_peer = BitTorrentPeer::new_inbound(
             PeerId::new(),
             incoming_stream.addr(),
+            incoming_torrent.inner.peer_port().await,
             incoming_stream.into(),
             incoming_torrent.inner.clone(),
             incoming_torrent.inner.metadata().await.unwrap(),
@@ -458,6 +461,7 @@ macro_rules! utp_peer_pair {
         let outgoing_peer = BitTorrentPeer::new_outbound(
             PeerId::new(),
             outgoing_stream.addr(),
+            outgoing_torrent.inner.peer_port().await,
             outgoing_stream.into(),
             outgoing_torrent.inner.clone(),
             outgoing_torrent.inner.metadata().await.unwrap(),

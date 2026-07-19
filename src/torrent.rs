@@ -3038,6 +3038,7 @@ impl TorrentContext {
 
         let handle = self.handle;
         let peer_id = self.peer_id;
+        let peer_port = self.peer_port().copied();
         let metadata = self.metadata.clone();
         let data_pool = self.data_pool.clone();
         let storage = self.storage.clone();
@@ -3049,6 +3050,7 @@ impl TorrentContext {
             match BitTorrentPeer::new_inbound(
                 peer_id,
                 entry.socket_addr,
+                peer_port,
                 entry.stream,
                 InnerTorrent {
                     handle,
@@ -3381,16 +3383,35 @@ impl TorrentContext {
             .peers_upload_slots
             .saturating_sub(self.peer_pool.upload_slots_len());
 
-        let peer_addrs = futures::future::join_all(self.peer_pool.peers().map(|peer| async {
-            if peer.remote_interest_state().await == InterestState::NotInterested {
-                return None;
-            }
-            if peer.choke_state().await == ChokeState::UnChoked {
-                return None;
-            }
+        let peer_addrs = futures::future::join_all(
+            self.peer_pool
+                .peers_with(|conn| {
+                    !matches!(
+                        conn.state(),
+                        PeerState::Handshake | PeerState::Error | PeerState::Closed
+                    )
+                })
+                .map(|peer| async {
+                    let remote_interest_state =
+                        timeout(Duration::from_millis(250), peer.remote_interest_state())
+                            .await
+                            .unwrap_or(InterestState::NotInterested);
+                    if remote_interest_state == InterestState::NotInterested {
+                        return None;
+                    }
 
-            Some(peer.addr().clone())
-        }))
+                    let choke_state =
+                        match timeout(Duration::from_millis(250), peer.choke_state()).await {
+                            Ok(state) => state,
+                            Err(_) => return None,
+                        };
+                    if choke_state == ChokeState::UnChoked {
+                        return None;
+                    }
+
+                    Some(peer.addr().clone())
+                }),
+        )
         .await;
 
         for addr in peer_addrs

@@ -92,23 +92,9 @@ impl TorrentInfoWidget {
                 }
             }
             TorrentEvent::PeerConnected(peer) => {
-                data.peers = match timeout(
-                    Duration::from_millis(250),
-                    self.torrent.active_peer_connections(),
-                )
-                .await
-                {
-                    Ok(num_of_peers) => num_of_peers,
-                    Err(_) => {
-                        debug!(
-                            "Torrent {} timed out waiting for active peer connections",
-                            self.torrent
-                        );
-                        return;
-                    }
-                };
+                data.peers = self.torrent.active_peer_connections().await;
 
-                match timeout(Duration::from_millis(500), self.torrent.peer(&peer.handle)).await {
+                match timeout(Duration::from_millis(750), self.torrent.peer(&peer.handle)).await {
                     Ok(Some(peer)) => {
                         self.content_widget.add_peer(peer).await;
                     }

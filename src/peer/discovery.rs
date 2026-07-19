@@ -76,6 +76,7 @@ impl PeerDiscovery {
         &self,
         peer_id: PeerId,
         peer_addr: SocketAddr,
+        peer_port: Option<u16>,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
@@ -90,6 +91,7 @@ impl PeerDiscovery {
                     .dial(
                         peer_id,
                         peer_addr,
+                        peer_port,
                         torrent,
                         metadata,
                         data_pool,
@@ -105,6 +107,7 @@ impl PeerDiscovery {
                     .dial(
                         peer_id,
                         peer_addr,
+                        peer_port,
                         torrent,
                         metadata,
                         data_pool,
@@ -120,6 +123,7 @@ impl PeerDiscovery {
                     .dial(
                         peer_id,
                         peer_addr,
+                        peer_port,
                         torrent,
                         metadata,
                         data_pool,
@@ -189,6 +193,7 @@ pub trait Discovery: Debug + Send + Sync {
     ///
     /// * `peer_id` - The unique peer identifier of the torrent.
     /// * `peer_addr` - The address of the peer to dial.
+    /// * `peer_port` - The peer port on which the torrent is listening for incoming connections.
     /// * `torrent` - The torrent to use for the connection.
     /// * `metadata` - The current known metadata of the torrent.
     /// * `data_pool` - The torrent data pool to use for the connection.
@@ -204,6 +209,7 @@ pub trait Discovery: Debug + Send + Sync {
         &self,
         peer_id: PeerId,
         peer_addr: SocketAddr,
+        peer_port: Option<u16>,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
@@ -243,6 +249,7 @@ pub mod mock {
                 &self,
                 peer_id: PeerId,
                 peer_addr: SocketAddr,
+                peer_port: Option<u16>,
                 torrent: InnerTorrent,
                 metadata: TorrentMetadata,
                 data_pool: DataPool,

@@ -20,7 +20,6 @@ use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use derive_more::Display;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
-use itertools::Itertools;
 use log::{debug, error, trace, warn};
 use std::cmp::max;
 use std::collections::{HashSet, VecDeque};
@@ -285,7 +284,8 @@ impl BitTorrentPeer {
     /// ```
     pub(crate) async fn new_outbound(
         peer_id: PeerId,
-        addr: SocketAddr,
+        peer_addr: SocketAddr,
+        peer_port: Option<u16>,
         stream: PeerStream,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
@@ -298,21 +298,22 @@ impl BitTorrentPeer {
         trace!(
             "Torrent {} is trying to create outgoing peer connection to {}",
             torrent,
-            addr
+            peer_addr
         );
         let metrics = Metrics::new();
         let connection = match stream {
             PeerStream::Tcp(stream) => {
-                PeerConnection::new_tcp(peer_id, addr, stream, metrics.clone())
+                PeerConnection::new_tcp(peer_id, peer_addr, stream, metrics.clone())
             }
             PeerStream::Utp(stream) => {
-                PeerConnection::new_utp(peer_id, addr, stream, metrics.clone())
+                PeerConnection::new_utp(peer_id, peer_addr, stream, metrics.clone())
             }
         };
 
         Self::process_connection_stream(
             peer_id,
-            addr,
+            peer_addr,
+            peer_port,
             connection,
             ConnectionDirection::Outbound,
             torrent,
@@ -330,7 +331,8 @@ impl BitTorrentPeer {
     /// Try to accept a new incoming BitTorrent peer connection for the given network stream.
     pub(crate) async fn new_inbound(
         peer_id: PeerId,
-        addr: SocketAddr,
+        peer_addr: SocketAddr,
+        peer_port: Option<u16>,
         stream: PeerStream,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
@@ -343,25 +345,26 @@ impl BitTorrentPeer {
         let metrics = Metrics::new();
         let connection = match stream {
             PeerStream::Tcp(stream) => {
-                PeerConnection::new_tcp(peer_id, addr, stream, metrics.clone())
+                PeerConnection::new_tcp(peer_id, peer_addr, stream, metrics.clone())
             }
             PeerStream::Utp(stream) => {
-                PeerConnection::new_utp(peer_id, addr, stream, metrics.clone())
+                PeerConnection::new_utp(peer_id, peer_addr, stream, metrics.clone())
             }
         };
 
         trace!(
             "Torrent {} is trying to receive incoming peer connection from {}",
             torrent,
-            addr
+            peer_addr
         );
         select! {
             _ = time::sleep(timeout) => {
-                Err(Error::Io(io::Error::new(io::ErrorKind::TimedOut, format!("connection from {} timed out", addr))))
+                Err(Error::Io(io::Error::new(io::ErrorKind::TimedOut, format!("connection from {} timed out", peer_addr))))
             },
             result = Self::process_connection_stream(
                 peer_id,
-                addr,
+                peer_addr,
+                peer_port,
                 connection,
                 ConnectionDirection::Inbound,
                 torrent,
@@ -690,7 +693,8 @@ impl BitTorrentPeer {
 
     async fn process_connection_stream(
         peer_id: PeerId,
-        addr: SocketAddr,
+        peer_addr: SocketAddr,
+        peer_port: Option<u16>,
         connection: PeerConnection,
         connection_type: ConnectionDirection,
         torrent: InnerTorrent,
@@ -709,7 +713,8 @@ impl BitTorrentPeer {
         let torrent_event_receiver = torrent.subscribe();
         let mut context = PeerContext::new(
             peer_id,
-            addr,
+            peer_addr,
+            peer_port,
             connection,
             connection_type,
             torrent,
@@ -867,6 +872,8 @@ pub struct PeerContext {
     client: PeerClientInfo,
     /// The remote peer information, known after the initial handshake.
     remote: Option<RemotePeer>,
+    /// The peer port on which the torrent is listening for incoming connections.
+    peer_port: Option<u16>,
     torrent: InnerTorrent,
     /// The metadata of the torrent
     metadata: TorrentMetadata,
@@ -930,7 +937,8 @@ impl PeerContext {
     /// Create a new peer context instance.
     pub(crate) async fn new(
         peer_id: PeerId,
-        addr: SocketAddr,
+        peer_addr: SocketAddr,
+        peer_port: Option<u16>,
         connection: PeerConnection,
         connection_type: ConnectionDirection,
         torrent: InnerTorrent,
@@ -950,7 +958,7 @@ impl PeerContext {
             client: PeerClientInfo {
                 handle: peer_handle,
                 id: peer_id,
-                addr,
+                addr: peer_addr,
                 connection_type,
                 connection_protocol: connection.protocol(),
             },
@@ -958,6 +966,7 @@ impl PeerContext {
             remote: None,
             torrent,
             metadata,
+            peer_port,
             data_pool,
             storage,
             state: PeerState::Handshake,
@@ -1409,9 +1418,9 @@ impl PeerContext {
 
         self.on_stats_update(interval);
         self.on_extensions_tick(extensions, interval).await;
-        self.send_queued_requests().await;
-        self.process_remote_pending_requests().await;
-        self.cleanup_pending_requests().await;
+        self.send_queued_requests(interval).await;
+        self.process_remote_pending_requests(interval).await;
+        self.cleanup_pending_requests(interval).await;
 
         let elapsed = start.elapsed();
         trace!(
@@ -1421,15 +1430,33 @@ impl PeerContext {
         );
     }
 
-    async fn process_remote_pending_requests(&mut self) {
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    async fn process_remote_pending_requests(&mut self, interval: Duration) {
+        let start_time = Instant::now();
         let len = self.remote_pending_requests.len().min(4);
-        for pending_request in self.remote_pending_requests.drain(..len).collect_vec() {
+
+        let mut num_of_pending_requests_sent = 0;
+        while !self.remote_pending_requests.is_empty()
+            && start_time.elapsed() < interval
+            && num_of_pending_requests_sent < len
+        {
+            let pending_request = self.remote_pending_requests.remove(0);
             self.on_remote_pending_request(pending_request).await;
+            num_of_pending_requests_sent += 1;
         }
+
+        let elapsed = start_time.elapsed();
+        trace!(
+            "Peer {} processed {} remote pending requests in {:.3}ms",
+            self,
+            num_of_pending_requests_sent,
+            elapsed.as_secs_f64() * 1000.0
+        );
     }
 
     /// Clean up timed-out block requests sent to the remote peer.
-    async fn cleanup_pending_requests(&mut self) {
+    async fn cleanup_pending_requests(&mut self, interval: Duration) {
+        let start_time = Instant::now();
         let mut timed_out_blocks = vec![];
         self.pending_requests.retain_mut(|pending| {
             if pending.sent.elapsed() > REQUEST_TIMEOUT {
@@ -1440,10 +1467,28 @@ impl PeerContext {
             true
         });
 
+        let num_of_timed_out_blocks = timed_out_blocks.len();
         for block in timed_out_blocks {
             self.torrent
                 .piece_block_rejected(&self.client.handle, &block)
                 .await;
+        }
+
+        let elapsed = start_time.elapsed();
+        if elapsed > interval {
+            warn!(
+                "Peer {} cleaned up {} timed-out requests in {:.3}ms",
+                self,
+                num_of_timed_out_blocks,
+                elapsed.as_secs_f64() * 1000.0
+            )
+        } else {
+            trace!(
+                "Peer {} cleaned up {} timed-out requests in {:.3}ms",
+                self,
+                num_of_timed_out_blocks,
+                elapsed.as_secs_f64() * 1000.0
+            );
         }
     }
 
@@ -1797,7 +1842,7 @@ impl PeerContext {
             // reject the whole downloading queue for this peer
             self.reject_download_queue().await;
         } else {
-            self.send_queued_requests().await;
+            self.send_queued_requests(PEER_TICK_INTERVAL).await;
             self.torrent.pick_pieces(&self.client.handle).await;
         }
 
@@ -2185,11 +2230,21 @@ impl PeerContext {
     }
 
     /// Try to sent one or more queued requests to the remote peer.
-    async fn send_queued_requests(&mut self) {
-        while !self.download_queue.is_empty() && self.pending_requests.len() < self.target_queue_len
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    async fn send_queued_requests(&mut self, interval: Duration) {
+        // early exit if there are no queued requests
+        if self.download_queue.is_empty() {
+            return;
+        }
+
+        let start_time = Instant::now();
+        let mut num_of_requests_sent = 0;
+        while !self.download_queue.is_empty()
+            && start_time.elapsed() < interval
+            && self.pending_requests.len() < self.target_queue_len
         {
             let block = match self.download_queue.pop_front() {
-                None => return,
+                None => break,
                 Some(request) => request,
             };
             // if the remote peer is choked, but the fast protocol allows this piece
@@ -2197,6 +2252,9 @@ impl PeerContext {
             let is_remote_choked = self.remote_choke_state == ChokeState::Choked;
             let is_fast_allowed = self.is_fast_allowed(&block.piece);
             if is_remote_choked && !is_fast_allowed {
+                // the block is not allowed within the fast protocol,
+                // put it back into the download queue
+                self.download_queue.push_back(block);
                 continue;
             }
 
@@ -2226,7 +2284,17 @@ impl PeerContext {
                     .await;
                 break;
             }
+
+            num_of_requests_sent += 1;
         }
+
+        let elapsed = start_time.elapsed();
+        trace!(
+            "Peer {} sent {} queued request(s) in {:.3}ms",
+            self,
+            num_of_requests_sent,
+            elapsed.as_secs_f64() * 1000.0
+        );
     }
 
     /// Try to send the handshake information of our client peer to the remote peer.
@@ -2254,23 +2322,10 @@ impl PeerContext {
     async fn send_extended_handshake(&self) -> Result<()> {
         let extension_registry = self.extension_registry.clone();
         let is_partial_seed = self.data_pool.is_partial_seed().await;
-        let peer_port = match timeout(Duration::from_millis(250), self.torrent.peer_port()).await {
-            Ok(port) => port,
-            Err(_) => {
-                return Err(Error::Io(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "peer_port timed-out",
-                )))
-            }
-        };
         let config = match timeout(Duration::from_millis(250), self.torrent.config())
             .await
-            .map_err(|_| {
-                Error::Io(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "peer_port timed-out",
-                ))
-            })? {
+            .map_err(|_| Error::Io(io::Error::new(io::ErrorKind::TimedOut, "config timed-out")))?
+        {
             Ok(config) => config,
             Err(_) => return Err(Error::Closed),
         };
@@ -2283,7 +2338,7 @@ impl PeerContext {
             regg: None,
             encryption: false,
             metadata_size: None,
-            port: peer_port.map(|e| e as u32),
+            port: self.peer_port.map(|e| e as u32),
             your_ip: Some(CompactIp::from(&self.client.addr)),
             ipv4: None,
             ipv6: None,
@@ -2388,6 +2443,7 @@ impl PeerContext {
             Some(e) => e,
         };
 
+        trace!("Peer {} is starting holepunch for {}", self, target);
         extension.send_rendezvous(target, response, self).await;
     }
 
@@ -2425,6 +2481,7 @@ impl PeerContext {
     }
 
     /// Try to send the given message to the remote peer.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub async fn send(&self, message: Message) -> Result<()> {
         trace!("Peer {} trying to send message {:?}", self, message);
         let message_bytes = TryInto::<Vec<u8>>::try_into(message)?;
@@ -2564,8 +2621,15 @@ impl PeerContext {
             extension.tick(self).await;
             let elapsed = start.elapsed();
             if elapsed > interval {
-                debug!(
-                    "Peer {} detected long extension {} tick, tick took {:.3}ms",
+                warn!(
+                    "Peer {} detected long extension tick for {}, tick took {:.3}ms",
+                    self,
+                    extension.name(),
+                    elapsed.as_secs_f64() * 1000.0
+                );
+            } else {
+                trace!(
+                    "Peer {} extension {} tick took {:.3}ms",
                     self,
                     extension.name(),
                     elapsed.as_secs_f64() * 1000.0
@@ -2779,6 +2843,7 @@ mod tests {
                 let peer = BitTorrentPeer::new_outbound(
                     PeerId::new(),
                     listener_addr,
+                    Some(6881),
                     PeerStream::Tcp(TcpStream::connect(listener_addr).await.unwrap()),
                     inner,
                     metadata,

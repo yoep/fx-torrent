@@ -19,6 +19,7 @@ use tokio::time::timeout;
 use url::Url;
 
 const BURST_DURATION: Duration = Duration::from_secs(10);
+const HOLEPUNCH_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Establishes additional peer connections for the torrent.
 pub struct ConnectPeersOperation {
@@ -306,6 +307,7 @@ impl ConnectPeersOperation {
             context.callbacks().clone(),
         );
         let metadata = context.metadata().clone();
+        let peer_port = context.peer_port().copied();
         let data_pool = context.data_pool().clone();
         let storage = context.storage().clone();
         let dialers = dialers
@@ -325,6 +327,7 @@ impl ConnectPeersOperation {
                     .dial(
                         peer_id,
                         peer_addr.clone(),
+                        peer_port.clone(),
                         torrent.clone(),
                         metadata.clone(),
                         data_pool.clone(),
@@ -423,11 +426,22 @@ impl ConnectPeersOperation {
             }
 
             context.peer_pool_mut().peer_punching(&target_addr);
-            match timeout(Duration::from_millis(500), peer.holepunch(target_addr)).await {
+            match timeout(Duration::from_millis(250), peer.holepunch(target_addr)).await {
                 Ok(response) => {
                     punching = true;
-                    self.holepunch_queue
-                        .spawn(async move { (target_addr, response.await.err()) });
+                    self.holepunch_queue.spawn(async move {
+                        let response = timeout(HOLEPUNCH_TIMEOUT, response)
+                            .await
+                            .map_err(|_| {
+                                extension::Error::Io(io::Error::new(
+                                    io::ErrorKind::TimedOut,
+                                    "holepunch timed-out",
+                                ))
+                            })
+                            .flatten();
+
+                        (target_addr, response.err())
+                    });
                 }
                 Err(e) => {
                     context.peer_pool_mut().peer_punched(&target_addr, false);
@@ -567,12 +581,14 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let mut dialer = MockDiscovery::new();
-        dialer.expect_dial().returning(|_, _, _, _, _, _, _, _, _| {
-            Err(peer::Error::Io(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "timeout",
-            )))
-        });
+        dialer
+            .expect_dial()
+            .returning(|_, _, _, _, _, _, _, _, _, _| {
+                Err(peer::Error::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timeout",
+                )))
+            });
         dialer
             .expect_protocol()
             .return_const(ConnectionProtocol::Tcp);

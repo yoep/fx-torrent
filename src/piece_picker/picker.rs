@@ -6,6 +6,7 @@ use crate::storage::Storage;
 use crate::torrent_data::DataPool;
 use crate::{BitVec, BlockIndex, InnerTorrent, Piece, PieceBlock, PieceIndex, PiecePriority};
 use derive_more::Display;
+use futures::future::Either;
 use itertools::Itertools;
 use log::{debug, trace, warn};
 use std::collections::{HashMap, HashSet};
@@ -209,7 +210,7 @@ impl FxPiecePicker {
 
         // early exit if the peer is unable to queue any requests
         let mut target_queue_len =
-            match timeout(Duration::from_millis(250), peer.target_request_queue_len()).await {
+            match timeout(Duration::from_millis(500), peer.target_request_queue_len()).await {
                 Ok(len) => len,
                 Err(_) => {
                     warn!(
@@ -236,10 +237,22 @@ impl FxPiecePicker {
 
         // use the fast bitfield if the remote peer is still choked
         // early exit if the peer has no pieces we're interested in
-        let piece_bitfield = if state == ChokeState::UnChoked {
-            peer.remote_piece_bitfield().await
-        } else {
-            peer.remote_fast_bitfield().await
+        let bitfield_future = {
+            if state == ChokeState::UnChoked {
+                Either::Left(peer.remote_piece_bitfield())
+            } else {
+                Either::Right(peer.remote_fast_bitfield())
+            }
+        };
+        let piece_bitfield = match timeout(Duration::from_millis(250), bitfield_future).await {
+            Ok(piece_bitfield) => piece_bitfield,
+            Err(_) => {
+                warn!(
+                    "Piece picker {} failed to get remote bitfield for {}, timed-out",
+                    self, peer
+                );
+                return;
+            }
         };
         let mut interested_pieces = self.interested_piece_blocks(&piece_bitfield);
         if interested_pieces.len() == 0 {
