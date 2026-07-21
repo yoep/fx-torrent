@@ -216,14 +216,11 @@ impl PickerCache {
 
     /// Write the piece block data to the storage.
     async fn write_block_to_storage(&mut self, block: &PieceBlock, data: Vec<u8>) -> Result<()> {
-        let piece = block.piece;
-        let len = self.piece_len(&piece);
-
         let written = self
             .storage
-            .write(data.as_slice(), &piece, block.begin)
+            .write(data.as_slice(), &block.piece, block.begin)
             .await?;
-        if written != len {
+        if written != block.length {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 "failed to write piece to storage",

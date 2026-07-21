@@ -1436,7 +1436,12 @@ impl PeerContext {
         }
 
         let elapsed = start_time.elapsed();
-        trace!(
+        log!(
+            if elapsed > interval {
+                Level::Warn
+            } else {
+                Level::Trace
+            },
             "Peer {} processed {} remote pending requests in {:.3}ms",
             self,
             num_of_pending_requests_sent,
@@ -2218,6 +2223,8 @@ impl PeerContext {
     /// Try to sent one or more queued requests to the remote peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn send_queued_requests(&mut self, interval: Duration) {
+        const REQUEST_LIMIT: usize = 25;
+
         // early exit if there are no queued requests
         if self.download_queue.is_empty() {
             return;
@@ -2228,6 +2235,7 @@ impl PeerContext {
         while !self.download_queue.is_empty()
             && start_time.elapsed() < interval
             && self.pending_requests.len() < self.target_queue_len
+            && num_of_requests_sent < REQUEST_LIMIT
         {
             let block = match self.download_queue.pop_front() {
                 None => break,
@@ -2275,7 +2283,12 @@ impl PeerContext {
         }
 
         let elapsed = start_time.elapsed();
-        trace!(
+        log!(
+            if elapsed > interval {
+                Level::Warn
+            } else {
+                Level::Trace
+            },
             "Peer {} sent {} queued request(s) in {:.3}ms",
             self,
             num_of_requests_sent,
@@ -2597,21 +2610,17 @@ impl PeerContext {
             let start = Instant::now();
             extension.tick(self).await;
             let elapsed = start.elapsed();
-            if elapsed > interval {
-                warn!(
-                    "Peer {} detected long extension tick for {}, tick took {:.3}ms",
-                    self,
-                    extension.name(),
-                    elapsed.as_secs_f64() * 1000.0
-                );
-            } else {
-                trace!(
-                    "Peer {} extension {} tick took {:.3}ms",
-                    self,
-                    extension.name(),
-                    elapsed.as_secs_f64() * 1000.0
-                );
-            }
+            log!(
+                if elapsed > interval {
+                    Level::Warn
+                } else {
+                    Level::Trace
+                },
+                "Peer {} extension \"{}\" tick took {:.3}ms",
+                self,
+                extension.name(),
+                elapsed.as_secs_f64() * 1000.0
+            );
         }
     }
 
