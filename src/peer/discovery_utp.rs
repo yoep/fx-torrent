@@ -90,7 +90,7 @@ impl UtpPeerDiscovery {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         peer_port: Option<u16>,
-        peer_client_name: impl Into<String>,
+        peer_client_name: String,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
@@ -295,7 +295,13 @@ mod tests {
                 PeerId::new(),
                 SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
                 torrent.inner.peer_port().await,
-                torrent.inner.config().await.unwrap().client_name(),
+                torrent
+                    .inner
+                    .config()
+                    .await
+                    .unwrap()
+                    .client_name()
+                    .to_string(),
                 torrent.inner.clone(),
                 torrent.inner.metadata().await.unwrap(),
                 torrent.inner.data_pool().await.unwrap(),
