@@ -88,6 +88,7 @@ impl TcpPeerDiscovery {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         peer_port: Option<u16>,
+        peer_client_name: impl Into<String>,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
@@ -105,6 +106,7 @@ impl TcpPeerDiscovery {
                     peer_id,
                     peer_addr,
                     peer_port,
+                peer_client_name,
                     stream?,
                     torrent,
                     metadata,
@@ -132,6 +134,7 @@ impl TcpPeerDiscovery {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         peer_port: Option<u16>,
+        peer_client_name: impl Into<String>,
         stream: TcpStream,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
@@ -145,6 +148,7 @@ impl TcpPeerDiscovery {
             peer_id,
             peer_addr,
             peer_port,
+            peer_client_name,
             stream.into(),
             torrent,
             metadata,
@@ -292,6 +296,7 @@ mod tests {
             .expect("expected a new tcp peer dialer");
 
         // try to create an outgoing peer connection through the dialer
+        let config = torrent.inner.config().await.unwrap();
         let metadata = torrent.inner.metadata().await.unwrap();
         let data_pool = torrent.inner.data_pool().await.unwrap();
         let storage = torrent.inner.storage().await.unwrap();
@@ -301,6 +306,7 @@ mod tests {
                 PeerId::new(),
                 SocketAddr::from((Ipv4Addr::LOCALHOST, listener_port)),
                 torrent.inner.peer_port().await,
+                config.client_name(),
                 torrent.inner.clone(),
                 metadata,
                 data_pool,

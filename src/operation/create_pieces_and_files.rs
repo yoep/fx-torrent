@@ -8,30 +8,48 @@ use log::{trace, warn};
 use std::time::Instant;
 
 #[derive(Debug)]
-pub struct CreatePiecesAndFilesOperation;
+pub struct CreatePiecesAndFilesOperation {
+    initialized: bool,
+    completed: bool,
+}
 
 impl CreatePiecesAndFilesOperation {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            initialized: false,
+            completed: false,
+        }
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn execute(&mut self, torrent: &mut TorrentContext) -> TorrentOperationResult {
+        self.initialize(torrent).await;
+
         // check if the pieces have already been created
         // if so, continue the chain
-        if torrent.data_pool().num_of_pieces().await > 0 {
+        if self.completed {
             return TorrentOperationResult::Continue;
         }
 
         // try to create the pieces and files
         if self.create_pieces(torrent).await {
             if self.create_files(&torrent).await {
+                self.completed = true;
                 self.update_state(torrent).await;
                 return TorrentOperationResult::Continue;
             }
         }
 
         TorrentOperationResult::Stop
+    }
+
+    async fn initialize(&mut self, torrent: &TorrentContext) {
+        if self.initialized {
+            return;
+        }
+
+        self.completed = torrent.data_pool().num_of_pieces().await > 0;
+        self.initialized = true;
     }
 
     /// Create the pieces information for the torrent.

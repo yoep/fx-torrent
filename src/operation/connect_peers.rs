@@ -308,6 +308,7 @@ impl ConnectPeersOperation {
         );
         let metadata = context.metadata().clone();
         let peer_port = context.peer_port().copied();
+        let peer_client_name = context.config().client_name().to_string();
         let data_pool = context.data_pool().clone();
         let storage = context.storage().clone();
         let dialers = dialers
@@ -328,6 +329,7 @@ impl ConnectPeersOperation {
                         peer_id,
                         peer_addr.clone(),
                         peer_port.clone(),
+                        peer_client_name.as_str(),
                         torrent.clone(),
                         metadata.clone(),
                         data_pool.clone(),
@@ -583,7 +585,7 @@ mod tests {
         let mut dialer = MockDiscovery::new();
         dialer
             .expect_dial()
-            .returning(|_, _, _, _, _, _, _, _, _, _| {
+            .returning(|_, _, _, _, _, _, _, _, _, _, _| {
                 Err(peer::Error::Io(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "timeout",

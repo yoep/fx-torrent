@@ -475,6 +475,7 @@ mod tests {
             ));
 
             // connect the relay torrent to the target torrent
+            let relay_config = relay_torrent.inner.config().await.unwrap();
             let relay_data_pool = relay_torrent.inner.data_pool().await.unwrap();
             let relay_storage = relay_torrent.inner.storage().await.unwrap();
             let peer = relay_discovery
@@ -482,6 +483,7 @@ mod tests {
                     PeerId::new(),
                     target_addr,
                     relay_torrent.inner.peer_port().await,
+                    relay_config.client_name(),
                     relay_torrent.inner.clone(),
                     relay_torrent.metadata().await.unwrap(),
                     relay_data_pool,
@@ -583,6 +585,7 @@ mod tests {
             ));
 
             // connect the relay torrent to the target torrent
+            let relay_config = relay_torrent.inner.config().await.unwrap();
             let relay_data_pool = relay_torrent.inner.data_pool().await.unwrap();
             let relay_storage = relay_torrent.inner.storage().await.unwrap();
             let extensions = vec![HolepunchExtension::new().into()];
@@ -591,6 +594,7 @@ mod tests {
                     PeerId::new(),
                     target_addr,
                     relay_torrent.inner.peer_port().await,
+                    relay_config.client_name(),
                     relay_torrent.inner.clone(),
                     relay_torrent.metadata().await.unwrap(),
                     relay_data_pool,
