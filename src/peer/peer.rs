@@ -251,42 +251,11 @@ pub struct BitTorrentPeer {
 
 impl BitTorrentPeer {
     /// Create a new outgoing BitTorrent peer connection for the given network stream.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use std::net::SocketAddr;
-    /// use std::sync::Arc;
-    /// use std::time::Duration;
-    /// use tokio::net::TcpStream;
-    /// use tokio::runtime::Runtime;
-    /// use fx_torrent::torrent::peer::{BitTorrentPeer, PeerId, PeerStream, ProtocolExtensionFlags, Result};
-    /// use fx_torrent::torrent::peer::extension::Extension;
-    /// use fx_torrent::torrent::TorrentContext;
-    ///
-    /// async fn create_new_peer(torrent: Arc<TorrentContext>) -> Result<BitTorrentPeer> {
-    ///     let peer_id = PeerId::new();
-    ///     let addr = SocketAddr::from(([127,0,0,1], 6881));
-    ///     let stream = PeerStream::Tcp(TcpStream::connect(addr).await?);
-    ///     let protocol_extensions = ProtocolExtensionFlags::LTEP | ProtocolExtensionFlags::Fast;
-    ///     let extensions : Vec<Box<dyn Extension>> = vec![];
-    ///
-    ///     BitTorrentPeer::new_outbound(
-    ///         peer_id,
-    ///         addr,
-    ///         stream,
-    ///         torrent,
-    ///         protocol_extensions,
-    ///         extensions,
-    ///         Duration::from_secs(10),
-    ///     ).await
-    /// }
-    /// ```
     pub(crate) async fn new_outbound(
         peer_id: PeerId,
         peer_addr: SocketAddr,
         peer_port: Option<u16>,
-        peer_client_name: impl Into<String>,
+        peer_client_name: String,
         stream: PeerStream,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
@@ -335,7 +304,7 @@ impl BitTorrentPeer {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         peer_port: Option<u16>,
-        peer_client_name: impl Into<String>,
+        peer_client_name: String,
         stream: PeerStream,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
@@ -360,11 +329,9 @@ impl BitTorrentPeer {
             torrent,
             peer_addr
         );
-        select! {
-            _ = time::sleep(timeout) => {
-                Err(Error::Io(io::Error::new(io::ErrorKind::TimedOut, format!("connection from {} timed out", peer_addr))))
-            },
-            result = Self::process_connection_stream(
+        tokio::time::timeout(
+            timeout,
+            Self::process_connection_stream(
                 peer_id,
                 peer_addr,
                 peer_port,
@@ -379,8 +346,16 @@ impl BitTorrentPeer {
                 extensions,
                 metrics,
                 timeout,
-            ) => result
-        }
+            ),
+        )
+        .await
+        .map_err(|_| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("connection from {} timed out", peer_addr),
+            ))
+        })
+        .flatten()
     }
 
     /// Returns the unique handle of the peer.
@@ -699,7 +674,7 @@ impl BitTorrentPeer {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         peer_port: Option<u16>,
-        peer_client_name: impl Into<String>,
+        peer_client_name: String,
         connection: PeerConnection,
         connection_type: ConnectionDirection,
         torrent: InnerTorrent,
@@ -947,7 +922,7 @@ impl PeerContext {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         peer_port: Option<u16>,
-        peer_client_name: impl Into<String>,
+        peer_client_name: String,
         connection: PeerConnection,
         connection_type: ConnectionDirection,
         torrent: InnerTorrent,
@@ -976,7 +951,7 @@ impl PeerContext {
             torrent,
             metadata,
             peer_port,
-            peer_client_name: peer_client_name.into(),
+            peer_client_name,
             data_pool,
             storage,
             state: PeerState::Handshake,
@@ -1461,7 +1436,12 @@ impl PeerContext {
         }
 
         let elapsed = start_time.elapsed();
-        trace!(
+        log!(
+            if elapsed > interval {
+                Level::Warn
+            } else {
+                Level::Trace
+            },
             "Peer {} processed {} remote pending requests in {:.3}ms",
             self,
             num_of_pending_requests_sent,
@@ -1490,21 +1470,17 @@ impl PeerContext {
         }
 
         let elapsed = start_time.elapsed();
-        if elapsed > interval {
-            warn!(
-                "Peer {} cleaned up {} timed-out requests in {:.3}ms",
-                self,
-                num_of_timed_out_blocks,
-                elapsed.as_secs_f64() * 1000.0
-            )
-        } else {
-            trace!(
-                "Peer {} cleaned up {} timed-out requests in {:.3}ms",
-                self,
-                num_of_timed_out_blocks,
-                elapsed.as_secs_f64() * 1000.0
-            );
-        }
+        log!(
+            if elapsed > interval {
+                Level::Warn
+            } else {
+                Level::Trace
+            },
+            "Peer {} cleaned {} timed-out requests in {:.3}ms",
+            self,
+            num_of_timed_out_blocks,
+            elapsed.as_secs_f64() * 1000.0
+        )
     }
 
     /// Process a request which has been rejected by the remote peer.
@@ -2247,6 +2223,8 @@ impl PeerContext {
     /// Try to sent one or more queued requests to the remote peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn send_queued_requests(&mut self, interval: Duration) {
+        const REQUEST_LIMIT: usize = 25;
+
         // early exit if there are no queued requests
         if self.download_queue.is_empty() {
             return;
@@ -2257,6 +2235,7 @@ impl PeerContext {
         while !self.download_queue.is_empty()
             && start_time.elapsed() < interval
             && self.pending_requests.len() < self.target_queue_len
+            && num_of_requests_sent < REQUEST_LIMIT
         {
             let block = match self.download_queue.pop_front() {
                 None => break,
@@ -2304,7 +2283,12 @@ impl PeerContext {
         }
 
         let elapsed = start_time.elapsed();
-        trace!(
+        log!(
+            if elapsed > interval {
+                Level::Warn
+            } else {
+                Level::Trace
+            },
             "Peer {} sent {} queued request(s) in {:.3}ms",
             self,
             num_of_requests_sent,
@@ -2626,21 +2610,17 @@ impl PeerContext {
             let start = Instant::now();
             extension.tick(self).await;
             let elapsed = start.elapsed();
-            if elapsed > interval {
-                warn!(
-                    "Peer {} detected long extension tick for {}, tick took {:.3}ms",
-                    self,
-                    extension.name(),
-                    elapsed.as_secs_f64() * 1000.0
-                );
-            } else {
-                trace!(
-                    "Peer {} extension {} tick took {:.3}ms",
-                    self,
-                    extension.name(),
-                    elapsed.as_secs_f64() * 1000.0
-                );
-            }
+            log!(
+                if elapsed > interval {
+                    Level::Warn
+                } else {
+                    Level::Trace
+                },
+                "Peer {} extension \"{}\" tick took {:.3}ms",
+                self,
+                extension.name(),
+                elapsed.as_secs_f64() * 1000.0
+            );
         }
     }
 
@@ -2850,7 +2830,7 @@ mod tests {
                     PeerId::new(),
                     listener_addr,
                     Some(6881),
-                    "FxTestClient",
+                    "FxTestClient".to_string(),
                     PeerStream::Tcp(TcpStream::connect(listener_addr).await.unwrap()),
                     inner,
                     metadata,

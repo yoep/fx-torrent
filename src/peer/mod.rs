@@ -134,7 +134,12 @@ pub mod tests {
             PeerId::new(),
             incoming_socket.addr(),
             outgoing_context.peer_port().await,
-            outgoing_context.config().await.unwrap().client_name(),
+            outgoing_context
+                .config()
+                .await
+                .unwrap()
+                .client_name()
+                .to_string(),
             PeerStream::Utp(outgoing_stream),
             outgoing_context,
             metadata,

@@ -1889,7 +1889,6 @@ impl TorrentContext {
                 )
                 .await;
         }
-        self.data_pool.close().await;
         self.cancellation_token.cancel();
         self.update_state(TorrentState::Stopped);
         trace!("Torrent {} main loop ended", self);

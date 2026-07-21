@@ -1,4 +1,3 @@
-use crate::channel::{ChannelReceiver, ChannelSender, Reply};
 use crate::{
     BitVec, File, FileAttributeFlags, FileIndex, FilePriority, Piece, PieceBlock, PieceIndex,
     PiecePriority,
@@ -6,6 +5,8 @@ use crate::{
 use itertools::Itertools;
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// The data pool of a torrent storing info about pieces and files.
 /// It makes use of a separate loop task to handle operations on the data pool.
@@ -18,7 +19,7 @@ use std::ops::Range;
 /// ```
 #[derive(Debug, Clone)]
 pub struct DataPool {
-    sender: ChannelSender<DataPoolCommand>,
+    inner: Arc<RwLock<InnerDataPool>>,
 }
 
 impl DataPool {
@@ -29,189 +30,110 @@ impl DataPool {
 
     /// Create a new data pool for the given pieces.
     fn new_with_pieces(pieces: Vec<Piece>) -> Self {
-        let (sender, rx) = channel!(256);
-        spawn!("InnerDataPool::run", async move {
-            let mut inner = InnerDataPool::new(pieces);
-            inner.run(rx).await;
-        });
-
-        Self { sender }
+        Self {
+            inner: Arc::new(RwLock::new(InnerDataPool::new(pieces))),
+        }
     }
 
     /// Returns the number of pieces within the pool.
     pub async fn num_of_pieces(&self) -> usize {
-        let rx = self
-            .sender
-            .send(|tx| DataPoolCommand::NumOfPieces { response: tx })
-            .await;
-        rx.await.unwrap_or_default()
+        self.inner.read().await.num_of_pieces()
     }
 
     /// Returns the number of files within the pool.
     /// Files with the attribute [FileAttributeFlags::PaddingFile] are not counted.
     pub async fn num_of_files(&self) -> usize {
-        let rx = self
-            .sender
-            .send(|tx| DataPoolCommand::NumOfFiles { response: tx })
-            .await;
-        rx.await.unwrap_or_default()
+        self.inner.read().await.num_of_files()
     }
 
     /// Returns the number of pieces which have been completed.
     pub async fn num_completed_pieces(&self) -> usize {
-        let rx = self
-            .sender
-            .send(|tx| DataPoolCommand::NumCompletedPieces { response: tx })
-            .await;
-        rx.await.unwrap_or_default()
+        self.inner.read().await.num_completed_pieces()
     }
 
     /// Returns the piece for the given index.
     pub async fn piece(&self, piece: &PieceIndex) -> Option<Piece> {
-        let rx = self
-            .sender
-            .send(|tx| DataPoolCommand::GetPiece {
-                index: *piece,
-                response: tx,
-            })
-            .await;
-        rx.await.unwrap_or_default()
+        self.inner.read().await.pieces.get(piece).cloned()
     }
 
     /// Returns the file for the given index, if found.
     pub async fn file(&self, file: &FileIndex) -> Option<File> {
-        let rx = self
-            .sender
-            .send(|tx| DataPoolCommand::GetFile {
-                index: *file,
-                response: tx,
-            })
-            .await;
-        rx.await.unwrap_or_default()
+        self.inner.read().await.files.get(file).cloned()
     }
 
     /// Returns the file for the given name, if found.
-    pub async fn file_by_name(&self, name: impl ToString) -> Option<File> {
-        self.sender
-            .send(|tx| DataPoolCommand::GetFileByName {
-                name: name.to_string(),
-                response: tx,
-            })
+    pub async fn file_by_name<S: AsRef<str>>(&self, name: S) -> Option<File> {
+        self.inner
+            .read()
             .await
-            .await
-            .ok()
-            .flatten()
+            .files
+            .values()
+            .find(|file| file.filename() == name.as_ref())
+            .cloned()
     }
 
     /// Returns all pieces present within the pool.
     pub async fn pieces(&self) -> Vec<Piece> {
-        let rx = self
-            .sender
-            .send(|tx| DataPoolCommand::GetPieces { response: tx })
-            .await;
-        rx.await.unwrap_or_default()
+        self.inner.read().await.pieces.values().cloned().collect()
     }
 
     /// Returns all files present within the pool.
     pub async fn files(&self) -> Vec<File> {
-        let rx = self
-            .sender
-            .send(|tx| DataPoolCommand::GetFiles { response: tx })
-            .await;
-        rx.await.unwrap_or_default()
+        self.inner.read().await.files.values().cloned().collect()
     }
 
     /// Set the pieces of the pool.
     /// This will replace all existing pieces within the pool.
     pub async fn set_pieces(&self, pieces: Vec<Piece>) {
-        let _ = self
-            .sender
-            .send(|tx| DataPoolCommand::SetPieces {
-                pieces,
-                response: tx,
-            })
-            .await
-            .await;
+        self.inner.write().await.set_pieces(pieces);
     }
 
     /// Set the files of the pool.
     /// This will replace all existing files within the pool.
     pub async fn set_files(&self, files: Vec<File>) {
-        let _ = self
-            .sender
-            .send(|tx| DataPoolCommand::SetFiles {
-                files,
-                response: tx,
-            })
-            .await
-            .await;
+        self.inner.write().await.set_files(files);
     }
 
     /// Returns the piece which contains the given torrent offset.
     pub async fn find_piece_at_offset(&self, offset: usize) -> Option<Piece> {
-        self.sender
-            .send(|tx| DataPoolCommand::FindPieceAtOffset {
-                offset,
-                response: tx,
-            })
-            .await
-            .await
-            .unwrap_or_default()
+        self.inner.read().await.find_piece_at_offset(offset)
     }
 
     /// Returns the [PieceBlock] matching the given offset within the piece, if found.
     pub async fn find_piece_block(&self, piece: &PieceIndex, offset: usize) -> Option<PieceBlock> {
-        self.sender
-            .send(|tx| DataPoolCommand::FindPieceBlock {
-                piece: *piece,
-                offset,
-                response: tx,
+        self.inner
+            .read()
+            .await
+            .pieces
+            .iter()
+            .find(|(idx, _)| *idx == piece)
+            .and_then(|(_, piece)| {
+                piece
+                    .blocks
+                    .iter()
+                    .find(|part| part.begin == offset)
+                    .cloned()
             })
-            .await
-            .await
-            .unwrap_or_default()
     }
 
     /// Returns the piece priorities for the torrent.
     pub async fn piece_priorities(&self) -> BTreeMap<PieceIndex, PiecePriority> {
-        self.sender
-            .send(|tx| DataPoolCommand::PiecePriorities { response: tx })
-            .await
-            .await
-            .unwrap_or_default()
+        self.inner.read().await.piece_priorities()
     }
 
     /// Set the priorities for the given pieces of the torrent.
     pub async fn set_piece_priorities(&self, priorities: &[(PieceIndex, PiecePriority)]) {
-        self.sender
-            .fire_and_forget(DataPoolCommand::SetPiecePriorities {
-                priorities: priorities.to_vec(),
-            })
-            .await;
+        self.inner.write().await.set_piece_priorities(priorities);
     }
 
     /// Set the priorities for the given files of the torrent.
     pub async fn set_file_priorities(&self, priorities: &[(FileIndex, FilePriority)]) {
-        let _ = self
-            .sender
-            .send(|tx| DataPoolCommand::SetFilePriorities {
-                priorities: priorities.to_vec(),
-                response: tx,
-            })
-            .await
-            .await;
+        self.inner.write().await.set_file_priorities(priorities);
     }
 
     /// Returns `true` if the given piece is present within the pool, else `false`.
     pub async fn contains_piece(&self, piece: &PieceIndex) -> bool {
-        let rx = self
-            .sender
-            .send(|tx| DataPoolCommand::ContainsPiece {
-                index: *piece,
-                response: tx,
-            })
-            .await;
-        rx.await.unwrap_or_default()
+        self.inner.read().await.pieces.contains_key(piece)
     }
 
     /// Returns `true` if all wanted pieces have been downloaded and validated, else `false`.
@@ -219,154 +141,83 @@ impl DataPool {
     /// Every piece with anything but a [PiecePriority::None] has
     /// been downloaded and validated their data in this case.
     pub async fn is_completed(&self) -> bool {
-        self.sender
-            .send(|tx| DataPoolCommand::IsCompleted { response: tx })
-            .await
-            .await
-            .unwrap_or_default()
+        self.inner.read().await.is_completed()
     }
 
     /// Returns `true` if the given piece has been downloaded and validated, else `false`.
     pub async fn is_piece_completed(&self, piece: &PieceIndex) -> bool {
-        let rx = self
-            .sender
-            .send(|tx| DataPoolCommand::IsPieceCompleted {
-                index: *piece,
-                response: tx,
-            })
-            .await;
-        rx.await.unwrap_or_default()
+        self.inner.read().await.is_piece_completed(piece)
     }
 
     /// Set the completion state for the given piece slice.
     pub async fn set_completed(&self, pieces: &[PieceIndex], completed: bool) {
-        self.sender
-            .send(|tx| DataPoolCommand::SetPieceCompleted {
-                pieces: pieces.to_vec(),
-                completed,
-                response: tx,
-            })
-            .await;
+        self.inner
+            .write()
+            .await
+            .set_pieces_completion_state(pieces, completed)
     }
 
     /// Returns `true` if the given torrent byte range is available (downloaded and validated), else `false`.
     pub async fn has_bytes(&self, bytes: Range<usize>) -> bool {
-        self.sender
-            .send(|tx| DataPoolCommand::HasBytes {
-                bytes,
-                response: tx,
-            })
-            .await
-            .await
-            .unwrap_or_default()
+        self.inner.read().await.has_bytes(&bytes)
     }
 
     /// Returns the piece indexes in which the torrent is interested.
     /// These are the pieces that don't have [PiecePriority::None] as a priority.
     pub async fn interested_pieces(&self) -> Vec<PieceIndex> {
-        self.sender
-            .send(|tx| DataPoolCommand::InterestedPieces { response: tx })
-            .await
-            .await
-            .unwrap_or_default()
+        self.inner.read().await.interested_pieces()
     }
 
     /// Returns the amount of bytes in which the torrent is interested.
     pub async fn interested_size(&self) -> usize {
-        self.sender
-            .send(|tx| DataPoolCommand::InterestedSize { response: tx })
-            .await
-            .await
-            .unwrap_or_default()
+        self.inner.read().await.interested_size()
     }
 
     /// Returns the piece indexes which have completed downloading.
     /// This might include pieces with [PiecePriority::None], if they've been downloaded in the past.
     pub async fn completed_pieces(&self) -> Vec<PieceIndex> {
-        self.sender
-            .send(|tx| DataPoolCommand::CompletedPieces { response: tx })
-            .await
-            .await
-            .unwrap_or_default()
+        self.inner.read().await.completed_pieces()
     }
 
     /// Returns the amount of bytes which have completed downloading.
     /// This might include pieces with [PiecePriority::None], if they've been downloaded in the past.
     pub async fn completed_size(&self) -> usize {
-        self.sender
-            .send(|tx| DataPoolCommand::CompletedSize { response: tx })
-            .await
-            .await
-            .unwrap_or_default()
+        self.inner.read().await.completed_size()
     }
 
     /// Returns `true` if the given piece index is wanted by the torrent and not yet completed, else `false`.
     pub async fn is_piece_wanted(&self, piece_index: &PieceIndex) -> bool {
-        self.sender
-            .send(|tx| DataPoolCommand::IsPieceWanted {
-                index: *piece_index,
-                response: tx,
-            })
-            .await
-            .await
-            .unwrap_or_default()
+        self.inner.read().await.is_piece_wanted(piece_index)
     }
 
     /// Returns the pieces which are still wanted (need to be downloaded) by the torrent.
     /// The list is sorted based on the piece priority.
     pub async fn wanted_pieces(&self) -> Vec<Piece> {
-        let rx = self
-            .sender
-            .send(|tx| DataPoolCommand::WantedPieces { response: tx })
-            .await;
-        rx.await.unwrap_or_default()
+        self.inner.read().await.wanted_pieces()
     }
 
     /// Modify the availability of the given piece by X peers.
     pub async fn update_availability(&self, piece: &PieceIndex, change: i32) {
-        self.sender
-            .fire_and_forget(DataPoolCommand::UpdatePieceAvailability {
-                index: *piece,
-                change,
-            })
-            .await;
+        self.inner
+            .write()
+            .await
+            .update_piece_availability(piece, change)
     }
 
     /// Returns the pieces bitfield, indicating which piece has completed.
     pub async fn bitfield(&self) -> BitVec {
-        let rx = self
-            .sender
-            .send(|tx| DataPoolCommand::Bitfield { response: tx })
-            .await;
-        rx.await.unwrap_or_default()
+        self.inner.read().await.completed_pieces.clone()
     }
 
     /// Returns the file index for the starting byte of the given piece.
     pub async fn file_index_for(&self, piece: &PieceIndex) -> Option<FileIndex> {
-        let rx = self
-            .sender
-            .send(|tx| DataPoolCommand::FileIndexFor {
-                piece: *piece,
-                response: tx,
-            })
-            .await;
-        rx.await.unwrap_or_default()
+        self.inner.read().await.file_index_for(piece)
     }
 
     /// Returns `true` if the torrent is a partial seed.
     /// This means that the torrent has completed some files, but not all files are wanted.
     pub async fn is_partial_seed(&self) -> bool {
-        self.sender
-            .send(|tx| DataPoolCommand::IsPartialSeed { response: tx })
-            .await
-            .await
-            .unwrap_or_default()
-    }
-
-    /// Close the data pool.
-    /// This terminates the pool and prevents any further operations.
-    pub async fn close(&self) {
-        self.sender.fire_and_forget(DataPoolCommand::Close).await;
+        self.inner.read().await.is_partial_seed()
     }
 }
 
@@ -374,118 +225,6 @@ impl<S: AsRef<[Piece]>> From<S> for DataPool {
     fn from(value: S) -> Self {
         Self::new_with_pieces(value.as_ref().to_vec())
     }
-}
-
-#[derive(Debug)]
-enum DataPoolCommand {
-    NumOfPieces {
-        response: Reply<usize>,
-    },
-    NumOfFiles {
-        response: Reply<usize>,
-    },
-    NumCompletedPieces {
-        response: Reply<usize>,
-    },
-    GetPiece {
-        index: PieceIndex,
-        response: Reply<Option<Piece>>,
-    },
-    GetFile {
-        index: FileIndex,
-        response: Reply<Option<File>>,
-    },
-    GetFileByName {
-        name: String,
-        response: Reply<Option<File>>,
-    },
-    GetPieces {
-        response: Reply<Vec<Piece>>,
-    },
-    GetFiles {
-        response: Reply<Vec<File>>,
-    },
-    SetPieces {
-        pieces: Vec<Piece>,
-        response: Reply<()>,
-    },
-    SetFiles {
-        files: Vec<File>,
-        response: Reply<()>,
-    },
-    FindPieceAtOffset {
-        offset: usize,
-        response: Reply<Option<Piece>>,
-    },
-    FindPieceBlock {
-        piece: PieceIndex,
-        offset: usize,
-        response: Reply<Option<PieceBlock>>,
-    },
-    PiecePriorities {
-        response: Reply<BTreeMap<PieceIndex, PiecePriority>>,
-    },
-    SetPiecePriorities {
-        priorities: Vec<(PieceIndex, PiecePriority)>,
-    },
-    SetFilePriorities {
-        priorities: Vec<(FileIndex, FilePriority)>,
-        response: Reply<()>,
-    },
-    ContainsPiece {
-        index: PieceIndex,
-        response: Reply<bool>,
-    },
-    IsPieceCompleted {
-        index: PieceIndex,
-        response: Reply<bool>,
-    },
-    SetPieceCompleted {
-        pieces: Vec<PieceIndex>,
-        completed: bool,
-        response: Reply<()>,
-    },
-    InterestedPieces {
-        response: Reply<Vec<PieceIndex>>,
-    },
-    InterestedSize {
-        response: Reply<usize>,
-    },
-    CompletedPieces {
-        response: Reply<Vec<PieceIndex>>,
-    },
-    CompletedSize {
-        response: Reply<usize>,
-    },
-    IsPieceWanted {
-        index: PieceIndex,
-        response: Reply<bool>,
-    },
-    WantedPieces {
-        response: Reply<Vec<Piece>>,
-    },
-    UpdatePieceAvailability {
-        index: PieceIndex,
-        change: i32,
-    },
-    Bitfield {
-        response: Reply<BitVec>,
-    },
-    IsCompleted {
-        response: Reply<bool>,
-    },
-    HasBytes {
-        bytes: Range<usize>,
-        response: Reply<bool>,
-    },
-    FileIndexFor {
-        piece: PieceIndex,
-        response: Reply<Option<FileIndex>>,
-    },
-    IsPartialSeed {
-        response: Reply<bool>,
-    },
-    Close,
 }
 
 #[derive(Debug)]
@@ -507,137 +246,19 @@ impl InnerDataPool {
         }
     }
 
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn run(&mut self, mut receiver: ChannelReceiver<DataPoolCommand>) {
-        while let Some(command) = receiver.recv().await {
-            match command {
-                DataPoolCommand::NumOfPieces { response } => {
-                    response.send(self.pieces.len());
-                }
-                DataPoolCommand::NumOfFiles { response } => {
-                    response.send(self.num_of_files());
-                }
-                DataPoolCommand::NumCompletedPieces { response } => {
-                    response.send(self.completed_pieces.count_ones() as usize);
-                }
-                DataPoolCommand::GetPiece { index, response } => {
-                    response.send(self.pieces.get(&index).cloned());
-                }
-                DataPoolCommand::GetFile { index, response } => {
-                    response.send(self.files.get(&index).cloned());
-                }
-                DataPoolCommand::GetFileByName { name, response } => response.send(
-                    self.files
-                        .values()
-                        .find(|file| file.filename() == name.as_str())
-                        .cloned(),
-                ),
-                DataPoolCommand::GetPieces { response } => {
-                    response.send(self.pieces.values().cloned().collect());
-                }
-                DataPoolCommand::GetFiles { response } => {
-                    response.send(self.files.values().cloned().collect());
-                }
-                DataPoolCommand::SetPieces { pieces, response } => {
-                    self.set_pieces(pieces);
-                    response.send(());
-                }
-                DataPoolCommand::SetFiles { files, response } => {
-                    self.set_files(files);
-                    response.send(());
-                }
-                DataPoolCommand::FindPieceAtOffset { offset, response } => {
-                    response.send(self.find_piece_at_offset(offset));
-                }
-                DataPoolCommand::FindPieceBlock {
-                    piece,
-                    offset,
-                    response,
-                } => response.send(self.pieces.iter().find(|(idx, _)| *idx == &piece).and_then(
-                    |(_, piece)| {
-                        piece
-                            .blocks
-                            .iter()
-                            .find(|part| part.begin == offset)
-                            .cloned()
-                    },
-                )),
-                DataPoolCommand::PiecePriorities { response } => {
-                    response.send(self.piece_priorities());
-                }
-                DataPoolCommand::SetPiecePriorities { priorities } => {
-                    self.set_piece_priorities(priorities);
-                }
-                DataPoolCommand::SetFilePriorities {
-                    priorities,
-                    response,
-                } => {
-                    self.set_file_priorities(priorities);
-                    response.send(());
-                }
-                DataPoolCommand::ContainsPiece { index, response } => {
-                    response.send(self.pieces.contains_key(&index));
-                }
-                DataPoolCommand::IsPieceCompleted { index, response } => {
-                    response.send(self.is_piece_completed(&index));
-                }
-                DataPoolCommand::SetPieceCompleted {
-                    pieces,
-                    completed,
-                    response,
-                } => {
-                    self.set_pieces_completion_state(&pieces, completed);
-                    response.send(());
-                }
-                DataPoolCommand::InterestedPieces { response } => {
-                    response.send(self.interested_pieces());
-                }
-                DataPoolCommand::InterestedSize { response } => {
-                    response.send(self.interested_size());
-                }
-                DataPoolCommand::CompletedPieces { response } => {
-                    response.send(self.completed_pieces());
-                }
-                DataPoolCommand::CompletedSize { response } => {
-                    response.send(self.completed_size());
-                }
-                DataPoolCommand::IsPieceWanted { index, response } => {
-                    response.send(self.is_piece_wanted(&index));
-                }
-                DataPoolCommand::WantedPieces { response } => {
-                    response.send(self.wanted_pieces());
-                }
-                DataPoolCommand::UpdatePieceAvailability { index, change } => {
-                    self.update_piece_availability(&index, change);
-                }
-                DataPoolCommand::Bitfield { response } => {
-                    response.send(self.completed_pieces.clone());
-                }
-                DataPoolCommand::IsCompleted { response } => {
-                    response.send(self.is_completed());
-                }
-                DataPoolCommand::FileIndexFor {
-                    piece: index,
-                    response,
-                } => {
-                    response.send(self.file_index_for(&index));
-                }
-                DataPoolCommand::HasBytes { bytes, response } => {
-                    response.send(self.has_bytes(&bytes));
-                }
-                DataPoolCommand::IsPartialSeed { response } => {
-                    response.send(self.is_partial_seed());
-                }
-                DataPoolCommand::Close => break,
-            }
-        }
+    fn num_of_pieces(&self) -> usize {
+        self.pieces.len()
     }
 
-    fn num_of_files(&mut self) -> usize {
+    fn num_of_files(&self) -> usize {
         self.files
             .iter()
             .filter(|(_, file)| !file.attributes().contains(FileAttributeFlags::PaddingFile))
             .count()
+    }
+
+    fn num_completed_pieces(&self) -> usize {
+        self.completed_pieces.count_ones()
     }
 
     fn set_pieces(&mut self, pieces: Vec<Piece>) {
@@ -673,36 +294,35 @@ impl InnerDataPool {
             .collect()
     }
 
-    fn set_piece_priorities(&mut self, priorities: Vec<(PieceIndex, PiecePriority)>) {
+    fn set_piece_priorities(&mut self, priorities: &[(PieceIndex, PiecePriority)]) {
         for (index, priority) in priorities {
-            if let Some(piece) = self.pieces.get_mut(&index) {
-                piece.priority = priority;
+            if let Some(piece) = self.pieces.get_mut(index) {
+                piece.priority = *priority;
             }
         }
     }
 
-    fn set_file_priorities(&mut self, priorities: Vec<(FileIndex, FilePriority)>) {
+    fn set_file_priorities(&mut self, priorities: &[(FileIndex, FilePriority)]) {
         let mut piece_priorities = BTreeMap::new();
 
         for (index, file_priority) in priorities {
-            if let Some(file) = self.files.get_mut(&index) {
-                file.priority = file_priority;
+            if let Some(file) = self.files.get_mut(index) {
+                file.priority = *file_priority;
 
                 for piece in file.pieces.clone() {
                     let piece_priority = piece_priorities
                         .entry(piece)
-                        .or_insert(file_priority as PiecePriority);
-                    *piece_priority = (*piece_priority).max(file_priority);
+                        .or_insert(*file_priority as PiecePriority);
+                    *piece_priority = (*piece_priority).max(*file_priority);
                 }
             }
         }
 
-        self.set_piece_priorities(
-            piece_priorities
-                .into_iter()
-                .map(|(k, v)| (k, v))
-                .collect::<Vec<_>>(),
-        );
+        let priorities = piece_priorities
+            .into_iter()
+            .map(|(k, v)| (k, v))
+            .collect_vec();
+        self.set_piece_priorities(priorities.as_slice());
     }
 
     fn is_piece_completed(&self, piece: &PieceIndex) -> bool {
