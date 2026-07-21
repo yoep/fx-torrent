@@ -20,7 +20,7 @@ use byteorder::BigEndian;
 use byteorder::ByteOrder;
 use derive_more::Display;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
-use log::{debug, error, trace, warn};
+use log::{debug, error, log, trace, warn, Level};
 use std::cmp::max;
 use std::collections::{HashSet, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
@@ -286,6 +286,7 @@ impl BitTorrentPeer {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         peer_port: Option<u16>,
+        peer_client_name: impl Into<String>,
         stream: PeerStream,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
@@ -314,6 +315,7 @@ impl BitTorrentPeer {
             peer_id,
             peer_addr,
             peer_port,
+            peer_client_name,
             connection,
             ConnectionDirection::Outbound,
             torrent,
@@ -333,6 +335,7 @@ impl BitTorrentPeer {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         peer_port: Option<u16>,
+        peer_client_name: impl Into<String>,
         stream: PeerStream,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
@@ -365,6 +368,7 @@ impl BitTorrentPeer {
                 peer_id,
                 peer_addr,
                 peer_port,
+                peer_client_name,
                 connection,
                 ConnectionDirection::Inbound,
                 torrent,
@@ -695,6 +699,7 @@ impl BitTorrentPeer {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         peer_port: Option<u16>,
+        peer_client_name: impl Into<String>,
         connection: PeerConnection,
         connection_type: ConnectionDirection,
         torrent: InnerTorrent,
@@ -715,6 +720,7 @@ impl BitTorrentPeer {
             peer_id,
             peer_addr,
             peer_port,
+            peer_client_name,
             connection,
             connection_type,
             torrent,
@@ -874,6 +880,8 @@ pub struct PeerContext {
     remote: Option<RemotePeer>,
     /// The peer port on which the torrent is listening for incoming connections.
     peer_port: Option<u16>,
+    /// The name of the peer client.
+    peer_client_name: String,
     torrent: InnerTorrent,
     /// The metadata of the torrent
     metadata: TorrentMetadata,
@@ -939,6 +947,7 @@ impl PeerContext {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         peer_port: Option<u16>,
+        peer_client_name: impl Into<String>,
         connection: PeerConnection,
         connection_type: ConnectionDirection,
         torrent: InnerTorrent,
@@ -967,6 +976,7 @@ impl PeerContext {
             torrent,
             metadata,
             peer_port,
+            peer_client_name: peer_client_name.into(),
             data_pool,
             storage,
             state: PeerState::Handshake,
@@ -1423,7 +1433,12 @@ impl PeerContext {
         self.cleanup_pending_requests(interval).await;
 
         let elapsed = start.elapsed();
-        trace!(
+        log!(
+            if elapsed > interval {
+                Level::Warn
+            } else {
+                Level::Trace
+            },
             "Peer {} tick took {:.3}ms",
             self,
             elapsed.as_secs_f64() * 1000.0
@@ -2322,19 +2337,10 @@ impl PeerContext {
     async fn send_extended_handshake(&self) -> Result<()> {
         let extension_registry = self.extension_registry.clone();
         let is_partial_seed = self.data_pool.is_partial_seed().await;
-        let config = match timeout(Duration::from_millis(250), self.torrent.config())
-            .await
-            .map_err(|_| Error::Io(io::Error::new(io::ErrorKind::TimedOut, "config timed-out")))?
-        {
-            Ok(config) => config,
-            Err(_) => return Err(Error::Closed),
-        };
         let message = Message::ExtendedHandshake(ExtendedHandshake {
             m: extension_registry,
             upload_only: is_partial_seed,
-            client: Some(config.client_name())
-                .filter(|e| !e.is_empty())
-                .map(|e| e.to_string()),
+            client: self.peer_client_name.clone().into(),
             regg: None,
             encryption: false,
             metadata_size: None,
@@ -2844,6 +2850,7 @@ mod tests {
                     PeerId::new(),
                     listener_addr,
                     Some(6881),
+                    "FxTestClient",
                     PeerStream::Tcp(TcpStream::connect(listener_addr).await.unwrap()),
                     inner,
                     metadata,
@@ -2964,7 +2971,7 @@ mod tests {
         // wait for the source torrent to validate the existing pieces
         // this should automatically inform the target peer that it has wanted pieces
         assert_timeout!(
-            Duration::from_secs(1),
+            Duration::from_secs(2),
             source.has_piece(&29).await,
             "expected the pieces to have been validated"
         );

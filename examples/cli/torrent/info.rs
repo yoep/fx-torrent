@@ -94,7 +94,7 @@ impl TorrentInfoWidget {
             TorrentEvent::PeerConnected(peer) => {
                 data.peers = self.torrent.active_peer_connections().await;
 
-                match timeout(Duration::from_millis(750), self.torrent.peer(&peer.handle)).await {
+                match timeout(Duration::from_secs(1), self.torrent.peer(&peer.handle)).await {
                     Ok(Some(peer)) => {
                         self.content_widget.add_peer(peer).await;
                     }

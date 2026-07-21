@@ -101,6 +101,12 @@ pub mod tests {
 
         // create the incoming uTP peer handler thread
         let peer_port = incoming_context.peer_port().await;
+        let peer_client_name = incoming_context
+            .config()
+            .await
+            .unwrap()
+            .client_name()
+            .to_string();
         let metadata = incoming_context.metadata().await.unwrap();
         let incoming_addr = outgoing_socket.addr();
         tokio::spawn(async move {
@@ -108,6 +114,7 @@ pub mod tests {
                 PeerId::new(),
                 incoming_addr,
                 peer_port,
+                peer_client_name,
                 PeerStream::Utp(incoming_stream),
                 incoming_context,
                 metadata,
@@ -127,6 +134,7 @@ pub mod tests {
             PeerId::new(),
             incoming_socket.addr(),
             outgoing_context.peer_port().await,
+            outgoing_context.config().await.unwrap().client_name(),
             PeerStream::Utp(outgoing_stream),
             outgoing_context,
             metadata,

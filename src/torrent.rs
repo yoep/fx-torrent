@@ -34,7 +34,7 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use itertools::Itertools;
-use log::{debug, info, trace};
+use log::{debug, info, log, trace, Level};
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::io;
@@ -3039,6 +3039,7 @@ impl TorrentContext {
         let handle = self.handle;
         let peer_id = self.peer_id;
         let peer_port = self.peer_port().copied();
+        let peer_client_name = self.config.client_name().to_string();
         let metadata = self.metadata.clone();
         let data_pool = self.data_pool.clone();
         let storage = self.storage.clone();
@@ -3051,6 +3052,7 @@ impl TorrentContext {
                 peer_id,
                 entry.socket_addr,
                 peer_port,
+                peer_client_name,
                 entry.stream,
                 InnerTorrent {
                     handle,
@@ -3341,7 +3343,12 @@ impl TorrentContext {
             let start_time = Instant::now();
             let execution_result = operation.execute(self, peer_discoveries).await;
             let elapsed_time = start_time.elapsed();
-            trace!(
+            log!(
+                if elapsed_time > TICK_INTERVAL {
+                    Level::Warn
+                } else {
+                    Level::Trace
+                },
                 "Torrent {} \"{}\" took {:.3}ms",
                 self,
                 operation.name(),

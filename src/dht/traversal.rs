@@ -1,5 +1,5 @@
 use crate::channel::ChannelSender;
-use crate::dht::{Node, NodeId, TrackerCommand, TrackerContext};
+use crate::dht::{Error, Node, NodeId, TrackerCommand, TrackerContext};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use itertools::Itertools;
@@ -7,7 +7,11 @@ use log::trace;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Semaphore;
+use tokio::time::timeout;
+
+const FIND_NODE_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// The DHT traversal algorithm to discover nodes in the DHT network.
 #[derive(Debug)]
@@ -102,7 +106,10 @@ impl TraversalAlgorithm {
             let response = context.find_node(target_id, &node).await;
             futures.push(async move {
                 let _permit = permit; // drops the permit when the query is completed
-                response.await
+                timeout(FIND_NODE_TIMEOUT, response)
+                    .await
+                    .map_err(|_| Error::Timeout)
+                    .flatten()
             });
         }
 

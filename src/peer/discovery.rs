@@ -77,6 +77,7 @@ impl PeerDiscovery {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         peer_port: Option<u16>,
+        peer_client_name: impl Into<String>,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
@@ -92,6 +93,7 @@ impl PeerDiscovery {
                         peer_id,
                         peer_addr,
                         peer_port,
+                        peer_client_name,
                         torrent,
                         metadata,
                         data_pool,
@@ -108,6 +110,7 @@ impl PeerDiscovery {
                         peer_id,
                         peer_addr,
                         peer_port,
+                        peer_client_name,
                         torrent,
                         metadata,
                         data_pool,
@@ -124,6 +127,7 @@ impl PeerDiscovery {
                         peer_id,
                         peer_addr,
                         peer_port,
+                        peer_client_name.into(),
                         torrent,
                         metadata,
                         data_pool,
@@ -194,6 +198,7 @@ pub trait Discovery: Debug + Send + Sync {
     /// * `peer_id` - The unique peer identifier of the torrent.
     /// * `peer_addr` - The address of the peer to dial.
     /// * `peer_port` - The peer port on which the torrent is listening for incoming connections.
+    /// * `peer_client_name` - The client name of the peer.
     /// * `torrent` - The torrent to use for the connection.
     /// * `metadata` - The current known metadata of the torrent.
     /// * `data_pool` - The torrent data pool to use for the connection.
@@ -210,6 +215,7 @@ pub trait Discovery: Debug + Send + Sync {
         peer_id: PeerId,
         peer_addr: SocketAddr,
         peer_port: Option<u16>,
+        peer_client_name: String,
         torrent: InnerTorrent,
         metadata: TorrentMetadata,
         data_pool: DataPool,
@@ -250,6 +256,7 @@ pub mod mock {
                 peer_id: PeerId,
                 peer_addr: SocketAddr,
                 peer_port: Option<u16>,
+                peer_client_name: String,
                 torrent: InnerTorrent,
                 metadata: TorrentMetadata,
                 data_pool: DataPool,
