@@ -1,4 +1,4 @@
-use crate::peer::{ChokeState, Peer, PeerHandle};
+use crate::peer::{ChokeState, Peer};
 use crate::piece_picker::cache::PickerCache;
 use crate::piece_picker::strategy::Strategy;
 use crate::piece_picker::PickerOptions;
@@ -10,6 +10,7 @@ use futures::future::Either;
 use itertools::Itertools;
 use log::{debug, trace, warn};
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
@@ -177,7 +178,7 @@ impl FxPiecePicker {
     }
 
     /// Process a piece block request that has been rejected by the peer.
-    pub fn block_rejected(&mut self, peer: &Peer, block: PieceBlock) {
+    pub fn block_rejected(&mut self, peer_addr: &SocketAddr, block: PieceBlock) {
         // try to find the block
         let block_info = match self
             .downloads
@@ -195,8 +196,8 @@ impl FxPiecePicker {
             Some(block_info) => block_info,
         };
 
-        block_info.requested_from.remove(peer.handle());
-        block_info.rejected_by.insert(*peer.handle());
+        block_info.requested_from.remove(peer_addr);
+        block_info.rejected_by.insert(*peer_addr);
 
         if block_info.requested_from.is_empty() {
             block_info.state = PieceBlockState::None;
@@ -333,7 +334,7 @@ impl FxPiecePicker {
                 };
 
                 block.state = PieceBlockState::Requested;
-                block.requested_from.insert(*peer.handle());
+                block.requested_from.insert(*peer.addr());
 
                 // remove the block from the list of interesting pieces
                 picked_piece_blocks.push(block.piece_block);
@@ -576,10 +577,10 @@ pub struct PiecePickerBlock {
     pub availability: usize,
     /// The peers this block is requested from.
     /// This is most of the time one peer, but can be multiple during the end-game.
-    pub requested_from: HashSet<PeerHandle>,
+    pub requested_from: HashSet<SocketAddr>,
     /// The peers that have rejected this block.
     /// We should not retry to request this block from these peers.
-    pub rejected_by: HashSet<PeerHandle>,
+    pub rejected_by: HashSet<SocketAddr>,
     /// The current state of the block.
     pub state: PieceBlockState,
 }

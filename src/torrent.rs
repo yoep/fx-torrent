@@ -7,8 +7,7 @@ use crate::operation::{Operation, TorrentOperationResult};
 use crate::peer::extension::PeerExtension;
 use crate::peer::{
     BitTorrentPeer, ChokeState, CloseReason, ConnectionProtocol, InterestState, Peer,
-    PeerClientInfo, PeerDiscovery, PeerEntry, PeerHandle, PeerId, PeerState,
-    ProtocolExtensionFlags,
+    PeerClientInfo, PeerDiscovery, PeerEntry, PeerId, PeerState, ProtocolExtensionFlags,
 };
 use crate::peer_pool::PeerPool;
 use crate::piece_picker::strategy::{
@@ -913,15 +912,15 @@ impl Torrent {
             .await?)
     }
 
-    /// Returns an existing peer from the peer pool by the given handle.
+    /// Returns an existing peer from the peer pool.
     /// The returned instance is a weak reference that can be dropped by the pool at any time.
     ///
     /// ## Remark
     ///
     /// Before calling a method,
     /// make sure to check if the reference is still valid by calling [Peer::is_valid].
-    pub async fn peer(&self, handle: &PeerHandle) -> Option<Peer> {
-        self.inner.peer(handle).await
+    pub async fn peer(&self, addr: &SocketAddr) -> Option<Peer> {
+        self.inner.peer(addr).await
     }
 
     /// Returns an existing peer from the peer pool by the given address.
@@ -1103,10 +1102,10 @@ impl InnerTorrent {
 
     /// Returns an existing peer from the pool by the given handle.
     /// The returned instance is a weak reference that can be dropped by the pool at any time.
-    pub async fn peer(&self, handle: &PeerHandle) -> Option<Peer> {
+    pub async fn peer(&self, addr: &SocketAddr) -> Option<Peer> {
         self.sender
             .send(|tx| TorrentCommand::GetPeer {
-                handle: *handle,
+                addr: *addr,
                 response: tx,
             })
             .await
@@ -1370,9 +1369,9 @@ impl InnerTorrent {
     }
 
     /// Request the torrent piece picker to pick pieces for the given peer.
-    pub async fn pick_pieces(&self, peer: &PeerHandle) {
+    pub async fn pick_pieces(&self, peer_addr: &SocketAddr) {
         self.sender
-            .fire_and_forget(TorrentCommand::PickPieces { peer: *peer })
+            .fire_and_forget(TorrentCommand::PickPieces { peer_addr: *peer_addr })
             .await;
     }
 
@@ -1395,13 +1394,13 @@ impl InnerTorrent {
     /// Process a received piece block from a peer.
     pub async fn piece_block_received<T: Into<Vec<u8>>>(
         &self,
-        peer: &PeerHandle,
+        peer_addr: &SocketAddr,
         block: &PieceBlock,
         data: T,
     ) {
         self.sender
             .fire_and_forget(TorrentCommand::PieceBlockReceived {
-                peer: *peer,
+                peer_addr: *peer_addr,
                 block: *block,
                 data: data.into(),
             })
@@ -1409,10 +1408,10 @@ impl InnerTorrent {
     }
 
     /// Inform the torrent that a piece block request has been rejected by the peer.
-    pub async fn piece_block_rejected(&self, peer: &PeerHandle, block: &PieceBlock) {
+    pub async fn piece_block_rejected(&self, peer_addr: &SocketAddr, block: &PieceBlock) {
         self.sender
             .fire_and_forget(TorrentCommand::PieceBlockRejected {
-                peer: *peer,
+                peer_addr: *peer_addr,
                 block: *block,
             })
             .await
@@ -1536,7 +1535,7 @@ pub enum TorrentCommand {
     },
     /// Returns an existing peer from the torrent by the given handle.
     GetPeer {
-        handle: PeerHandle,
+        addr: SocketAddr,
         response: Reply<Option<Peer>>,
     },
     /// Returns an existing peer from the torrent by the given peer address.
@@ -1721,7 +1720,7 @@ pub enum TorrentCommand {
         response: Reply<BitVec>,
     },
     PickPieces {
-        peer: PeerHandle,
+        peer_addr: SocketAddr,
     },
     PieceVerified {
         piece: PieceIndex,
@@ -1729,12 +1728,12 @@ pub enum TorrentCommand {
         v2_hash: Option<Sha256Hash>,
     },
     PieceBlockReceived {
-        peer: PeerHandle,
+        peer_addr: SocketAddr,
         block: PieceBlock,
         data: Vec<u8>,
     },
     PieceBlockRejected {
-        peer: PeerHandle,
+        peer_addr: SocketAddr,
         block: PieceBlock,
     },
     IsEndGame {
@@ -2655,12 +2654,12 @@ impl TorrentContext {
 
     /// Pick pieces for the given peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn on_pick_pieces(&mut self, peer_handle: PeerHandle) {
+    async fn on_pick_pieces(&mut self, peer_addr: SocketAddr) {
         // early exit if downloading pieces is not allowed
         if !self.is_download_allowed() {
             return;
         }
-        let peer = match self.peer_pool.get(&peer_handle) {
+        let peer = match self.peer_pool.get(&peer_addr) {
             None => return,
             Some(peer) => peer,
         };
@@ -2839,11 +2838,11 @@ impl TorrentContext {
             TorrentCommand::AddPeers { addrs } => {
                 self.add_peer_addresses(addrs);
             }
-            TorrentCommand::GetPeer { handle, response } => {
-                response.send(self.peer_pool.get(&handle).cloned());
+            TorrentCommand::GetPeer { addr, response } => {
+                response.send(self.peer_pool.get(&addr).cloned());
             }
             TorrentCommand::GetPeerByAddr { addr, response } => {
-                response.send(self.peer_pool.get_by_addr(&addr).cloned())
+                response.send(self.peer_pool.get(&addr).cloned())
             }
             TorrentCommand::PeerConnected { peer } => self.add_peer(peer),
             TorrentCommand::DecreasePeerPriority { addrs } => {
@@ -2939,8 +2938,8 @@ impl TorrentContext {
             TorrentCommand::GetPiecePriorities { response } => {
                 response.send(self.data_pool.piece_priorities().await)
             }
-            TorrentCommand::PickPieces { peer } => {
-                self.on_pick_pieces(peer).await;
+            TorrentCommand::PickPieces { peer_addr } => {
+                self.on_pick_pieces(peer_addr).await;
             }
             TorrentCommand::PieceVerified {
                 piece,
@@ -3010,11 +3009,11 @@ impl TorrentContext {
                 response.send(self.protocol_extensions())
             }
             TorrentCommand::Bitfield { response } => response.send(self.data_pool.bitfield().await),
-            TorrentCommand::PieceBlockReceived { peer, block, data } => {
-                self.on_piece_block_received(peer, block, data).await
+            TorrentCommand::PieceBlockReceived { peer_addr, block, data } => {
+                self.on_piece_block_received(peer_addr, block, data).await
             }
-            TorrentCommand::PieceBlockRejected { peer, block } => {
-                self.on_piece_block_rejected(peer, block).await
+            TorrentCommand::PieceBlockRejected { peer_addr, block } => {
+                self.on_piece_block_rejected(&peer_addr, block).await
             }
             TorrentCommand::IsEndGame { response } => {
                 response.send(self.piece_picker.is_end_game());
@@ -3093,13 +3092,13 @@ impl TorrentContext {
     /// Process the received data for a piece block.
     async fn on_piece_block_received(
         &mut self,
-        peer: PeerHandle,
+        peer_addr: SocketAddr,
         block: PieceBlock,
         data: Vec<u8>,
     ) {
-        let peer = match self.peer_pool.get(&peer) {
+        let peer = match self.peer_pool.get(&peer_addr) {
             None => {
-                debug!("Torrent {} received block from unknown peer {}", self, peer);
+                debug!("Torrent {} received block from unknown peer {}", self, peer_addr);
                 return;
             }
             Some(peer) => peer,
@@ -3109,19 +3108,8 @@ impl TorrentContext {
     }
 
     /// Process a rejected piece block request.
-    async fn on_piece_block_rejected(&mut self, peer: PeerHandle, block: PieceBlock) {
-        let peer = match self.peer_pool.get(&peer) {
-            None => {
-                debug!(
-                    "Torrent {} received block reject from unknown peer {}",
-                    self, peer
-                );
-                return;
-            }
-            Some(peer) => peer,
-        };
-
-        self.piece_picker.block_rejected(peer, block).await;
+    async fn on_piece_block_rejected(&mut self, peer_addr: &SocketAddr, block: PieceBlock) {
+        self.piece_picker.block_rejected(peer_addr, block).await;
     }
 
     /// Process the new options of the torrent.

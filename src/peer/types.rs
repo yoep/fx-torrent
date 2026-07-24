@@ -1,20 +1,16 @@
 use crate::peer::webseed::HttpPeer;
-use crate::peer::{BitTorrentPeer, CloseReason, Metrics, PeerClientInfo, PeerState};
+use crate::peer::{BitTorrentPeer, CloseReason, Metrics, PeerClientInfo, PeerId, PeerState};
 use crate::{BitVec, PieceBlock, PieceIndex};
 use async_trait::async_trait;
 use crc::{Crc, CRC_32_ISCSI};
 use derive_more::Display;
 use fx_callback::{Callback, Subscription};
-use fx_handle::Handle;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
-
-/// The peer's unique identifier handle.
-pub type PeerHandle = Handle;
 
 #[derive(Debug, Clone)]
 pub enum PeerEvent {
@@ -98,12 +94,12 @@ pub enum Peer {
 }
 
 impl Peer {
-    /// Returns the unique handle of the peer.
-    pub fn handle(&self) -> &PeerHandle {
+    /// Returns the unique peer identifier within the torrent network.
+    pub fn id(&self) -> &PeerId {
         match self {
-            Peer::BitTorrent(peer) => peer.handle(),
-            Peer::Http(peer) => peer.handle(),
-            Peer::Other(peer) => peer.handle(),
+            Peer::BitTorrent(peer) => peer.id(),
+            Peer::Http(peer) => peer.id(),
+            Peer::Other(peer) => peer.id(),
         }
     }
 
@@ -306,9 +302,9 @@ pub type TorrentPeer = dyn Extension;
 /// with an extension of the peer protocol.
 #[async_trait]
 pub trait Extension: Debug + Display + Send + Sync + Callback<PeerEvent> {
-    /// Returns the unique handle of the peer.
-    fn handle(&self) -> &PeerHandle;
-
+    /// Returns the unique peer identifier within the torrent network.
+    fn id(&self) -> &PeerId;
+    
     /// Returns the address of the remote peer.
     fn addr(&self) -> &SocketAddr;
 
@@ -558,15 +554,15 @@ mod tests {
         use std::net::Ipv4Addr;
 
         #[test]
-        fn test_handle() {
-            let handle = PeerHandle::new();
+        fn test_id() {
+            let id = PeerId::new();
             let mut extension = MockPeer::new();
-            extension.expect_handle().return_const(handle);
+            extension.expect_id().return_const(id);
 
             let peer: Peer = extension.into();
 
-            let result = peer.handle();
-            assert_eq!(&handle, result);
+            let result = peer.id();
+            assert_eq!(&id, result);
         }
 
         #[test]
@@ -579,6 +575,19 @@ mod tests {
 
             let result = peer.addr();
             assert_eq!(&addr, result);
+        }
+        
+        #[test]
+        fn test_metrics() {
+            let metrics = Metrics::new();
+            metrics.bytes_in.inc_by(128);
+            let mut extension = MockPeer::new();
+            extension.expect_metrics().return_const(metrics);
+
+            let peer: Peer = extension.into();
+
+            let result = peer.metrics();
+            assert_eq!(128, result.bytes_in.get());
         }
     }
 

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use bitmask_enum::bitmask;
 use itertools::Itertools;
 use std::fmt::Debug;
+use std::net::SocketAddr;
 
 /// The piece picker used by a torrent.
 /// This picker determines the order in which pieces or downloaded
@@ -107,10 +108,10 @@ impl PiecePicker {
 
     /// Process a piece block request that has been rejected by the peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn block_rejected(&mut self, peer: &Peer, block: PieceBlock) {
+    pub async fn block_rejected(&mut self, peer_addr: &SocketAddr, block: PieceBlock) {
         match self {
-            PiecePicker::Picker(picker) => picker.block_rejected(peer, block),
-            PiecePicker::Other(picker) => picker.block_rejected(peer, block).await,
+            PiecePicker::Picker(picker) => picker.block_rejected(peer_addr, block),
+            PiecePicker::Other(picker) => picker.block_rejected(peer_addr, block).await,
         }
     }
 
@@ -191,7 +192,7 @@ pub trait Extension: Debug + Send + Sync {
     async fn block_received<'a>(&'a mut self, peer: &'a Peer, block: PieceBlock, data: Vec<u8>);
 
     /// Process a piece block request that has been rejected by the peer.
-    async fn block_rejected(&mut self, peer: &Peer, block: PieceBlock);
+    async fn block_rejected(&mut self, peer_addr: &SocketAddr, block: PieceBlock);
 
     /// Pick interesting pieces for the given peer.
     async fn pick_pieces(&mut self, peer: &Peer);
@@ -245,7 +246,7 @@ mod tests {
             fn remove_options(&mut self, options: PickerOptions);
             fn is_end_game(&self) -> bool;
             async fn block_received<'a>(&'a mut self, peer: &'a Peer, block: PieceBlock, data: Vec<u8>);
-            async fn block_rejected(&mut self, peer: &Peer, block: PieceBlock);
+            async fn block_rejected(&mut self, peer_addr: &SocketAddr, block: PieceBlock);
             async fn pick_pieces(&mut self, peer: &Peer);
             async fn tick<'a>(&'a mut self, peers: Vec<&'a Peer>);
         }

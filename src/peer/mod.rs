@@ -45,7 +45,7 @@ pub mod tests {
 
         #[async_trait]
         impl Extension for Peer {
-            fn handle(&self) -> &PeerHandle;
+            fn id(&self) -> &PeerId;
             fn addr(&self) -> &SocketAddr;
             fn client_info(&self) -> &PeerClientInfo;
             fn metrics(&self) -> &Metrics;

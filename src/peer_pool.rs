@@ -1,4 +1,4 @@
-use crate::peer::{ChokeState, CloseReason, Peer, PeerEvent, PeerHandle, PeerPriority, PeerState};
+use crate::peer::{ChokeState, CloseReason, Peer, PeerEvent, PeerPriority, PeerState};
 use crate::TorrentHandle;
 use derive_more::Display;
 use fx_callback::{Callback, Subscription};
@@ -51,27 +51,18 @@ impl PeerPool {
         }
     }
 
-    /// Returns a peer reference from the pool by the given handle.
-    pub fn get(&self, handle: &PeerHandle) -> Option<&Peer> {
+    /// Returns a peer reference from the pool by the given peer address.
+    pub fn get(&self, addr: &SocketAddr) -> Option<&Peer> {
         self.peers
             .values()
             .filter_map(|e| e.connection.as_ref())
-            .find(|conn| conn.peer.handle() == handle)
+            .find(|conn| conn.peer.addr() == addr)
             .map(|conn| &conn.peer)
     }
 
     /// Returns the total number of known peer addresses in the pool.
     pub fn len(&self) -> usize {
         self.peers.len()
-    }
-
-    /// Returns a peer reference from the pool by the given address.
-    pub fn get_by_addr(&self, addr: &SocketAddr) -> Option<&Peer> {
-        self.peers
-            .values()
-            .filter_map(|e| e.connection.as_ref())
-            .find(|conn| conn.peer.addr() == addr)
-            .map(|conn| &conn.peer)
     }
 
     /// Returns an iterator over the peers in the pool.
@@ -102,7 +93,7 @@ impl PeerPool {
     ///
     /// It returns a [Subscription] to receive peer events when the peer is added to the pool.
     pub fn add_peer(&mut self, peer: Peer) -> Result<(), AddReason> {
-        let handle = peer.handle();
+        let handle = peer.addr();
         // early exit if the pool is full
         if self.peers().count() >= self.limit {
             debug!(
@@ -113,7 +104,7 @@ impl PeerPool {
         }
 
         // update the peer info
-        let info = self.find_or_insert(&peer.addr(), None);
+        let info = self.find_or_insert(peer.addr(), None);
         let receiver = peer.subscribe();
         info.is_in_use = true;
         info.last_connected = Some(Instant::now());
@@ -588,11 +579,9 @@ mod tests {
             #[tokio::test]
             async fn test_add_peer() {
                 init_logger!();
-                let peer_handle = PeerHandle::new();
+                let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
                 let mut peer = MockPeer::new();
-                peer.expect_handle().return_const(peer_handle);
-                peer.expect_addr()
-                    .return_const(SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)));
+                peer.expect_addr().return_const(addr);
                 peer.expect_subscribe().returning(|| {
                     let (_, rx) = broadcast::channel(1);
                     rx
@@ -612,22 +601,16 @@ mod tests {
             #[tokio::test]
             async fn test_limit_reached() {
                 init_logger!();
-                let peer_handle1 = PeerHandle::new();
-                let peer_handle2 = PeerHandle::new();
+                let addr1 = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
+                let addr2 = SocketAddr::from((Ipv4Addr::LOCALHOST, 9996));
                 let mut peer1 = MockPeer::new();
-                peer1.expect_handle().return_const(peer_handle1);
-                peer1
-                    .expect_addr()
-                    .return_const(SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)));
+                peer1.expect_addr().return_const(addr1);
                 peer1.expect_subscribe().returning(|| {
                     let (_, rx) = broadcast::channel(1);
                     rx
                 });
                 let mut peer2 = MockPeer::new();
-                peer2.expect_handle().return_const(peer_handle2);
-                peer2
-                    .expect_addr()
-                    .return_const(SocketAddr::from((Ipv4Addr::LOCALHOST, 8080)));
+                peer2.expect_addr().return_const(addr2);
                 peer2.expect_subscribe().returning(|| {
                     let (_, rx) = broadcast::channel(1);
                     rx
@@ -683,7 +666,6 @@ mod tests {
                 init_logger!();
                 let peer_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
                 let mut peer = MockPeer::new();
-                peer.expect_handle().return_const(PeerHandle::new());
                 peer.expect_addr().return_const(peer_addr);
                 peer.expect_subscribe().returning(|| {
                     let (_, rx) = broadcast::channel(1);
@@ -728,7 +710,6 @@ mod tests {
                 init_logger!();
                 let peer1_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
                 let mut peer1 = MockPeer::new();
-                peer1.expect_handle().return_const(PeerHandle::new());
                 peer1.expect_addr().return_const(peer1_addr.clone());
                 peer1.expect_set_choke_state().return_const(());
                 peer1.expect_subscribe().returning(|| {
@@ -737,7 +718,6 @@ mod tests {
                 });
                 let peer2_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6882));
                 let mut peer2 = MockPeer::new();
-                peer2.expect_handle().return_const(PeerHandle::new());
                 peer2.expect_addr().return_const(peer2_addr.clone());
                 peer2.expect_set_choke_state().return_const(());
                 peer2.expect_subscribe().returning(|| {
@@ -776,7 +756,6 @@ mod tests {
                 let peer_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
                 let (tx, rx) = oneshot::channel();
                 let mut peer = MockPeer::new();
-                peer.expect_handle().return_const(PeerHandle::new());
                 peer.expect_addr().return_const(peer_addr.clone());
                 peer.expect_set_choke_state()
                     .times(1)
@@ -807,7 +786,6 @@ mod tests {
                 let peer_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
                 let (tx, rx) = oneshot::channel();
                 let mut peer = MockPeer::new();
-                peer.expect_handle().return_const(PeerHandle::new());
                 peer.expect_addr().return_const(peer_addr.clone());
                 peer.expect_set_choke_state()
                     .times(1)
@@ -859,11 +837,9 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
         async fn test_peer_pool_clean() {
             init_logger!();
-            let peer1_handle = PeerHandle::new();
             let peer1_callbacks = MultiThreadedCallback::new();
             let peer1_subscription = peer1_callbacks.subscribe();
             let mut peer1 = MockPeer::new();
-            peer1.expect_handle().return_const(peer1_handle);
             peer1
                 .expect_addr()
                 .return_const(SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)));
@@ -872,7 +848,6 @@ mod tests {
             let peer2_callbacks = MultiThreadedCallback::new();
             let peer2_subscription = peer2_callbacks.subscribe();
             let mut peer2 = MockPeer::new();
-            peer2.expect_handle().return_const(PeerHandle::new());
             peer2
                 .expect_addr()
                 .return_const(SocketAddr::from(([127, 0, 0, 2], 6899)));
