@@ -27,7 +27,7 @@ crate-type = ["rlib"]
 async-trait = "0.1"
 axum = { version = "0.8", optional = true }
 base32 = "0.5"
-base64 = "0.22"
+base64 = "0.23"
 bitvec = "1.1"
 bitmask-enum = "2.2"
 byteorder = "1.5"
