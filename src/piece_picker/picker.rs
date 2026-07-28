@@ -4,7 +4,7 @@ use crate::piece_picker::strategy::Strategy;
 use crate::piece_picker::PickerOptions;
 use crate::storage::Storage;
 use crate::torrent_data::DataPool;
-use crate::{BitVec, BlockIndex, InnerTorrent, Piece, PieceBlock, PieceIndex, PiecePriority};
+use crate::{BitVec, BlockIndex, Piece, PieceBlock, PieceIndex, PiecePriority, TorrentHandle};
 use derive_more::Display;
 use futures::future::Either;
 use itertools::Itertools;
@@ -19,34 +19,35 @@ use tokio::time::timeout;
 /// This piece picker makes use of multiple strategies for
 /// optimizing piece selection and prioritization.
 #[derive(Debug, Display)]
-#[display("{}", self.torrent)]
+#[display("{}", self.handle)]
 pub struct FxPiecePicker {
+    handle: TorrentHandle,
     options: PickerOptions,
+    max_outstanding_pieces: usize,
     downloads: HashMap<PieceIndex, Vec<PiecePickerBlock>>,
     cache: PickerCache,
-    torrent: InnerTorrent,
     data_pool: DataPool,
-    storage: Storage,
     strategies: Vec<Strategy>,
 }
 
 impl FxPiecePicker {
     /// Create a new piece picker instance.
     pub fn new(
-        torrent: InnerTorrent,
+        handle: TorrentHandle,
         data_pool: DataPool,
         storage: Storage,
         strategies: Vec<Strategy>,
         cache_limit: usize,
+        max_outstanding_pieces: usize,
         options: PickerOptions,
     ) -> Self {
         Self {
+            handle,
             options,
+            max_outstanding_pieces,
             downloads: Default::default(),
-            cache: PickerCache::new(storage.clone(), cache_limit),
-            torrent,
+            cache: PickerCache::new(storage, cache_limit),
             data_pool,
-            storage,
             strategies,
         }
     }
@@ -123,6 +124,11 @@ impl FxPiecePicker {
         self.options &= !options;
     }
 
+    /// Set the maximum number of outstanding pieces that can be requested.
+    pub fn set_max_outstanding(&mut self, max_outstanding_pieces: usize) {
+        self.max_outstanding_pieces = max_outstanding_pieces;
+    }
+
     /// Returns `true` if the torrent has reached the end game, else `false`.
     ///
     /// The end game is reached when the last 3 percent, counted with a precision of 2 decimals,
@@ -159,6 +165,14 @@ impl FxPiecePicker {
         remaining_pieces * 10_000 <= interested_pieces * 300
     }
 
+    /// Returns `true` if the given piece index has finished downloading all blocks.
+    pub fn is_piece_finished(&self, piece: &PieceIndex) -> bool {
+        self.downloads
+            .get(piece)
+            .map(|blocks| blocks.iter().all(|b| b.state == PieceBlockState::Finished))
+            .unwrap_or_default()
+    }
+
     /// Process a received piece block from a peer.
     pub async fn block_received(&mut self, peer: &Peer, block: PieceBlock, data: Vec<u8>) {
         trace!(
@@ -173,6 +187,7 @@ impl FxPiecePicker {
 
         // check if this was the last block needed to complete the piece
         if self.is_piece_complete(&block.piece) {
+            trace!("Piece picker {} finished piece {}", self, block.piece);
             self.on_piece_completed(&block.piece).await;
         }
     }
@@ -364,6 +379,9 @@ impl FxPiecePicker {
                 trace!("Piece picker {} has reached time-limit", self);
                 break;
             }
+            if self.outstanding_pieces_len() > self.max_outstanding_pieces {
+                break;
+            }
 
             self.pick_pieces(peer).await;
         }
@@ -378,7 +396,7 @@ impl FxPiecePicker {
 
     /// Try to write the piece block data to the cache.
     async fn write_block(&mut self, block: &PieceBlock, data: Vec<u8>) -> bool {
-        let handle = self.torrent.handle();
+        let handle = self.handle;
         let block = match self
             .downloads
             .get_mut(&block.piece)
@@ -428,17 +446,6 @@ impl FxPiecePicker {
             }
             Some(piece) => piece,
         };
-        let piece = match self.data_pool.piece(piece_index).await {
-            None => {
-                debug!(
-                    "Piece picker {} couldn't find completed piece {} in data pool",
-                    self, piece_index
-                );
-                self.cache.discard(piece_index);
-                return;
-            }
-            Some(piece) => piece,
-        };
 
         // flush the piece data
         if let Err(e) = self.cache.flush(piece_index).await {
@@ -449,42 +456,6 @@ impl FxPiecePicker {
             Self::invalidate_piece(piece_info);
             self.cache.discard(piece_index);
             return;
-        }
-
-        match (piece.hash.has_v1(), piece.hash.has_v2()) {
-            (true, true) | (false, true) => {
-                debug!(
-                    "Piece picker {} completed piece {}, verifying piece data",
-                    self, piece.index
-                );
-                self.torrent
-                    .piece_verified(
-                        &piece.index,
-                        None,
-                        self.storage.hash_v2(&piece.index).await.ok(),
-                    )
-                    .await;
-            }
-            (true, false) => {
-                debug!(
-                    "Piece picker {} completed piece {}, verifying piece data",
-                    self, piece.index
-                );
-                self.torrent
-                    .piece_verified(
-                        &piece.index,
-                        self.storage.hash_v1(&piece.index).await.ok(),
-                        None,
-                    )
-                    .await;
-            }
-            (false, false) => {
-                debug!(
-                    "Piece picker {} is unable to validate piece {}, piece hash is missing or invalid",
-                    handle, piece.index
-                );
-                Self::invalidate_piece(piece_info);
-            }
         }
 
         if self.downloads.iter().all(|(_, blocks)| {
@@ -544,6 +515,18 @@ impl FxPiecePicker {
                     .all(|block| block.state == PieceBlockState::Finished)
             })
             .unwrap_or_default()
+    }
+
+    /// Returns the total number of outstanding requested pieces.
+    fn outstanding_pieces_len(&self) -> usize {
+        self.downloads
+            .values()
+            .filter(|blocks| {
+                blocks
+                    .iter()
+                    .any(|block| block.state == PieceBlockState::Requested)
+            })
+            .count()
     }
 
     /// Invalidate the given piece.

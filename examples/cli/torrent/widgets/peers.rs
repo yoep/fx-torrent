@@ -1,19 +1,20 @@
 use crate::widgets::print_string_len;
 use fx_callback::{Callback, Subscription};
 use fx_torrent::format_bytes;
-use fx_torrent::peer::{Peer, PeerClientInfo, PeerEvent, PeerHandle, PeerState};
+use fx_torrent::peer::{Peer, PeerClientInfo, PeerEvent, PeerState};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::{Color, Line, Style, Widget};
 use ratatui::widgets::{Block, List, ListItem};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 const REMOVE_CLOSED_PEER_AFTER: Duration = Duration::from_secs(3);
 
 #[derive(Debug)]
 pub struct PeersWidget {
-    peers: HashMap<PeerHandle, TorrentPeerData>,
+    peers: HashMap<SocketAddr, TorrentPeerData>,
 }
 
 impl PeersWidget {
@@ -30,7 +31,7 @@ impl PeersWidget {
         let metrics = peer.metrics();
 
         self.peers.insert(
-            *peer.handle(),
+            *peer.addr(),
             TorrentPeerData {
                 client: peer.client_info().clone(),
                 available_pieces: metrics.available_pieces.get(),
@@ -51,8 +52,8 @@ impl PeersWidget {
         );
     }
 
-    pub fn remove_peer(&mut self, handle: &PeerHandle) {
-        if let Some(peer) = self.peers.get_mut(handle) {
+    pub fn remove_peer(&mut self, addr: &SocketAddr) {
+        if let Some(peer) = self.peers.get_mut(addr) {
             peer.closed_since = Some(Instant::now());
         }
     }

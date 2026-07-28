@@ -2219,7 +2219,7 @@ impl PeerContext {
     /// Try to sent one or more queued requests to the remote peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn send_queued_requests(&mut self, interval: Duration) {
-        const REQUEST_LIMIT: usize = 25;
+        const REQUEST_LIMIT: usize = 20;
 
         // early exit if there are no queued requests
         if self.download_queue.is_empty() {

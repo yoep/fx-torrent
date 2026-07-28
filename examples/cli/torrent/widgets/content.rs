@@ -1,8 +1,9 @@
+use std::net::SocketAddr;
 use crate::app::{FXKeyEvent, FXWidget};
 use crate::torrent::widgets::file_selection::FileSelectionWidget;
 use crate::torrent::widgets::{FilePriorityWidget, FilesWidget, PeersWidget, PriorityAction};
 use async_trait::async_trait;
-use fx_torrent::peer::{Peer, PeerHandle};
+use fx_torrent::peer::Peer;
 use fx_torrent::{File, FileIndex, FilePriority, PieceIndex, Torrent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint::Percentage;
@@ -37,8 +38,8 @@ impl ContentWidget {
         self.peers_widget.add_peer(peer).await;
     }
 
-    pub async fn remove_peer(&mut self, handle: &PeerHandle) {
-        self.peers_widget.remove_peer(handle);
+    pub async fn remove_peer(&mut self, addr: &SocketAddr) {
+        self.peers_widget.remove_peer(addr);
     }
 
     pub fn on_files_changed(&mut self, files: Vec<File>) {

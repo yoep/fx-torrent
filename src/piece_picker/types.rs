@@ -89,11 +89,27 @@ impl PiecePicker {
         }
     }
 
+    /// Set the maximum number of outstanding pieces that can be requested.
+    pub fn set_max_outstanding(&mut self, max_outstanding_pieces: usize) {
+        match self {
+            PiecePicker::Picker(picker) => picker.set_max_outstanding(max_outstanding_pieces),
+            PiecePicker::Other(picker) => picker.set_max_outstanding(max_outstanding_pieces),
+        }
+    }
+
     /// Returns `true` if the torrent has reached the end game, else `false`.
     pub fn is_end_game(&self) -> bool {
         match self {
             PiecePicker::Picker(picker) => picker.is_end_game(),
             PiecePicker::Other(picker) => picker.is_end_game(),
+        }
+    }
+
+    /// Returns `true` if the given piece index has finished downloading all blocks.
+    pub fn is_piece_finished(&self, piece: &PieceIndex) -> bool {
+        match self {
+            PiecePicker::Picker(picker) => picker.is_piece_finished(piece),
+            PiecePicker::Other(picker) => picker.is_piece_finished(piece),
         }
     }
 
@@ -185,8 +201,14 @@ pub trait Extension: Debug + Send + Sync {
     /// Remove the given options from the piece picker.
     fn remove_options(&mut self, options: PickerOptions);
 
+    /// Set the maximum number of outstanding pieces that can be requested.
+    fn set_max_outstanding(&mut self, max_outstanding_pieces: usize);
+
     /// Returns `true` if the torrent has reached the end game, else `false`.
     fn is_end_game(&self) -> bool;
+
+    /// Returns true if the given piece index has finished downloading all blocks.
+    fn is_piece_finished(&self, piece: &PieceIndex) -> bool;
 
     /// Process the data for a piece block that has been downloaded from a peer.
     async fn block_received<'a>(&'a mut self, peer: &'a Peer, block: PieceBlock, data: Vec<u8>);
@@ -244,7 +266,9 @@ mod tests {
             fn set_options(&mut self, options: PickerOptions);
             fn add_options(&mut self, options: PickerOptions);
             fn remove_options(&mut self, options: PickerOptions);
+            fn set_max_outstanding(&mut self, max_outstanding_pieces: usize);
             fn is_end_game(&self) -> bool;
+            fn is_piece_finished(&self, piece: &PieceIndex) -> bool;
             async fn block_received<'a>(&'a mut self, peer: &'a Peer, block: PieceBlock, data: Vec<u8>);
             async fn block_rejected(&mut self, peer_addr: &SocketAddr, block: PieceBlock);
             async fn pick_pieces(&mut self, peer: &Peer);

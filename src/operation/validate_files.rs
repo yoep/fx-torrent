@@ -143,25 +143,26 @@ impl FileValidationOperation {
 
     /// Hash the given piece.
     async fn hash_piece(torrent: InnerTorrent, storage: Storage, piece: Piece) {
-        match (piece.hash.has_v1(), piece.hash.has_v2()) {
-            (true, true) | (false, true) => {
-                torrent
-                    .piece_verified(&piece.index, None, storage.hash_v2(&piece.index).await.ok())
-                    .await;
-            }
-            (true, false) => {
-                torrent
-                    .piece_verified(&piece.index, storage.hash_v1(&piece.index).await.ok(), None)
-                    .await;
-            }
-            (false, false) => {
-                debug!(
-                    "Torrent {} is unable to validate piece {}, piece hash is missing or invalid",
-                    torrent, piece.index
-                );
-                torrent.piece_verified(&piece.index, None, None).await;
-            }
-        };
+        // FIXME
+        // match (piece.hash.has_v1(), piece.hash.has_v2()) {
+        //     (true, true) | (false, true) => {
+        //         torrent
+        //             .piece_verified(&piece.index, None, storage.hash_v2(&piece.index).await.ok())
+        //             .await;
+        //     }
+        //     (true, false) => {
+        //         torrent
+        //             .piece_verified(&piece.index, storage.hash_v1(&piece.index).await.ok(), None)
+        //             .await;
+        //     }
+        //     (false, false) => {
+        //         debug!(
+        //             "Torrent {} is unable to validate piece {}, piece hash is missing or invalid",
+        //             torrent, piece.index
+        //         );
+        //         torrent.piece_verified(&piece.index, None, None).await;
+        //     }
+        // };
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]

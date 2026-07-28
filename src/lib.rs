@@ -342,9 +342,8 @@ meaning their registration order explicitly dictates execution priority during t
 
 ```rust
 # use fx_torrent::DataPool;
-# use fx_torrent::InnerTorrent;
 # use fx_torrent::PieceIndex;
-# use fx_torrent::Torrent;
+# use fx_torrent::TorrentHandle;
 # use fx_torrent::peer::Peer;
 # use fx_torrent::piece_picker::FxPiecePicker;
 # use fx_torrent::piece_picker::PickerOptions;
@@ -374,19 +373,21 @@ impl Extension for MyStrategy {
 # fn example() {
     let torrent = Torrent::request()
         .piece_picker(|
-            torrent: InnerTorrent,
+            handle: TorrentHandle,
             data_pool: DataPool,
             storage: Storage,
-            options: PickerOptions| FxPiecePicker::new(
-            torrent,
-            data_pool,
-            storage,
-            vec![
-                MyStrategy.into(),
-                PriorityStrategy::new().into(),
-            ],
-            32 * 1024
-        ))
+            options: PickerOptions| {
+            FxPiecePicker::new(
+                handle,
+                data_pool,
+                storage,
+                vec![
+                    MyStrategy.into(),
+                    PriorityStrategy::new().into(),
+                ],
+                32 * 1024
+            )
+        })
         .build()
         .unwrap();
 # }
