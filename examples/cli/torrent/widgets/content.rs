@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use crate::app::{FXKeyEvent, FXWidget};
 use crate::torrent::widgets::file_selection::FileSelectionWidget;
 use crate::torrent::widgets::{FilePriorityWidget, FilesWidget, PeersWidget, PriorityAction};
@@ -11,6 +10,7 @@ use ratatui::layout::{Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget};
 use ratatui::Frame;
+use std::net::SocketAddr;
 
 #[derive(Debug)]
 pub struct ContentWidget {

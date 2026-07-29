@@ -304,7 +304,7 @@ pub type TorrentPeer = dyn Extension;
 pub trait Extension: Debug + Display + Send + Sync + Callback<PeerEvent> {
     /// Returns the unique peer identifier within the torrent network.
     fn id(&self) -> &PeerId;
-    
+
     /// Returns the address of the remote peer.
     fn addr(&self) -> &SocketAddr;
 
@@ -576,7 +576,7 @@ mod tests {
             let result = peer.addr();
             assert_eq!(&addr, result);
         }
-        
+
         #[test]
         fn test_metrics() {
             let metrics = Metrics::new();

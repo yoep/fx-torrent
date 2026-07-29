@@ -367,7 +367,7 @@ mod tests {
         // set piece 0 as completed
         mark_piece_completed!(&stream.command_sender, 0, peer.addr(), "piece-1_30.iso");
         assert_timeout!(
-            Duration::from_secs(2),  // TODO: improve test performance
+            Duration::from_secs(2), // TODO: improve test performance
             data_pool.is_piece_completed(&0).await
         );
 
@@ -396,7 +396,7 @@ mod tests {
         // complete the piece
         mark_piece_completed!(&command_sender, 1, peer.addr(), "piece-1_30.iso");
         assert_timeout!(
-            Duration::from_secs(2),  // TODO: improve test performance
+            Duration::from_secs(2), // TODO: improve test performance
             data_pool.is_piece_completed(&1).await
         );
 

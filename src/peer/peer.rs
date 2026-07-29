@@ -6,8 +6,7 @@ use crate::peer::peer_connection::PeerConnection;
 use crate::peer::protocol::{CloseReason, UtpStream};
 use crate::peer::protocol::{ExtendedHandshake, Handshake, HashRequest, Message, Piece, Request};
 use crate::peer::{
-    extension, ChokeState, Error, InterestState, Metrics, PeerEvent, PeerId,
-    PeerPriority, Result,
+    extension, ChokeState, Error, InterestState, Metrics, PeerEvent, PeerId, PeerPriority, Result,
 };
 use crate::storage::Storage;
 use crate::torrent::InnerTorrent;

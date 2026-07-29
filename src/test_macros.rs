@@ -539,12 +539,12 @@ macro_rules! metadata {
 /// Mark the given piece as completed within the torrent.
 macro_rules! mark_piece_completed {
     ($command_sender:expr, $piece:expr, $peer_addr:expr, $test_file:expr) => {{
-        use crate::Piece;
-        use crate::PieceIndex;
-        use crate::TorrentCommand;
         use crate::channel::ChannelSender;
         use crate::tests::read_test_file_to_bytes;
         use crate::torrent_data::DataPool;
+        use crate::Piece;
+        use crate::PieceIndex;
+        use crate::TorrentCommand;
         use std::net::SocketAddr;
 
         let command_sender: &ChannelSender<TorrentCommand> = $command_sender;
@@ -553,7 +553,8 @@ macro_rules! mark_piece_completed {
         let test_file: &str = $test_file;
 
         let test_data = read_test_file_to_bytes(test_file);
-        let data_pool: DataPool = command_sender.send(|tx| TorrentCommand::DataPool { response: tx})
+        let data_pool: DataPool = command_sender
+            .send(|tx| TorrentCommand::DataPool { response: tx })
             .await
             .await
             .unwrap();
@@ -563,11 +564,13 @@ macro_rules! mark_piece_completed {
             let start = piece.offset + block.begin;
             let end = start + block.length;
 
-            command_sender.fire_and_forget(TorrentCommand::PieceBlockReceived {
-                peer_addr: *peer_addr,
-                block: block.clone(),
-                data: test_data[start..end].to_vec(),
-            }).await;
+            command_sender
+                .fire_and_forget(TorrentCommand::PieceBlockReceived {
+                    peer_addr: *peer_addr,
+                    block: block.clone(),
+                    data: test_data[start..end].to_vec(),
+                })
+                .await;
         }
     }};
 }

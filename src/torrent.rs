@@ -2653,7 +2653,7 @@ impl TorrentContext {
 
     /// Verify the given hash of the piece.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn on_piece_verified(
+    pub async fn on_piece_verified(
         &mut self,
         piece_index: &PieceIndex,
         v1_hash: Option<Sha1Hash>,
@@ -4108,7 +4108,7 @@ mod tests {
             // set the pieces as completed
             mark_piece_completed!(&torrent.inner.sender, 1, peer.addr(), "piece-1_30.iso");
             mark_piece_completed!(&torrent.inner.sender, 2, peer.addr(), "piece-1_30.iso");
-            assert_timeout!(Duration::from_secs(2), torrent.has_piece(&2).await);  // TODO: improve test performance
+            assert_timeout!(Duration::from_secs(2), torrent.has_piece(&2).await); // TODO: improve test performance
 
             // wait for the pieces to be completed internally
             let _ = timeout!(
@@ -4409,7 +4409,7 @@ mod tests {
             mark_piece_completed!(&torrent.inner.sender, piece, peer.addr(), "piece-1_30.iso");
         }
         assert_timeout!(
-            Duration::from_secs(2),  // TODO: improve test performance
+            Duration::from_secs(2), // TODO: improve test performance
             torrent.has_piece(&26).await,
             "expected piece 26 to be completed"
         );
@@ -4425,7 +4425,7 @@ mod tests {
             mark_piece_completed!(&torrent.inner.sender, piece, peer.addr(), "piece-1_30.iso");
         }
         assert_timeout!(
-            Duration::from_secs(2),  // TODO: improve test performance
+            Duration::from_secs(2), // TODO: improve test performance
             torrent.has_piece(&29).await,
             "expected piece 29 to be completed"
         );

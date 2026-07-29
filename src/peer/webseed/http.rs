@@ -1,7 +1,7 @@
 use crate::metrics::Metric;
 use crate::peer::{
-    ConnectionDirection, ConnectionProtocol, Error, Metrics, PeerClientInfo, PeerEvent,
-    PeerId, PeerState, Result,
+    ConnectionDirection, ConnectionProtocol, Error, Metrics, PeerClientInfo, PeerEvent, PeerId,
+    PeerState, Result,
 };
 use crate::torrent::InnerTorrent;
 use crate::{BitVec, FileAttributeFlags, PieceBlock, PieceIndex, TorrentFileInfo, TorrentMetadata};

@@ -1,36 +1,31 @@
 use crate::operation::TorrentOperationResult;
-use crate::storage::Storage;
-use crate::torrent::InnerTorrent;
-use crate::{File, Piece, TorrentContext, TorrentFlags, TorrentState};
-use futures::{stream, StreamExt};
-use log::{debug, info};
+use crate::{PieceIndex, Sha1Hash, Sha256Hash, TorrentContext, TorrentFlags, TorrentState};
+use futures::FutureExt;
+use log::debug;
 use std::fmt::Debug;
-use std::time::Instant;
-use tokio::select;
-use tokio::sync::oneshot;
-use tokio_util::sync::WaitForCancellationFutureOwned;
-
-#[derive(Debug, PartialEq)]
-enum ValidationState {
-    None,
-    Validating,
-    Validated,
-}
+use tokio::task::JoinSet;
 
 /// The torrent file validation operation validates existing files of the torrent and checks which pieces have been completed before/valid.
 pub struct FileValidationOperation {
+    cursor: usize,
+    num_of_pieces: usize,
+    max_parallel: usize,
     state: ValidationState,
-    ready_signal: Option<oneshot::Receiver<()>>,
+    validation_tasks: JoinSet<ValidationResult>,
 }
 
 impl FileValidationOperation {
     pub fn new() -> Self {
         Self {
-            state: ValidationState::None,
-            ready_signal: None,
+            cursor: 0,
+            num_of_pieces: 0,
+            max_parallel: 0,
+            state: ValidationState::Validating,
+            validation_tasks: Default::default(),
         }
     }
 
+    /// Execute a validation tick.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn execute(&mut self, torrent: &mut TorrentContext) -> TorrentOperationResult {
         // early exit if the torrent is paused or in an error state
@@ -38,166 +33,101 @@ impl FileValidationOperation {
             return TorrentOperationResult::Continue;
         }
 
-        // poll the in-flight validation future
-        self.poll_future(torrent).await;
+        self.initialize(torrent).await;
+        self.validate(torrent).await;
+        self.poll_futures(torrent).await;
 
         // check the current state of the validator
         match self.state {
-            ValidationState::Validated => return TorrentOperationResult::Continue,
-            ValidationState::Validating => return TorrentOperationResult::Stop,
-            _ => {}
-        }
-
-        let files = torrent.files().await;
-        if files.len() > 0 {
-            torrent.update_state(TorrentState::CheckingFiles);
-            self.validate_files(torrent, files).await;
-            return TorrentOperationResult::Stop;
-        }
-
-        TorrentOperationResult::Continue
-    }
-
-    /// Poll the in-flight validation future
-    async fn poll_future(&mut self, context: &mut TorrentContext) {
-        if let Some(_) = self.ready_signal.as_mut().and_then(|e| e.try_recv().ok()) {
-            self.state = ValidationState::Validated;
-            self.ready_signal = None;
-
-            let new_state = context.determine_state().await;
-            context.update_state(new_state);
-            // start announcing the torrent again
-            if let Some(tracker) = context.tracker() {
-                tracker
-                    .start_announcing(&context.metadata().info_hash)
-                    .await;
-            }
+            ValidationState::Validated => TorrentOperationResult::Continue,
+            ValidationState::Validating => TorrentOperationResult::Stop,
         }
     }
 
     /// Returns `true` if the operation should validate existing files, else `false`.
     fn should_check_files(&self, context: &TorrentContext) -> bool {
         let is_paused = context.options().contains(TorrentFlags::Paused);
+        let is_metadata_known = context.is_metadata_known();
         let state = context.state();
 
-        !is_paused && state != &TorrentState::Error
+        !is_paused && is_metadata_known && state != &TorrentState::Error
     }
 
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn validate_files(&mut self, context: &TorrentContext, files: Vec<File>) {
-        let handle = context.handle();
-        let info_hash = context.metadata().info_hash.clone();
-        let data_pool = context.data_pool().clone();
-        let piece_len = match context.metadata().info.as_ref() {
-            Some(info) => info.piece_length as usize,
-            None => return,
-        };
-
-        // stop announcing the torrent
-        if let Some(tracker) = context.tracker() {
-            tracker.stop_announcing(&info_hash).await;
-        }
-        self.state = ValidationState::Validating;
-
-        let pieces = data_pool.pieces().await;
-        if pieces.is_empty() {
-            debug!(
-                "Torrent {} failed to start file validation, pieces are unknown",
-                context
-            );
+    /// Initialize the validation operation.
+    async fn initialize(&mut self, torrent: &TorrentContext) {
+        if self.max_parallel > 0 {
             return;
         }
 
-        debug!(
-            "Torrent {} is validating files {:?}",
-            context,
-            files
-                .iter()
-                .map(|e| e.torrent_path.to_string_lossy())
-                .collect::<Vec<_>>(),
-        );
-        let cancelled = context.cancelled_owned();
-        let max_parallel = (context.config().checking_mem_usage / piece_len).max(1);
-        let storage = context.storage().clone();
-        let torrent = InnerTorrent::new(
-            handle,
-            context.command_sender().clone(),
-            context.callbacks().clone(),
-        );
+        let num_of_pieces = match torrent.metadata().total_pieces() {
+            Some(num_of_pieces) => num_of_pieces,
+            None => return,
+        };
+        let piece_len = match torrent
+            .metadata()
+            .info
+            .as_ref()
+            .map(|info| info.piece_length as usize)
+        {
+            Some(len) => len,
+            None => return,
+        };
 
-        let (tx, rx) = oneshot::channel();
-        self.ready_signal = Some(rx);
-        spawn!("ValidateFilesOperation::validate_files", async move {
-            Self::run_validation(
-                torrent,
-                storage,
-                pieces,
-                files.len(),
-                max_parallel,
-                tx,
-                cancelled,
-            )
-            .await;
-        });
+        self.num_of_pieces = num_of_pieces;
+        self.max_parallel = (torrent.config().checking_mem_usage / piece_len).max(1);
     }
 
-    /// Hash the given piece.
-    async fn hash_piece(torrent: InnerTorrent, storage: Storage, piece: Piece) {
-        // FIXME
-        // match (piece.hash.has_v1(), piece.hash.has_v2()) {
-        //     (true, true) | (false, true) => {
-        //         torrent
-        //             .piece_verified(&piece.index, None, storage.hash_v2(&piece.index).await.ok())
-        //             .await;
-        //     }
-        //     (true, false) => {
-        //         torrent
-        //             .piece_verified(&piece.index, storage.hash_v1(&piece.index).await.ok(), None)
-        //             .await;
-        //     }
-        //     (false, false) => {
-        //         debug!(
-        //             "Torrent {} is unable to validate piece {}, piece hash is missing or invalid",
-        //             torrent, piece.index
-        //         );
-        //         torrent.piece_verified(&piece.index, None, None).await;
-        //     }
-        // };
+    async fn validate(&mut self, torrent: &TorrentContext) {
+        let task_len = self.validation_tasks.len();
+        let len = self.max_parallel.saturating_sub(task_len);
+
+        for _ in 0..len {
+            let piece = match torrent.data_pool().piece(&self.cursor).await {
+                Some(piece) => piece,
+                None => return,
+            };
+            let storage = torrent.storage().clone();
+
+            self.validation_tasks.spawn(async move {
+                match (piece.hash.has_v1(), piece.hash.has_v2()) {
+                    (true, true) | (false, true) => ValidationResult {
+                        piece: piece.index,
+                        v1_hash: None,
+                        v2_hash: storage.hash_v2(&piece.index).await.ok(),
+                    },
+                    (true, false) => ValidationResult {
+                        piece: piece.index,
+                        v1_hash: storage.hash_v1(&piece.index).await.ok(),
+                        v2_hash: None,
+                    },
+                    (false, false) => ValidationResult {
+                        piece: piece.index,
+                        v1_hash: None,
+                        v2_hash: None,
+                    },
+                }
+            });
+
+            self.cursor += 1;
+        }
     }
 
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn run_validation(
-        torrent: InnerTorrent,
-        storage: Storage,
-        pieces: Vec<Piece>,
-        num_of_files: usize,
-        max_parallel: usize,
-        ready_sender: oneshot::Sender<()>,
-        cancelled: WaitForCancellationFutureOwned,
-    ) {
-        let start = Instant::now();
-        let futures: Vec<_> = pieces
-            .into_iter()
-            .map(|piece| Self::hash_piece(torrent.clone(), storage.clone(), piece))
-            .collect();
-
-        select! {
-            _ = cancelled => {
-                return;
-            },
-            _ = stream::iter(futures)
-                .buffer_unordered(max_parallel)
-                .collect::<Vec<_>>() => {}
+    async fn poll_futures(&mut self, torrent: &mut TorrentContext) {
+        while let Some(result) = self.validation_tasks.join_next().now_or_never().flatten() {
+            match result {
+                Ok(result) => {
+                    torrent
+                        .on_piece_verified(&result.piece, result.v1_hash, result.v2_hash)
+                        .await;
+                }
+                Err(_) => break,
+            }
         }
 
-        let _ = ready_sender.send(());
-        let time_taken = start.elapsed();
-        info!(
-            "Torrent {} completed {} file validation(s) in {:.3} seconds",
-            torrent,
-            num_of_files,
-            time_taken.as_secs_f64()
-        );
+        if self.cursor == self.num_of_pieces && self.validation_tasks.len() == 0 {
+            debug!("Torrent {} completed validation", torrent);
+            self.state = ValidationState::Validated;
+        }
     }
 }
 
@@ -207,6 +137,19 @@ impl Debug for FileValidationOperation {
             .field("state", &self.state)
             .finish()
     }
+}
+
+#[derive(Debug, PartialEq)]
+enum ValidationState {
+    Validating,
+    Validated,
+}
+
+#[derive(Debug)]
+struct ValidationResult {
+    piece: PieceIndex,
+    v1_hash: Option<Sha1Hash>,
+    v2_hash: Option<Sha256Hash>,
 }
 
 #[cfg(test)]
@@ -234,7 +177,10 @@ mod tests {
         );
         let mut operation = FileValidationOperation::new();
 
-        operation.state = ValidationState::Validating;
+        // create pieces and files
+        create_pieces_and_files(&mut context).await;
+
+        // execute the validation operation
         let result = operation.execute(&mut context).await;
 
         assert_eq!(TorrentOperationResult::Stop, result);
