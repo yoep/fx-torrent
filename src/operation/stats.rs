@@ -63,7 +63,7 @@ impl StatsOperation {
 
         while let Ok(event) = receiver.try_recv() {
             if let TorrentEvent::PeerConnected(peer) = &*event {
-                let peer = match context.peer_pool().get(&peer.handle) {
+                let peer = match context.peer_pool().get(&peer.addr) {
                     Some(peer) => peer,
                     None => continue,
                 };

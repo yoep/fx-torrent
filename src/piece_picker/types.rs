@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use bitmask_enum::bitmask;
 use itertools::Itertools;
 use std::fmt::Debug;
+use std::net::SocketAddr;
 
 /// The piece picker used by a torrent.
 /// This picker determines the order in which pieces or downloaded
@@ -88,11 +89,27 @@ impl PiecePicker {
         }
     }
 
+    /// Set the maximum number of outstanding pieces that can be requested.
+    pub fn set_max_outstanding(&mut self, max_outstanding_pieces: usize) {
+        match self {
+            PiecePicker::Picker(picker) => picker.set_max_outstanding(max_outstanding_pieces),
+            PiecePicker::Other(picker) => picker.set_max_outstanding(max_outstanding_pieces),
+        }
+    }
+
     /// Returns `true` if the torrent has reached the end game, else `false`.
     pub fn is_end_game(&self) -> bool {
         match self {
             PiecePicker::Picker(picker) => picker.is_end_game(),
             PiecePicker::Other(picker) => picker.is_end_game(),
+        }
+    }
+
+    /// Returns `true` if the given piece index has finished downloading all blocks.
+    pub fn is_piece_finished(&self, piece: &PieceIndex) -> bool {
+        match self {
+            PiecePicker::Picker(picker) => picker.is_piece_finished(piece),
+            PiecePicker::Other(picker) => picker.is_piece_finished(piece),
         }
     }
 
@@ -107,10 +124,10 @@ impl PiecePicker {
 
     /// Process a piece block request that has been rejected by the peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn block_rejected(&mut self, peer: &Peer, block: PieceBlock) {
+    pub async fn block_rejected(&mut self, peer_addr: &SocketAddr, block: PieceBlock) {
         match self {
-            PiecePicker::Picker(picker) => picker.block_rejected(peer, block),
-            PiecePicker::Other(picker) => picker.block_rejected(peer, block).await,
+            PiecePicker::Picker(picker) => picker.block_rejected(peer_addr, block),
+            PiecePicker::Other(picker) => picker.block_rejected(peer_addr, block).await,
         }
     }
 
@@ -184,14 +201,20 @@ pub trait Extension: Debug + Send + Sync {
     /// Remove the given options from the piece picker.
     fn remove_options(&mut self, options: PickerOptions);
 
+    /// Set the maximum number of outstanding pieces that can be requested.
+    fn set_max_outstanding(&mut self, max_outstanding_pieces: usize);
+
     /// Returns `true` if the torrent has reached the end game, else `false`.
     fn is_end_game(&self) -> bool;
+
+    /// Returns true if the given piece index has finished downloading all blocks.
+    fn is_piece_finished(&self, piece: &PieceIndex) -> bool;
 
     /// Process the data for a piece block that has been downloaded from a peer.
     async fn block_received<'a>(&'a mut self, peer: &'a Peer, block: PieceBlock, data: Vec<u8>);
 
     /// Process a piece block request that has been rejected by the peer.
-    async fn block_rejected(&mut self, peer: &Peer, block: PieceBlock);
+    async fn block_rejected(&mut self, peer_addr: &SocketAddr, block: PieceBlock);
 
     /// Pick interesting pieces for the given peer.
     async fn pick_pieces(&mut self, peer: &Peer);
@@ -243,9 +266,11 @@ mod tests {
             fn set_options(&mut self, options: PickerOptions);
             fn add_options(&mut self, options: PickerOptions);
             fn remove_options(&mut self, options: PickerOptions);
+            fn set_max_outstanding(&mut self, max_outstanding_pieces: usize);
             fn is_end_game(&self) -> bool;
+            fn is_piece_finished(&self, piece: &PieceIndex) -> bool;
             async fn block_received<'a>(&'a mut self, peer: &'a Peer, block: PieceBlock, data: Vec<u8>);
-            async fn block_rejected(&mut self, peer: &Peer, block: PieceBlock);
+            async fn block_rejected(&mut self, peer_addr: &SocketAddr, block: PieceBlock);
             async fn pick_pieces(&mut self, peer: &Peer);
             async fn tick<'a>(&'a mut self, peers: Vec<&'a Peer>);
         }

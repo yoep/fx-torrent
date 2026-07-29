@@ -94,7 +94,6 @@ macro_rules! torrent_context {
         use crate::torrent_data::DataPool;
         use crate::tracker::TrackerClient;
         use crate::ExtensionFactory;
-        use crate::InnerTorrent;
         use crate::LocalServiceDiscovery;
         use crate::TorrentHandle;
         use crate::{
@@ -133,6 +132,7 @@ macro_rules! torrent_context {
         }
 
         let handle = TorrentHandle::new();
+        let max_outstanding_pieces = config.max_in_flight_pieces;
         let peer_port = discoveries.first().map(|e| e.addr().port());
         let callbacks = MultiThreadedCallback::new();
         let storage: Storage = ($storage)(info_hash, data_pool.clone());
@@ -149,11 +149,12 @@ macro_rules! torrent_context {
                 trackers,
                 storage.clone(),
                 FxPiecePicker::new(
-                    InnerTorrent::new(handle, command_sender.clone(), callbacks.clone()),
+                    handle,
                     data_pool,
                     storage,
                     vec![],
                     16 * 1024 * 1024,
+                    max_outstanding_pieces,
                     PickerOptions::Priority,
                 )
                 .into(),
@@ -531,6 +532,45 @@ macro_rules! metadata {
         } else {
             let torrent_info_data = read_test_file_to_bytes(uri);
             TorrentMetadata::try_from(torrent_info_data.as_slice()).unwrap()
+        }
+    }};
+}
+
+/// Mark the given piece as completed within the torrent.
+macro_rules! mark_piece_completed {
+    ($command_sender:expr, $piece:expr, $peer_addr:expr, $test_file:expr) => {{
+        use crate::channel::ChannelSender;
+        use crate::tests::read_test_file_to_bytes;
+        use crate::torrent_data::DataPool;
+        use crate::Piece;
+        use crate::PieceIndex;
+        use crate::TorrentCommand;
+        use std::net::SocketAddr;
+
+        let command_sender: &ChannelSender<TorrentCommand> = $command_sender;
+        let piece: PieceIndex = $piece;
+        let peer_addr: &SocketAddr = $peer_addr;
+        let test_file: &str = $test_file;
+
+        let test_data = read_test_file_to_bytes(test_file);
+        let data_pool: DataPool = command_sender
+            .send(|tx| TorrentCommand::DataPool { response: tx })
+            .await
+            .await
+            .unwrap();
+        let piece: Piece = data_pool.piece(&piece).await.unwrap();
+
+        for block in &piece.blocks {
+            let start = piece.offset + block.begin;
+            let end = start + block.length;
+
+            command_sender
+                .fire_and_forget(TorrentCommand::PieceBlockReceived {
+                    peer_addr: *peer_addr,
+                    block: block.clone(),
+                    data: test_data[start..end].to_vec(),
+                })
+                .await;
         }
     }};
 }

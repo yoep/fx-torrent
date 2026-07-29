@@ -324,13 +324,10 @@ impl Debug for StreamState {
 
 #[cfg(test)]
 mod tests {
-    use crate::channel::ChannelSender;
     use crate::operation::CreatePiecesAndFilesOperation;
     use crate::storage::DiskStorage;
     use crate::tests::copy_test_file;
     use crate::tests::helpers::wait_for_torrent_pieces;
-    use crate::torrent_data::DataPool;
-    use crate::{PieceIndex, TorrentCommand};
     use futures::{Stream, StreamExt};
     use std::time::Duration;
     use tempfile::tempdir;
@@ -356,6 +353,9 @@ mod tests {
             |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
             None
         );
+        let data_pool = torrent.inner.data_pool().await.unwrap();
+        let (peer, _peer2) = tcp_peer_pair!(&torrent, vec![]);
+        torrent.inner.peer_connected(peer.clone().into()).await;
 
         // wait for the pieces to be created
         wait_for_torrent_pieces(&torrent).await;
@@ -365,7 +365,11 @@ mod tests {
         let mut stream = torrent.stream(&file).await.unwrap();
 
         // set piece 0 as completed
-        piece_completed(&stream.command_sender, &stream.data_pool, 0).await;
+        mark_piece_completed!(&stream.command_sender, 0, peer.addr(), "piece-1_30.iso");
+        assert_timeout!(
+            Duration::from_secs(2), // TODO: improve test performance
+            data_pool.is_piece_completed(&0).await
+        );
 
         // get the next buffer, which should complete instantly
         let result =
@@ -382,7 +386,6 @@ mod tests {
 
         // try to get the next buffer, which should be blocked
         let command_sender = stream.command_sender.clone();
-        let data_pool = stream.data_pool.clone();
         let mut future = stream.next();
         let result = timeout(Duration::from_millis(250), &mut future).await;
         match result {
@@ -391,7 +394,11 @@ mod tests {
         }
 
         // complete the piece
-        piece_completed(&command_sender, &data_pool, 1).await;
+        mark_piece_completed!(&command_sender, 1, peer.addr(), "piece-1_30.iso");
+        assert_timeout!(
+            Duration::from_secs(2), // TODO: improve test performance
+            data_pool.is_piece_completed(&1).await
+        );
 
         // try to complete the previous future instantly
         let result = timeout!(Duration::from_millis(500), future).unwrap();
@@ -453,6 +460,9 @@ mod tests {
             |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
             None
         );
+        let data_pool = torrent.inner.data_pool().await.unwrap();
+        let (peer, _peer2) = tcp_peer_pair!(&torrent, vec![]);
+        torrent.inner.peer_connected(peer.clone().into()).await;
 
         // wait for the pieces to be created
         wait_for_torrent_pieces(&torrent).await;
@@ -462,7 +472,11 @@ mod tests {
         let mut stream = torrent.stream(&file).await.unwrap();
 
         // set the next piece as completed
-        piece_completed(&stream.command_sender, &stream.data_pool, 0).await;
+        mark_piece_completed!(&stream.command_sender, 0, peer.addr(), "piece-1_30.iso");
+        assert_timeout!(
+            Duration::from_secs(2), // TODO: improve test performance
+            data_pool.is_piece_completed(&0).await
+        );
 
         // read the next stream buffer
         let result = timeout!(Duration::from_millis(750), stream.next());
@@ -501,6 +515,9 @@ mod tests {
             |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
             None
         );
+        let data_pool = torrent.inner.data_pool().await.unwrap();
+        let (peer, _peer2) = tcp_peer_pair!(&torrent, vec![]);
+        torrent.inner.peer_connected(peer.clone().into()).await;
 
         // wait for the pieces to be created
         wait_for_torrent_pieces(&torrent).await;
@@ -510,7 +527,11 @@ mod tests {
         let mut stream = torrent.stream(&file).await.unwrap();
 
         // set the next piece as completed
-        piece_completed(&stream.command_sender, &stream.data_pool, 0).await;
+        mark_piece_completed!(&stream.command_sender, 0, peer.addr(), "piece-1_30.iso");
+        assert_timeout!(
+            Duration::from_secs(2), // TODO: improve test performance
+            data_pool.is_piece_completed(&0).await
+        );
 
         // read the next stream buffer
         let result = timeout!(Duration::from_millis(750), stream.next());
@@ -655,20 +676,5 @@ mod tests {
 
         let result = stream.size_hint();
         assert_eq!((0, Some(15237)), result, "expected the size hint to match");
-    }
-
-    async fn piece_completed(
-        command_sender: &ChannelSender<TorrentCommand>,
-        data_pool: &DataPool,
-        index: PieceIndex,
-    ) {
-        let piece = data_pool.piece(&index).await.unwrap();
-        command_sender
-            .fire_and_forget(TorrentCommand::PieceVerified {
-                piece: piece.index,
-                v1_hash: Some(piece.hash.hash_v1().unwrap()),
-                v2_hash: None,
-            })
-            .await;
     }
 }

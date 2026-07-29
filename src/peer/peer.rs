@@ -6,8 +6,7 @@ use crate::peer::peer_connection::PeerConnection;
 use crate::peer::protocol::{CloseReason, UtpStream};
 use crate::peer::protocol::{ExtendedHandshake, Handshake, HashRequest, Message, Piece, Request};
 use crate::peer::{
-    extension, ChokeState, Error, InterestState, Metrics, PeerEvent, PeerHandle, PeerId,
-    PeerPriority, Result,
+    extension, ChokeState, Error, InterestState, Metrics, PeerEvent, PeerId, PeerPriority, Result,
 };
 use crate::storage::Storage;
 use crate::torrent::InnerTorrent;
@@ -210,8 +209,6 @@ pub struct PeerStats {
 #[derive(Debug, Display, Clone, PartialEq)]
 #[display("{}[{}:{}]", id, connection_protocol, addr)]
 pub struct PeerClientInfo {
-    /// The unique handle of the peer
-    pub handle: PeerHandle,
     /// The unique peer id communicated with the remote peer
     pub id: PeerId,
     /// The remote peer address the client is connected to
@@ -358,9 +355,9 @@ impl BitTorrentPeer {
         .flatten()
     }
 
-    /// Returns the unique handle of the peer.
-    pub fn handle(&self) -> &PeerHandle {
-        &self.client.handle
+    /// Returns the unique peer identifier within the torrent network.
+    pub fn id(&self) -> &PeerId {
+        &self.client.id
     }
 
     /// Returns the address of the remote peer.
@@ -934,13 +931,11 @@ impl PeerContext {
         metrics: Metrics,
         timeout: Duration,
     ) -> Result<Self> {
-        let peer_handle = PeerHandle::new();
         let total_pieces = data_pool.num_of_pieces().await;
         let extension_registry = Self::create_extension_registry(extensions);
 
         Ok(Self {
             client: PeerClientInfo {
-                handle: peer_handle,
                 id: peer_id,
                 addr: peer_addr,
                 connection_type,
@@ -1465,7 +1460,7 @@ impl PeerContext {
         let num_of_timed_out_blocks = timed_out_blocks.len();
         for block in timed_out_blocks {
             self.torrent
-                .piece_block_rejected(&self.client.handle, &block)
+                .piece_block_rejected(&self.client.addr, &block)
                 .await;
         }
 
@@ -1495,7 +1490,7 @@ impl PeerContext {
             .await
         {
             self.torrent
-                .piece_block_rejected(&self.client.handle, &block)
+                .piece_block_rejected(&self.client.addr, &block)
                 .await;
         }
     }
@@ -1525,7 +1520,7 @@ impl PeerContext {
             let data_size = piece.data.len();
             if block.length == data_size {
                 self.torrent
-                    .piece_block_received(&self.client.handle, &block, piece.data)
+                    .piece_block_received(&self.client.addr, &block, piece.data)
                     .await;
             } else {
                 debug!(
@@ -1537,7 +1532,7 @@ impl PeerContext {
                 );
 
                 self.torrent
-                    .piece_block_rejected(&self.client.handle, &block)
+                    .piece_block_rejected(&self.client.addr, &block)
                     .await;
             }
         } else {
@@ -1553,7 +1548,7 @@ impl PeerContext {
         // check if the download queue is empty and the remote client is still unchoked
         // if so, request additional pieces to be picked for this peer connection
         if self.remote_choke_state == ChokeState::UnChoked && self.download_queue.is_empty() {
-            self.torrent.pick_pieces(&self.client.handle).await;
+            self.torrent.pick_pieces(&self.client.addr).await;
         }
     }
 
@@ -1834,7 +1829,7 @@ impl PeerContext {
             self.reject_download_queue().await;
         } else {
             self.send_queued_requests(PEER_TICK_INTERVAL).await;
-            self.torrent.pick_pieces(&self.client.handle).await;
+            self.torrent.pick_pieces(&self.client.addr).await;
         }
 
         self.callbacks
@@ -2201,7 +2196,7 @@ impl PeerContext {
     async fn reject_block_requests(&self, blocks: impl Iterator<Item = PieceBlock>) {
         for block in blocks {
             self.torrent
-                .piece_block_rejected(&self.client.handle, &block)
+                .piece_block_rejected(&self.client.addr, &block)
                 .await
         }
     }
@@ -2223,7 +2218,7 @@ impl PeerContext {
     /// Try to sent one or more queued requests to the remote peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn send_queued_requests(&mut self, interval: Duration) {
-        const REQUEST_LIMIT: usize = 25;
+        const REQUEST_LIMIT: usize = 20;
 
         // early exit if there are no queued requests
         if self.download_queue.is_empty() {
@@ -2274,7 +2269,7 @@ impl PeerContext {
                     e
                 );
                 self.torrent
-                    .piece_block_rejected(&self.client.handle, &block)
+                    .piece_block_rejected(&self.client.addr, &block)
                     .await;
                 break;
             }
@@ -3106,7 +3101,6 @@ mod tests {
 
         fn create_info_from_addr(addr: SocketAddr) -> PeerClientInfo {
             PeerClientInfo {
-                handle: Default::default(),
                 id: PeerId::new(),
                 addr,
                 connection_type: ConnectionDirection::Inbound,

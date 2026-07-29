@@ -1,13 +1,12 @@
 use crate::metrics::Metric;
 use crate::peer::{
-    ConnectionDirection, ConnectionProtocol, Error, Metrics, PeerClientInfo, PeerEvent, PeerHandle,
-    PeerId, PeerState, Result,
+    ConnectionDirection, ConnectionProtocol, Error, Metrics, PeerClientInfo, PeerEvent, PeerId,
+    PeerState, Result,
 };
 use crate::torrent::InnerTorrent;
 use crate::{BitVec, FileAttributeFlags, PieceBlock, PieceIndex, TorrentFileInfo, TorrentMetadata};
 use derive_more::Display;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
-use fx_handle::Handle;
 use itertools::Itertools;
 use log::{debug, warn};
 use percent_encoding::{percent_encode, AsciiSet, NON_ALPHANUMERIC};
@@ -42,7 +41,6 @@ pub struct HttpPeer {
 impl HttpPeer {
     /// Create a new HTTP/webseed peer instance.
     pub fn new(url: Url, torrent: InnerTorrent) -> Result<Self> {
-        let handle = Handle::new();
         let client = Client::builder()
             .redirect(Policy::limited(3))
             .build()
@@ -57,10 +55,8 @@ impl HttpPeer {
             .pop()
             .unwrap_or(SocketAddr::from(([120, 0, 0, 1], 80)));
         let inner = Arc::new(HttpPeerContext {
-            handle,
             client,
             client_info: PeerClientInfo {
-                handle,
                 id: PeerId::new(),
                 addr,
                 connection_type: ConnectionDirection::Outbound,
@@ -84,9 +80,9 @@ impl HttpPeer {
         Ok(Self { inner })
     }
 
-    /// Returns the unique handle of the peer.
-    pub fn handle(&self) -> &PeerHandle {
-        &self.inner.handle
+    /// Returns the unique peer identifier within the torrent network.
+    pub fn id(&self) -> &PeerId {
+        &self.inner.client_info.id
     }
 
     /// Returns the address of the remote peer.   
@@ -124,7 +120,7 @@ impl HttpPeer {
                 for block in blocks {
                     self.inner
                         .torrent
-                        .piece_block_rejected(&self.inner.handle, block)
+                        .piece_block_rejected(&self.inner.addr, block)
                         .await;
                 }
                 return;
@@ -149,7 +145,7 @@ impl HttpPeer {
                 for block in blocks {
                     self.inner
                         .torrent
-                        .piece_block_rejected(&self.inner.handle, block)
+                        .piece_block_rejected(&self.inner.addr, block)
                         .await;
                 }
             }
@@ -177,7 +173,6 @@ impl Drop for HttpPeer {
 #[derive(Debug, Display)]
 #[display("{}", client_info)]
 struct HttpPeerContext {
-    handle: PeerHandle,
     client: Client,
     client_info: PeerClientInfo,
     url: Url,
@@ -299,7 +294,7 @@ impl HttpPeerContext {
                 let data = &buffer[block_start..block_end];
                 let _ = self
                     .torrent
-                    .piece_block_received(&self.handle, block, data)
+                    .piece_block_received(&self.addr, block, data)
                     .await;
             }
         }

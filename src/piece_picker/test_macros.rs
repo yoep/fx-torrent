@@ -15,7 +15,6 @@ macro_rules! piece_picker {
         use crate::piece_picker::strategy::Strategy;
         use crate::piece_picker::FxPiecePicker;
         use crate::piece_picker::PickerOptions;
-        use crate::InnerTorrent;
         use crate::TorrentContext;
 
         let torrent: &TorrentContext = $torrent;
@@ -24,15 +23,12 @@ macro_rules! piece_picker {
         let options: PickerOptions = $options;
 
         FxPiecePicker::new(
-            InnerTorrent::new(
-                torrent.handle(),
-                torrent.command_sender().clone(),
-                torrent.callbacks().clone(),
-            ),
+            torrent.handle(),
             torrent.data_pool().clone(),
             torrent.storage().clone(),
             strategies,
             cache_limit * 1024 * 1024,
+            25,
             options,
         )
     }};

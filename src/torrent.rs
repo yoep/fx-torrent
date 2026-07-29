@@ -7,8 +7,7 @@ use crate::operation::{Operation, TorrentOperationResult};
 use crate::peer::extension::PeerExtension;
 use crate::peer::{
     BitTorrentPeer, ChokeState, CloseReason, ConnectionProtocol, InterestState, Peer,
-    PeerClientInfo, PeerDiscovery, PeerEntry, PeerHandle, PeerId, PeerState,
-    ProtocolExtensionFlags,
+    PeerClientInfo, PeerDiscovery, PeerEntry, PeerId, PeerState, ProtocolExtensionFlags,
 };
 use crate::peer_pool::PeerPool;
 use crate::piece_picker::strategy::{
@@ -31,7 +30,7 @@ use crate::{FileStream, TorrentHandle};
 use derive_more::Display;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use itertools::Itertools;
 use log::{debug, info, log, trace, Level};
@@ -45,6 +44,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot::Sender;
 use tokio::sync::Notify;
+use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tokio::{select, time};
 use tokio_util::sync::{
@@ -63,7 +63,7 @@ pub type StorageFactory = dyn FnOnce(StorageParams) -> Storage + Send + Sync;
 
 /// Factory type for creating a new [PiecePicker] instance.
 pub type PiecePickerFactory =
-    dyn Fn(InnerTorrent, DataPool, Storage, PickerOptions) -> PiecePicker + Send + Sync;
+    dyn Fn(TorrentHandle, usize, DataPool, Storage, PickerOptions) -> PiecePicker + Send + Sync;
 
 /// The states of the torrent
 #[derive(Debug, Display, Copy, Clone, PartialEq)]
@@ -266,7 +266,7 @@ impl TorrentRequest {
     /// Set the piece picker factory to use for the torrent.
     pub fn piece_picker<F>(&mut self, picker: F) -> &mut Self
     where
-        F: Fn(InnerTorrent, DataPool, Storage, PickerOptions) -> PiecePicker
+        F: Fn(TorrentHandle, usize, DataPool, Storage, PickerOptions) -> PiecePicker
             + Send
             + Sync
             + 'static,
@@ -335,13 +335,13 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
         let trackers = std::mem::take(&mut request.trackers);
         let piece_picker = std::mem::take(&mut request.piece_picker).unwrap_or_else(|| {
             Box::new(
-                |torrent: InnerTorrent,
+                |handle: TorrentHandle,
+                 max_outstanding_pieces: usize,
                  data_pool: DataPool,
                  storage: Storage,
                  options: PickerOptions| {
                     FxPiecePicker::new(
-                        torrent,
-                        // TODO: limit max number of in-flight pieces
+                        handle,
                         data_pool,
                         storage,
                         vec![
@@ -351,6 +351,7 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
                             PriorityStrategy::new().into(),
                         ],
                         32 * 1024 * 1024, // 32MB, TODO: make this configurable
+                        max_outstanding_pieces,
                         options,
                     )
                     .into()
@@ -474,16 +475,14 @@ impl Torrent {
         let info_hash = metadata.info_hash.clone();
         let (command_sender, command_receiver) = channel!(1024);
         let location = config.path().to_path_buf();
-        let piece_picker = piece_picker(
-            InnerTorrent {
-                handle,
-                sender: command_sender.clone(),
-                callbacks: callbacks.clone(),
-            },
+        let mut piece_picker = piece_picker(
+            handle,
+            config.max_in_flight_pieces,
             data_pool.clone(),
             storage.clone(),
             PickerOptions::Priority,
         );
+        piece_picker.set_max_outstanding(config.max_in_flight_pieces);
         let mut context = TorrentContext::new(
             handle,
             metadata,
@@ -913,15 +912,15 @@ impl Torrent {
             .await?)
     }
 
-    /// Returns an existing peer from the peer pool by the given handle.
+    /// Returns an existing peer from the peer pool.
     /// The returned instance is a weak reference that can be dropped by the pool at any time.
     ///
     /// ## Remark
     ///
     /// Before calling a method,
     /// make sure to check if the reference is still valid by calling [Peer::is_valid].
-    pub async fn peer(&self, handle: &PeerHandle) -> Option<Peer> {
-        self.inner.peer(handle).await
+    pub async fn peer(&self, addr: &SocketAddr) -> Option<Peer> {
+        self.inner.peer(addr).await
     }
 
     /// Returns an existing peer from the peer pool by the given address.
@@ -1103,10 +1102,10 @@ impl InnerTorrent {
 
     /// Returns an existing peer from the pool by the given handle.
     /// The returned instance is a weak reference that can be dropped by the pool at any time.
-    pub async fn peer(&self, handle: &PeerHandle) -> Option<Peer> {
+    pub async fn peer(&self, addr: &SocketAddr) -> Option<Peer> {
         self.sender
             .send(|tx| TorrentCommand::GetPeer {
-                handle: *handle,
+                addr: *addr,
                 response: tx,
             })
             .await
@@ -1370,24 +1369,10 @@ impl InnerTorrent {
     }
 
     /// Request the torrent piece picker to pick pieces for the given peer.
-    pub async fn pick_pieces(&self, peer: &PeerHandle) {
+    pub async fn pick_pieces(&self, peer_addr: &SocketAddr) {
         self.sender
-            .fire_and_forget(TorrentCommand::PickPieces { peer: *peer })
-            .await;
-    }
-
-    /// Inform the torrent that the given piece has been verified.
-    pub async fn piece_verified(
-        &self,
-        piece: &PieceIndex,
-        v1_hash: Option<Sha1Hash>,
-        v2_hash: Option<Sha256Hash>,
-    ) {
-        self.sender
-            .fire_and_forget(TorrentCommand::PieceVerified {
-                piece: *piece,
-                v1_hash,
-                v2_hash,
+            .fire_and_forget(TorrentCommand::PickPieces {
+                peer_addr: *peer_addr,
             })
             .await;
     }
@@ -1395,13 +1380,13 @@ impl InnerTorrent {
     /// Process a received piece block from a peer.
     pub async fn piece_block_received<T: Into<Vec<u8>>>(
         &self,
-        peer: &PeerHandle,
+        peer_addr: &SocketAddr,
         block: &PieceBlock,
         data: T,
     ) {
         self.sender
             .fire_and_forget(TorrentCommand::PieceBlockReceived {
-                peer: *peer,
+                peer_addr: *peer_addr,
                 block: *block,
                 data: data.into(),
             })
@@ -1409,10 +1394,10 @@ impl InnerTorrent {
     }
 
     /// Inform the torrent that a piece block request has been rejected by the peer.
-    pub async fn piece_block_rejected(&self, peer: &PeerHandle, block: &PieceBlock) {
+    pub async fn piece_block_rejected(&self, peer_addr: &SocketAddr, block: &PieceBlock) {
         self.sender
             .fire_and_forget(TorrentCommand::PieceBlockRejected {
-                peer: *peer,
+                peer_addr: *peer_addr,
                 block: *block,
             })
             .await
@@ -1536,7 +1521,7 @@ pub enum TorrentCommand {
     },
     /// Returns an existing peer from the torrent by the given handle.
     GetPeer {
-        handle: PeerHandle,
+        addr: SocketAddr,
         response: Reply<Option<Peer>>,
     },
     /// Returns an existing peer from the torrent by the given peer address.
@@ -1721,20 +1706,15 @@ pub enum TorrentCommand {
         response: Reply<BitVec>,
     },
     PickPieces {
-        peer: PeerHandle,
-    },
-    PieceVerified {
-        piece: PieceIndex,
-        v1_hash: Option<Sha1Hash>,
-        v2_hash: Option<Sha256Hash>,
+        peer_addr: SocketAddr,
     },
     PieceBlockReceived {
-        peer: PeerHandle,
+        peer_addr: SocketAddr,
         block: PieceBlock,
         data: Vec<u8>,
     },
     PieceBlockRejected {
-        peer: PeerHandle,
+        peer_addr: SocketAddr,
         block: PieceBlock,
     },
     IsEndGame {
@@ -1782,6 +1762,9 @@ pub struct TorrentContext {
     /// These factories create the extensions for each established peer connection.
     extensions: Vec<ExtensionFactory>,
 
+    /// The verification tasks validating piece data.
+    verify_tasks: JoinSet<VerifyTaskResult>,
+
     /// The state of the torrent
     state: TorrentState,
     /// The torrent options that are set for this torrent
@@ -1824,6 +1807,7 @@ impl TorrentContext {
             data_pool,
             storage,
             piece_picker,
+            verify_tasks: Default::default(),
             protocol_extensions,
             extensions,
             state: Default::default(),
@@ -2108,7 +2092,6 @@ impl TorrentContext {
 
     /// Prioritize the given pieces within this torrent.
     pub async fn prioritize_pieces(&mut self, priorities: Vec<(PieceIndex, PiecePriority)>) {
-        trace!("Torrent {} is prioritizing pieces {:?}", self, priorities);
         self.data_pool
             .set_piece_priorities(priorities.as_slice())
             .await;
@@ -2655,12 +2638,12 @@ impl TorrentContext {
 
     /// Pick pieces for the given peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn on_pick_pieces(&mut self, peer_handle: PeerHandle) {
+    async fn on_pick_pieces(&mut self, peer_addr: SocketAddr) {
         // early exit if downloading pieces is not allowed
         if !self.is_download_allowed() {
             return;
         }
-        let peer = match self.peer_pool.get(&peer_handle) {
+        let peer = match self.peer_pool.get(&peer_addr) {
             None => return,
             Some(peer) => peer,
         };
@@ -2670,7 +2653,7 @@ impl TorrentContext {
 
     /// Verify the given hash of the piece.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn on_piece_verified(
+    pub async fn on_piece_verified(
         &mut self,
         piece_index: &PieceIndex,
         v1_hash: Option<Sha1Hash>,
@@ -2839,11 +2822,11 @@ impl TorrentContext {
             TorrentCommand::AddPeers { addrs } => {
                 self.add_peer_addresses(addrs);
             }
-            TorrentCommand::GetPeer { handle, response } => {
-                response.send(self.peer_pool.get(&handle).cloned());
+            TorrentCommand::GetPeer { addr, response } => {
+                response.send(self.peer_pool.get(&addr).cloned());
             }
             TorrentCommand::GetPeerByAddr { addr, response } => {
-                response.send(self.peer_pool.get_by_addr(&addr).cloned())
+                response.send(self.peer_pool.get(&addr).cloned())
             }
             TorrentCommand::PeerConnected { peer } => self.add_peer(peer),
             TorrentCommand::DecreasePeerPriority { addrs } => {
@@ -2939,15 +2922,8 @@ impl TorrentContext {
             TorrentCommand::GetPiecePriorities { response } => {
                 response.send(self.data_pool.piece_priorities().await)
             }
-            TorrentCommand::PickPieces { peer } => {
-                self.on_pick_pieces(peer).await;
-            }
-            TorrentCommand::PieceVerified {
-                piece,
-                v1_hash,
-                v2_hash,
-            } => {
-                self.on_piece_verified(&piece, v1_hash, v2_hash).await;
+            TorrentCommand::PickPieces { peer_addr } => {
+                self.on_pick_pieces(peer_addr).await;
             }
             TorrentCommand::PrioritizePieces {
                 priorities,
@@ -3010,11 +2986,13 @@ impl TorrentContext {
                 response.send(self.protocol_extensions())
             }
             TorrentCommand::Bitfield { response } => response.send(self.data_pool.bitfield().await),
-            TorrentCommand::PieceBlockReceived { peer, block, data } => {
-                self.on_piece_block_received(peer, block, data).await
-            }
-            TorrentCommand::PieceBlockRejected { peer, block } => {
-                self.on_piece_block_rejected(peer, block).await
+            TorrentCommand::PieceBlockReceived {
+                peer_addr,
+                block,
+                data,
+            } => self.on_piece_block_received(peer_addr, block, data).await,
+            TorrentCommand::PieceBlockRejected { peer_addr, block } => {
+                self.on_piece_block_rejected(&peer_addr, block).await
             }
             TorrentCommand::IsEndGame { response } => {
                 response.send(self.piece_picker.is_end_game());
@@ -3093,35 +3071,96 @@ impl TorrentContext {
     /// Process the received data for a piece block.
     async fn on_piece_block_received(
         &mut self,
-        peer: PeerHandle,
+        peer_addr: SocketAddr,
         block: PieceBlock,
         data: Vec<u8>,
     ) {
-        let peer = match self.peer_pool.get(&peer) {
-            None => {
-                debug!("Torrent {} received block from unknown peer {}", self, peer);
-                return;
-            }
-            Some(peer) => peer,
-        };
-
-        self.piece_picker.block_received(peer, block, data).await;
-    }
-
-    /// Process a rejected piece block request.
-    async fn on_piece_block_rejected(&mut self, peer: PeerHandle, block: PieceBlock) {
-        let peer = match self.peer_pool.get(&peer) {
+        let piece = block.piece;
+        let peer = match self.peer_pool.get(&peer_addr) {
             None => {
                 debug!(
-                    "Torrent {} received block reject from unknown peer {}",
-                    self, peer
+                    "Torrent {} received block from unknown peer {}",
+                    self, peer_addr
                 );
                 return;
             }
             Some(peer) => peer,
         };
 
-        self.piece_picker.block_rejected(peer, block).await;
+        self.piece_picker.block_received(peer, block, data).await;
+
+        if self.piece_picker.is_piece_finished(&piece) {
+            self.verify_piece(&piece).await;
+        }
+    }
+
+    /// Process a rejected piece block request.
+    async fn on_piece_block_rejected(&mut self, peer_addr: &SocketAddr, block: PieceBlock) {
+        self.piece_picker.block_rejected(peer_addr, block).await;
+    }
+
+    /// Start the verification process for the given piece.
+    async fn verify_piece(&mut self, piece: &PieceIndex) {
+        let piece = match self.data_pool.piece(piece).await {
+            Some(piece) => piece,
+            None => {
+                debug!(
+                    "Torrent {} is unable to verify piece {}, piece not found",
+                    self, piece
+                );
+                return;
+            }
+        };
+
+        let handle = self.handle;
+        let storage = self.storage.clone();
+        self.verify_tasks.spawn(async move {
+            match (piece.hash.has_v1(), piece.hash.has_v2()) {
+                (true, true) | (false, true) => {
+                    VerifyTaskResult {
+                        piece: piece.index,
+                        v1_hash: None,
+                        v2_hash: storage.hash_v2(&piece.index).await.ok(),
+                    }
+                }
+                (true, false) => {
+                    VerifyTaskResult {
+                        piece: piece.index,
+                        v1_hash: storage.hash_v1(&piece.index).await.ok(),
+                        v2_hash: None,
+                    }
+                }
+                (false, false) => {
+                    debug!(
+                        "Torrent {} is unable to validate piece {}, piece hash is missing or invalid",
+                        handle, piece.index
+                    );
+                    VerifyTaskResult {
+                        piece: piece.index,
+                        v1_hash: None,
+                        v2_hash: None,
+                    }
+                }
+            }
+        });
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    async fn on_verify_task_tick(&mut self) {
+        let start_time = Instant::now();
+        while let Some(result) = self.verify_tasks.join_next().now_or_never().flatten() {
+            match result {
+                Ok(result) => {
+                    self.on_piece_verified(&result.piece, result.v1_hash, result.v2_hash)
+                        .await
+                }
+                Err(_) => break,
+            }
+
+            if start_time.elapsed() > TICK_INTERVAL {
+                break;
+            }
+        }
     }
 
     /// Process the new options of the torrent.
@@ -3315,6 +3354,7 @@ impl TorrentContext {
         self.callbacks.invoke(event)
     }
 
+    /// Execute a periodic torrent context tick.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn on_tick(
         &mut self,
@@ -3325,6 +3365,7 @@ impl TorrentContext {
             .await;
         self.peer_pool.tick().await;
         self.piece_picker_tick().await;
+        self.on_verify_task_tick().await;
         self.on_upload_tick().await;
     }
 
@@ -3446,6 +3487,13 @@ impl PartialEq for TorrentContext {
     fn eq(&self, other: &Self) -> bool {
         self.handle == other.handle
     }
+}
+
+#[derive(Debug)]
+struct VerifyTaskResult {
+    piece: PieceIndex,
+    v1_hash: Option<Sha1Hash>,
+    v2_hash: Option<Sha256Hash>,
 }
 
 #[cfg(test)]
@@ -4023,7 +4071,8 @@ mod tests {
                 |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
                 None
             );
-            let data_pool = torrent.inner.data_pool().await.unwrap();
+            let (peer, _peer2) = tcp_peer_pair!(&torrent, vec![]);
+            torrent.inner.peer_connected(peer.clone().into()).await;
             let piece_len = torrent
                 .metadata()
                 .await
@@ -4057,15 +4106,9 @@ mod tests {
             );
 
             // set the pieces as completed
-            let pieces = data_pool.pieces().await;
-            torrent
-                .inner
-                .piece_verified(&1, pieces[1].hash.hash_v1(), None)
-                .await;
-            torrent
-                .inner
-                .piece_verified(&2, pieces[2].hash.hash_v1(), None)
-                .await;
+            mark_piece_completed!(&torrent.inner.sender, 1, peer.addr(), "piece-1_30.iso");
+            mark_piece_completed!(&torrent.inner.sender, 2, peer.addr(), "piece-1_30.iso");
+            assert_timeout!(Duration::from_secs(2), torrent.has_piece(&2).await); // TODO: improve test performance
 
             // wait for the pieces to be completed internally
             let _ = timeout!(
@@ -4240,17 +4283,11 @@ mod tests {
         wait_for_torrent_pieces(&torrent).await;
 
         // mark all pieces as completed
+        let data_pool = torrent.inner.data_pool().await.unwrap();
         let pieces = torrent.pieces().await.unwrap();
-        for piece in 0..pieces.len() {
-            torrent
-                .inner
-                .piece_verified(
-                    &piece,
-                    pieces.get(piece).and_then(|e| e.hash.hash_v1()),
-                    None,
-                )
-                .await;
-        }
+        data_pool
+            .set_completed(&(0..pieces.len()).into_iter().collect_vec(), true)
+            .await;
 
         let result = torrent.is_completed().await;
         assert_eq!(true, result, "expected the torrent to be completed");
@@ -4337,7 +4374,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_torrent_is_end_game() {
-        init_logger!(LevelFilter::Info);
+        init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let torrent = torrent!(
@@ -4350,24 +4387,32 @@ mod tests {
             |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
             None
         );
-        let data_pool = torrent.inner.data_pool().await.unwrap();
+        let (peer, _peer2) = tcp_peer_pair!(&torrent, vec![]);
+        torrent.inner.peer_connected(peer.clone().into()).await;
 
         // wait for the torrent pieces to be created
         wait_for_torrent_pieces(&torrent).await;
-        // retrieve all created pieces from the torrent
-        let pieces = data_pool.pieces().await;
 
-        let completed_range_1 = (pieces.len() as f64 * 0.90) as usize;
-        for piece in (0..completed_range_1).into_iter().map(|e| e as PieceIndex) {
-            let _ = torrent
-                .inner
-                .piece_verified(
-                    &piece,
-                    pieces.get(piece).as_ref().and_then(|e| e.hash.hash_v1()),
-                    None,
-                )
-                .await;
+        // set only the first 30 pieces as wanted
+        let num_of_pieces = torrent.total_pieces().await;
+        torrent
+            .prioritize_pieces(
+                (30..num_of_pieces)
+                    .into_iter()
+                    .map(|piece| (piece, PiecePriority::None))
+                    .collect_vec(),
+            )
+            .await;
+
+        // mark the first 90% of the wanted pieces as completed
+        for piece in 0..27 {
+            mark_piece_completed!(&torrent.inner.sender, piece, peer.addr(), "piece-1_30.iso");
         }
+        assert_timeout!(
+            Duration::from_secs(2), // TODO: improve test performance
+            torrent.has_piece(&26).await,
+            "expected piece 26 to be completed"
+        );
 
         let result = torrent.inner.is_end_game().await;
         assert_eq!(
@@ -4375,27 +4420,22 @@ mod tests {
             "expected the torrent to not be in the end-game phase"
         );
 
-        let completed_range_2 = (pieces.len() as f64 * 0.98) as usize;
-        for piece in (completed_range_1..completed_range_2)
-            .into_iter()
-            .map(|e| e as PieceIndex)
-        {
-            let _ = torrent
-                .inner
-                .piece_verified(
-                    &piece,
-                    pieces.get(piece).as_ref().and_then(|e| e.hash.hash_v1()),
-                    None,
-                )
-                .await;
+        // mark the remaining wanted pieces as completed
+        for piece in 27..30 {
+            mark_piece_completed!(&torrent.inner.sender, piece, peer.addr(), "piece-1_30.iso");
         }
+        assert_timeout!(
+            Duration::from_secs(2), // TODO: improve test performance
+            torrent.has_piece(&29).await,
+            "expected piece 29 to be completed"
+        );
 
         // wait for all pieces to be processed and check the bitfield result
         let bitfield = torrent.inner.bitfield().await.unwrap();
         assert_eq!(
-            (pieces.len() as f64 * 0.98) as usize,
+            30,
             bitfield.count_ones(),
-            "expected 98% of pieces to be completed"
+            "expected 30 pieces to have been marked as completed"
         );
 
         let result = torrent.inner.is_end_game().await;
