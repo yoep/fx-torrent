@@ -274,25 +274,29 @@ impl DhtTracker {
     /// # Example
     ///
     /// ```rust,no_run
-    ///  use std::time::Duration;
-    ///  use tokio::select;
-    ///  use tokio::time;
-    ///  use fx_torrent::dht::DhtTracker;
+    /// # use std::time::Duration;
+    /// # use tokio::select;
+    /// # use tokio::time;
+    /// # use fx_torrent::dht::DhtTracker;
     ///
-    ///  let target_addr = ([10, 0 , 0, 99], 6881).into();
-    ///  let tracker = DhtTracker::builder()
-    ///     .default_routing_nodes()
-    ///     .build()
-    ///     .await.unwrap();
-    ///  select! {
-    ///      _ = time::sleep(Duration::from_secs(10)) => return,
-    ///      result = tracker.ping(&target_addr) => {
-    ///         match result {
-    ///             Ok(node_key) => println!("Successfully pinged node: {:?}", node_key),
-    ///             Err(e) => println!("Failed to ping node: {}", e),
+    /// # async fn example() {
+    ///     let target_addr = ([10, 0, 0, 99], 6881).into();
+    ///     let tracker = DhtTracker::builder()
+    ///         .default_routing_nodes()
+    ///         .build()
+    ///         .await
+    ///         .unwrap();
+    ///
+    ///     select! {
+    ///         _ = time::sleep(Duration::from_secs(10)) => return,
+    ///         result = tracker.ping(&target_addr) => {
+    ///            match result {
+    ///                Ok(node_key) => println!("Successfully pinged node: {:?}", node_key),
+    ///                Err(e) => println!("Failed to ping node: {}", e),
+    ///            }
     ///         }
-    ///      }
-    ///  }
+    ///     }
+    /// # }
     /// ```
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), err(level = tracing::Level::INFO
     )))]
@@ -311,19 +315,21 @@ impl DhtTracker {
     /// # Example
     ///
     /// ```rust,no_run
-    ///  use std::time::Duration;
-    ///  use fx_torrent::dht::{DhtTracker, NodeId};
+    /// # use std::time::Duration;
+    /// # use fx_torrent::dht::{DhtTracker, NodeId};
     ///
-    ///  let target_node = NodeId::new();
-    ///  let tracker = DhtTracker::builder()
-    ///     .default_routing_nodes()
-    ///     .build()
-    ///     .await.unwrap();
+    /// # async fn example {
+    ///     let target_node = NodeId::new();
+    ///     let tracker = DhtTracker::builder()
+    ///        .default_routing_nodes()
+    ///        .build()
+    ///        .await.unwrap();
     ///
-    ///  match tracker.find_nodes(&target_node, Duration::from_secs(10)).await {
-    ///      Ok(node_key) => println!("Successfully found nodes: {:?}", node_key),
-    ///      Err(e) => println!("Failed to find nodes: {}", e),
-    ///  }
+    ///     match tracker.find_nodes(&target_node, Duration::from_secs(10)).await {
+    ///         Ok(node_key) => println!("Successfully found nodes: {:?}", node_key),
+    ///         Err(e) => println!("Failed to find nodes: {}", e),
+    ///     }
+    /// # }
     /// ```
     #[cfg_attr(
         feature = "tracing",

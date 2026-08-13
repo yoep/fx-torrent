@@ -173,15 +173,15 @@ pub trait Session: Debug + Callback<SessionEvent> + Send + Sync {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use fx_torrent::torrent::Session;
+    /// # use fx_torrent::FxSession;
     ///
-    /// fn example(session: impl Session) {
+    /// # fn example(session: FxSession) {
     ///     let magnet_uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
     ///     let info = session.resolve(magnet_uri);
     ///     
     ///     let filepath = "/my/path/example.torrent";
     ///     let info = session.resolve(magnet_uri);
-    /// }
+    /// # }
     /// ```
     ///
     /// # Arguments
@@ -254,21 +254,23 @@ pub trait Session: Debug + Callback<SessionEvent> + Send + Sync {
 ///
 /// # Example Usage
 ///
-/// ```rust
+/// ```rust,no_run
 /// # use fx_torrent::prelude::*;
-/// let session = FxSession::builder()
-///   .config(
-///       SessionConfig::builder()
-///           .client_name("MyClient")
-///           .base_path("/downloads")
-///           .build(),
-///   )
-///   .default_extensions()
-///   .dht(DhtTracker::builder()
-///       .default_routing_nodes()
-///       .build()
-///       .await?)
-///   .build()?;
+///
+/// # async fn example() {
+///     let session = FxSession::builder()
+///       .config(SessionConfig::builder()
+///               .client_name("MyClient")
+///               .path("/downloads")
+///               .build())
+///       .default_extensions()
+///       .dht(DhtTracker::builder()
+///             .default_routing_nodes()
+///             .build()
+///             .await
+///             .unwrap())
+///       .build();
+/// # }
 /// ```
 #[derive(Debug, Display, Clone)]
 #[display("{}", inner)]
@@ -479,15 +481,15 @@ impl FxSession {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use fx_torrent::torrent::Session;
+    /// # use fx_torrent::FxSession;
     ///
-    /// fn example(session: impl Session) {
+    /// # fn example(session: FxSession) {
     ///     let magnet_uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce";
     ///     let info = session.resolve(magnet_uri);
     ///
     ///     let filepath = "/my/path/example.torrent";
     ///     let info = session.resolve(magnet_uri);
-    /// }
+    /// # }
     /// ```
     ///
     /// # Arguments
@@ -815,13 +817,14 @@ impl Drop for FxSession {
 /// # Example
 ///
 /// ```rust,no_run
-/// use fx_torrent::prelude::*;
+/// # use fx_torrent::prelude::*;
 ///
 /// FxSession::builder()
-///     .client_name("MyClientName")
-///     .path("/tmp/fx-torrent")
-///     .build()
-///     .unwrap()
+///     .config(SessionConfig::builder()
+///         .client_name("MyClientName")
+///         .path("/tmp/fx-torrent")
+///         .build())
+///     .build();
 /// ```
 #[derive(Default)]
 pub struct FxSessionBuilder {

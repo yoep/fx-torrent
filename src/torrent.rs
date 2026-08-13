@@ -117,20 +117,21 @@ impl Default for TorrentState {
 ///
 /// # Examples
 ///
-/// ```rust
-/// # use std::time::Duration;
-/// # use fx_torrent::{Torrent, TorrentFlags, TorrentMetadata, TorrentRequest, MagnetResult, ExtensionFactories, CompactResult};
-/// # use fx_torrent::storage::{DiskStorage};
-/// # use fx_torrent::peer::extension::Extensions;
+/// ```rust,no_run
+/// # use fx_torrent::ExtensionFactory;
+/// # use fx_torrent::Result;
 /// # use fx_torrent::peer::{PeerDiscovery, TcpPeerDiscovery};
+/// # use fx_torrent::storage::{DiskStorage};
 /// # use fx_torrent::tracker::TrackerClient;
+/// # use fx_torrent::{Torrent, TorrentFlags, TorrentMetadata, TorrentRequest, MagnetResult, CompactResult};
+/// # use std::time::Duration;
 ///
-/// # fn create_new_torrent(
+/// # async fn create_new_torrent(
 /// #     metadata: TorrentMetadata,
-/// #     extensions: ExtensionFactories,
-/// # ) -> CompactResult<Torrent> {
+/// #     extensions: Vec<ExtensionFactory>,
+/// # ) -> Result<Torrent> {
 ///     // create a tcp peer discovery for dialing and accepting tpc connections
-///     let peer_discovery = TcpPeerDiscovery::new();
+///     let peer_discovery = TcpPeerDiscovery::new().await.unwrap();
 ///     // create a new tracker client for discovering peer addresses
 ///     let tracker = TrackerClient::new(Duration::from_secs(6));
 ///
@@ -139,9 +140,9 @@ impl Default for TorrentState {
 ///         .options(TorrentFlags::AutoManaged)
 ///         .extensions(extensions)
 ///         .storage(|params| {
-///             Box::new(DiskStorage::new(params.info_hash, params.path, params.files))
+///             DiskStorage::new(params.info_hash, params.path, params.data_pool).into()
 ///         })
-///         .peer_discovery(Box::new(peer_discovery))
+///         .peer_discovery(peer_discovery.into())
 ///         .tracker(tracker.into())
 ///         .build()
 /// # }

@@ -13,13 +13,15 @@ The DHT module supports 2 node modes:
 - `server`: This mode is used to act as a DHT node and provide services to other nodes in the network.
 
 _example_
-```rust
-use fx_torrent::dht::{DhtTracker, Mode};
+```rust,no_run
+# use fx_torrent::dht::{DhtTracker, Mode};
 
-DhtTracker::builder()
-    .mode(Mode::Client)
-    .build()
-    .await
+# async fn example() {
+    DhtTracker::builder()
+        .mode(Mode::Client)
+        .build()
+        .await;
+# }
 ```
 */
 

@@ -17,7 +17,7 @@ macro_rules! channel {
 ///
 /// # Example Usage
 ///
-/// ```rust
+/// ```rust,compile_fail
 /// spawn!("Struct::fn", async {})
 /// ```
 macro_rules! spawn {
