@@ -8,7 +8,7 @@ use crate::{BitVec, BlockIndex, Piece, PieceBlock, PieceIndex, PiecePriority, To
 use derive_more::Display;
 use futures::future::Either;
 use itertools::Itertools;
-use log::{debug, trace, warn};
+use log::{debug, log, trace, warn, Level};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -222,6 +222,10 @@ impl FxPiecePicker {
     /// Request interesting pieces from the given peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn pick_pieces(&mut self, peer: &Peer) {
+        self.inner_pick_pickers(peer).await;
+    }
+
+    async fn inner_pick_pickers(&mut self, peer: &Peer) -> usize {
         let start_time = Instant::now();
 
         // early exit if the peer is unable to queue any requests
@@ -233,11 +237,11 @@ impl FxPiecePicker {
                         "Piece picker {} failed to get queue len for {}, timed-out",
                         self, peer
                     );
-                    return;
+                    return 0;
                 }
             };
         if target_queue_len == 0 {
-            return;
+            return 0;
         }
 
         let state = match timeout(Duration::from_millis(250), peer.remote_choke_state()).await {
@@ -247,7 +251,7 @@ impl FxPiecePicker {
                     "Piece picker {} failed to get remote choke state for {}, timed-out",
                     self, peer
                 );
-                return;
+                return 0;
             }
         };
 
@@ -267,7 +271,7 @@ impl FxPiecePicker {
                     "Piece picker {} failed to get remote bitfield for {}, timed-out",
                     self, peer
                 );
-                return;
+                return 0;
             }
         };
         let mut interested_pieces = self.interested_piece_blocks(&piece_bitfield);
@@ -277,7 +281,7 @@ impl FxPiecePicker {
                 self,
                 peer
             );
-            return;
+            return 0;
         }
 
         let suggested = match timeout(Duration::from_millis(250), peer.suggested_pieces()).await {
@@ -287,7 +291,7 @@ impl FxPiecePicker {
                     "Piece picker {} failed to get suggested pieces for {}, timed-out",
                     self, peer
                 );
-                return;
+                return 0;
             }
         };
         let is_end_game = self.is_end_game();
@@ -368,11 +372,13 @@ impl FxPiecePicker {
             num_requested_blocks,
             elapsed.as_secs_f64() * 1000.0
         );
+        num_requested_blocks
     }
 
     /// Tick the piece picker.
     pub async fn tick<'a, P: Iterator<Item = &'a Peer>>(&mut self, peers: P) {
         let start_time = Instant::now();
+        let mut num_of_request_blocks = 0;
         for peer in peers {
             let elapsed = start_time.elapsed();
             if elapsed > Duration::from_secs(1) {
@@ -383,13 +389,19 @@ impl FxPiecePicker {
                 break;
             }
 
-            self.pick_pieces(peer).await;
+            num_of_request_blocks += self.inner_pick_pickers(peer).await;
         }
 
         let elapsed = start_time.elapsed();
-        trace!(
-            "Piece picker {} tick took {:.3}ms",
+        log!(
+            if num_of_request_blocks == 0 {
+                Level::Trace
+            } else {
+                Level::Debug
+            },
+            "Piece picker {} tick requested {} block(s) in {:3}ms",
             self,
+            num_of_request_blocks,
             elapsed.as_secs_f64() * 1000.0
         );
     }

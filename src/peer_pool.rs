@@ -92,7 +92,7 @@ impl PeerPool {
     /// the peer won't be added to the pool and the function will return [None].
     ///
     /// It returns a [Subscription] to receive peer events when the peer is added to the pool.
-    pub fn add_peer(&mut self, peer: Peer) -> Result<(), AddReason> {
+    pub async fn add_peer(&mut self, peer: Peer) -> Result<(), AddReason> {
         let handle = peer.addr();
         // early exit if the pool is full
         if self.peers().count() >= self.limit {
@@ -106,12 +106,13 @@ impl PeerPool {
         // update the peer info
         let info = self.find_or_insert(peer.addr(), None);
         let receiver = peer.subscribe();
+        let state = peer.state().await;
         info.is_in_use = true;
         info.last_connected = Some(Instant::now());
         info.connection = Some(PeerConnection {
             peer,
             receiver,
-            state: PeerState::Handshake,
+            state,
             upload_acquired: false,
         });
         Ok(())
@@ -582,13 +583,14 @@ mod tests {
                 let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
                 let mut peer = MockPeer::new();
                 peer.expect_addr().return_const(addr);
+                peer.expect_state().return_const(PeerState::Handshake);
                 peer.expect_subscribe().returning(|| {
                     let (_, rx) = broadcast::channel(1);
                     rx
                 });
                 let mut pool = PeerPool::new(TorrentHandle::new(), 2);
 
-                let result = pool.add_peer(peer.into());
+                let result = pool.add_peer(peer.into()).await;
                 assert_eq!(Ok(()), result, "expected the peer to have been added");
 
                 let result = pool.peers.len();
@@ -605,22 +607,24 @@ mod tests {
                 let addr2 = SocketAddr::from((Ipv4Addr::LOCALHOST, 9996));
                 let mut peer1 = MockPeer::new();
                 peer1.expect_addr().return_const(addr1);
+                peer1.expect_state().return_const(PeerState::Handshake);
                 peer1.expect_subscribe().returning(|| {
                     let (_, rx) = broadcast::channel(1);
                     rx
                 });
                 let mut peer2 = MockPeer::new();
                 peer2.expect_addr().return_const(addr2);
+                peer2.expect_state().return_const(PeerState::Handshake);
                 peer2.expect_subscribe().returning(|| {
                     let (_, rx) = broadcast::channel(1);
                     rx
                 });
                 let mut pool = PeerPool::new(TorrentHandle::new(), 1);
 
-                let result = pool.add_peer(peer1.into());
+                let result = pool.add_peer(peer1.into()).await;
                 assert_eq!(Ok(()), result, "expected the peer to have been added");
 
-                let result = pool.add_peer(peer2.into());
+                let result = pool.add_peer(peer2.into()).await;
                 assert_eq!(
                     Err(AddReason::LimitReached),
                     result,
@@ -667,6 +671,7 @@ mod tests {
                 let peer_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
                 let mut peer = MockPeer::new();
                 peer.expect_addr().return_const(peer_addr);
+                peer.expect_state().return_const(PeerState::Handshake);
                 peer.expect_subscribe().returning(|| {
                     let (_, rx) = broadcast::channel(1);
                     rx
@@ -676,6 +681,7 @@ mod tests {
                 // add the peer address to the pool
                 pool.add_peer_addresses(vec![peer_addr.clone()], None);
                 pool.add_peer(peer.into())
+                    .await
                     .expect("expected the peer to have been added");
 
                 // close the peer connection
@@ -711,6 +717,7 @@ mod tests {
                 let peer1_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6881));
                 let mut peer1 = MockPeer::new();
                 peer1.expect_addr().return_const(peer1_addr.clone());
+                peer1.expect_state().return_const(PeerState::Handshake);
                 peer1.expect_set_choke_state().return_const(());
                 peer1.expect_subscribe().returning(|| {
                     let (_, rx) = broadcast::channel(1);
@@ -719,6 +726,7 @@ mod tests {
                 let peer2_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 6882));
                 let mut peer2 = MockPeer::new();
                 peer2.expect_addr().return_const(peer2_addr.clone());
+                peer2.expect_state().return_const(PeerState::Handshake);
                 peer2.expect_set_choke_state().return_const(());
                 peer2.expect_subscribe().returning(|| {
                     let (_, rx) = broadcast::channel(1);
@@ -728,8 +736,10 @@ mod tests {
 
                 // add the peers to the pool
                 pool.add_peer(peer1.into())
+                    .await
                     .expect("expected the peer to have been added");
                 pool.add_peer(peer2.into())
+                    .await
                     .expect("expected the peer to have been added");
 
                 let result = pool.upload_slots_len();
@@ -757,6 +767,7 @@ mod tests {
                 let (tx, rx) = oneshot::channel();
                 let mut peer = MockPeer::new();
                 peer.expect_addr().return_const(peer_addr.clone());
+                peer.expect_state().return_const(PeerState::Handshake);
                 peer.expect_set_choke_state()
                     .times(1)
                     .return_once(move |state| {
@@ -770,6 +781,7 @@ mod tests {
 
                 // add the peer to the pool
                 pool.add_peer(peer.into())
+                    .await
                     .expect("expected the peer to have been added");
 
                 // choke the peer
@@ -787,6 +799,7 @@ mod tests {
                 let (tx, rx) = oneshot::channel();
                 let mut peer = MockPeer::new();
                 peer.expect_addr().return_const(peer_addr.clone());
+                peer.expect_state().return_const(PeerState::Handshake);
                 peer.expect_set_choke_state()
                     .times(1)
                     .return_once(move |state| {
@@ -800,6 +813,7 @@ mod tests {
 
                 // add the peer to the pool
                 pool.add_peer(peer.into())
+                    .await
                     .expect("expected the peer to have been added");
 
                 // choke the peer
@@ -843,6 +857,7 @@ mod tests {
             peer1
                 .expect_addr()
                 .return_const(SocketAddr::from((Ipv4Addr::LOCALHOST, 6881)));
+            peer1.expect_state().return_const(PeerState::Handshake);
             peer1.expect_close().return_const(());
             peer1.expect_subscribe().return_once(|| peer1_subscription);
             let peer2_callbacks = MultiThreadedCallback::new();
@@ -851,12 +866,13 @@ mod tests {
             peer2
                 .expect_addr()
                 .return_const(SocketAddr::from(([127, 0, 0, 2], 6899)));
+            peer2.expect_state().return_const(PeerState::Handshake);
             peer2.expect_subscribe().return_once(|| peer2_subscription);
             let mut pool = PeerPool::new(TorrentHandle::new(), 2);
 
             // add peers to the pool
-            let _ = pool.add_peer(peer1.into());
-            let _ = pool.add_peer(peer2.into());
+            let _ = pool.add_peer(peer1.into()).await;
+            let _ = pool.add_peer(peer2.into()).await;
             let result = pool.peers.len();
             assert_eq!(
                 2, result,

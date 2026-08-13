@@ -20,6 +20,7 @@ pub mod extension;
 mod metrics;
 mod peer;
 mod peer_connection;
+mod peer_context;
 mod peer_id;
 mod protocol;
 mod types;
@@ -47,7 +48,8 @@ pub mod tests {
         impl Extension for Peer {
             fn id(&self) -> &PeerId;
             fn addr(&self) -> &SocketAddr;
-            fn client_info(&self) -> &PeerClientInfo;
+            fn connection_type(&self) -> &ConnectionDirection;
+            fn protocol(&self) -> &ConnectionProtocol;
             fn metrics(&self) -> &Metrics;
             async fn state(&self) -> PeerState;
             async fn is_seed(&self) -> bool;

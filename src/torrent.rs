@@ -7,7 +7,7 @@ use crate::operation::{Operation, TorrentOperationResult};
 use crate::peer::extension::PeerExtension;
 use crate::peer::{
     BitTorrentPeer, ChokeState, CloseReason, ConnectionProtocol, InterestState, Peer,
-    PeerClientInfo, PeerDiscovery, PeerEntry, PeerId, PeerState, ProtocolExtensionFlags,
+    PeerDiscovery, PeerEntry, PeerId, PeerState, ProtocolExtensionFlags,
 };
 use crate::peer_pool::PeerPool;
 use crate::piece_picker::strategy::{
@@ -33,7 +33,7 @@ use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use itertools::Itertools;
-use log::{debug, info, log, trace, Level};
+use log::{debug, info, log, trace, warn, Level};
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::io;
@@ -408,10 +408,10 @@ pub enum TorrentEvent {
     MetadataChanged(TorrentMetadata),
     /// Invoked when a new peer connection has been established
     #[display("peer {} has been connected", _0)]
-    PeerConnected(PeerClientInfo),
+    PeerConnected(SocketAddr),
     /// Invoked when an existing peer connection has closed.
     #[display("peer {} has been disconnected", _0)]
-    PeerDisconnected(PeerClientInfo),
+    PeerDisconnected(SocketAddr),
     /// Invoked when the active trackers have been changed
     #[display("trackers have changed")]
     TrackersChanged,
@@ -2336,17 +2336,17 @@ impl TorrentContext {
 
     /// Add the given peer to this torrent.
     /// Duplicate peers will be ignored and dropped.
-    fn add_peer(&mut self, peer: Peer) {
+    async fn add_peer(&mut self, peer: Peer) {
         trace!("Torrent {} is trying to add new peer {}", self, peer);
-        let info = peer.client_info().clone();
-        match self.peer_pool.add_peer(peer) {
+        let peer_addr = *peer.addr();
+        match self.peer_pool.add_peer(peer).await {
             Ok(_) => {
-                debug!("Torrent {} added peer {}", self, info);
+                debug!("Torrent {} added peer {}", self, peer_addr);
                 self.metrics.peers.inc();
-                self.invoke_event(TorrentEvent::PeerConnected(info));
+                self.invoke_event(TorrentEvent::PeerConnected(peer_addr));
             }
             Err(e) => {
-                debug!("Torrent {} failed to add peer {}, {}", self, info, e);
+                debug!("Torrent {} failed to add peer {}, {}", self, peer_addr, e);
             }
         }
     }
@@ -2378,7 +2378,7 @@ impl TorrentContext {
         }
 
         self.metrics.peers.dec();
-        self.invoke_event(TorrentEvent::PeerDisconnected(peer.client_info().clone()));
+        self.invoke_event(TorrentEvent::PeerDisconnected(*peer.addr()));
     }
 
     /// Update the given metadata to the torrent.
@@ -2668,7 +2668,7 @@ impl TorrentContext {
 
         let piece = match self.data_pool.piece(piece_index).await {
             None => {
-                debug!(
+                warn!(
                     "Torrent {} failed to verify piece {}, piece not found",
                     self, piece_index
                 );
@@ -2696,6 +2696,7 @@ impl TorrentContext {
         if validation_result {
             self.on_piece_completed(&piece).await;
         } else {
+            trace!("Torrent {} piece {} validation failed", self, piece_index);
             self.piece_picker.set_failed(piece_index);
             self.metrics.wasted.inc_by(piece.length as u64);
         }
@@ -2828,7 +2829,7 @@ impl TorrentContext {
             TorrentCommand::GetPeerByAddr { addr, response } => {
                 response.send(self.peer_pool.get(&addr).cloned())
             }
-            TorrentCommand::PeerConnected { peer } => self.add_peer(peer),
+            TorrentCommand::PeerConnected { peer } => self.add_peer(peer).await,
             TorrentCommand::DecreasePeerPriority { addrs } => {
                 self.decrease_peer_addr_priority(addrs)
             }
@@ -3403,7 +3404,7 @@ impl TorrentContext {
     /// Execute a tick operation within the piece picker.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn piece_picker_tick(&mut self) {
-        if !self.is_download_allowed() {
+        if !self.is_download_allowed() || self.state == TorrentState::CheckingFiles {
             return;
         }
 
@@ -3505,7 +3506,7 @@ mod tests {
     };
     use crate::peer::TcpPeerDiscovery;
     use crate::storage::{DiskStorage, MemoryStorage};
-    use crate::tests::helpers::{wait_for_torrent_pieces, wait_for_torrent_state};
+    use crate::tests::helpers::wait_for_torrent_pieces;
     use crate::tests::{copy_test_file, read_test_file_to_bytes};
     use crate::{InfoHash, Magnet};
     use std::net::Ipv4Addr;
@@ -4143,10 +4144,7 @@ mod tests {
             temp_path_source,
             TorrentFlags::UploadMode | TorrentFlags::SeedMode,
             TorrentConfig::builder().build(),
-            vec![
-                CreatePiecesAndFilesOperation::new().into(),
-                FileValidationOperation::new().into(),
-            ],
+            vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![TcpPeerDiscovery::new().await.unwrap().into()],
             |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
             None
@@ -4158,22 +4156,39 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![
                 StatsOperation::new().into(),
-                ConnectPeersOperation::new(false).into(),
                 CreatePiecesAndFilesOperation::new().into(),
             ],
             vec![TcpPeerDiscovery::new().await.unwrap().into()],
             |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
             None
         );
+        let (source_peer, target_peer) = tcp_peer_pair!(
+            &source_torrent,
+            &target_torrent,
+            vec![],
+            vec![],
+            ProtocolExtensionFlags::none()
+        );
 
         // initialize the source torrent
         wait_for_torrent_pieces(&source_torrent).await;
-        wait_for_torrent_state(
-            &source_torrent,
-            TorrentState::Seeding,
-            Duration::from_secs(10),
-        )
-        .await;
+        source_torrent
+            .inner
+            .peer_connected(source_peer.clone().into())
+            .await;
+        for piece in 0..num_of_pieces {
+            mark_piece_completed!(
+                &source_torrent.inner.sender,
+                piece,
+                source_peer.addr(),
+                "piece-1_30.iso"
+            );
+        }
+        let source_data_pool = source_torrent.inner.data_pool().await.unwrap();
+        assert_timeout!(
+            Duration::from_secs(2), // TODO: improve test performance
+            source_data_pool.is_piece_completed(&29).await
+        );
 
         // initialize the target torrent
         wait_for_torrent_pieces(&target_torrent).await;
@@ -4187,6 +4202,10 @@ mod tests {
                     .map(|piece| (piece, PiecePriority::None))
                     .collect(),
             )
+            .await;
+        target_torrent
+            .inner
+            .peer_connected(target_peer.into())
             .await;
 
         // resume the target torrent to fetch data from the source torrent

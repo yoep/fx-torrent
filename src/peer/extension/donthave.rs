@@ -1,5 +1,5 @@
 use crate::peer::extension::Result;
-use crate::peer::PeerContext;
+use crate::peer::BitTorrentPeerContext;
 use crate::PieceIndex;
 use log::{debug, trace};
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ impl DontHaveExtension {
 
     /// Handle the given extension message payload which has been received from the remote peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn on_message(&self, payload: &[u8], peer: &mut PeerContext) -> Result<()> {
+    pub async fn on_message(&self, payload: &[u8], peer: &mut BitTorrentPeerContext) -> Result<()> {
         trace!("Peer {} is parsing donthave message", peer);
         let piece = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
         let message = DontHaveMessage { piece };

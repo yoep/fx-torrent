@@ -1,5 +1,8 @@
 use crate::peer::webseed::HttpPeer;
-use crate::peer::{BitTorrentPeer, CloseReason, Metrics, PeerClientInfo, PeerId, PeerState};
+use crate::peer::{
+    BitTorrentPeer, CloseReason, ConnectionDirection, ConnectionProtocol, Metrics, PeerId,
+    PeerState,
+};
 use crate::{BitVec, PieceBlock, PieceIndex};
 use async_trait::async_trait;
 use crc::{Crc, CRC_32_ISCSI};
@@ -112,21 +115,30 @@ impl Peer {
         }
     }
 
+    /// Returns the connection type of the peer.
+    pub fn connection_type(&self) -> &ConnectionDirection {
+        match self {
+            Peer::BitTorrent(peer) => peer.connection_type(),
+            Peer::Http(_) => &ConnectionDirection::Outbound,
+            Peer::Other(peer) => peer.connection_type(),
+        }
+    }
+
+    /// Returns the underlying protocol used by the peer connection.
+    pub fn protocol(&self) -> &ConnectionProtocol {
+        match self {
+            Peer::BitTorrent(peer) => peer.protocol(),
+            Peer::Http(_) => &ConnectionProtocol::Http,
+            Peer::Other(peer) => peer.protocol(),
+        }
+    }
+
     /// Returns the metrics of the peer.
     pub fn metrics(&self) -> &Metrics {
         match self {
             Peer::BitTorrent(peer) => peer.metrics(),
             Peer::Http(peer) => peer.metrics(),
             Peer::Other(peer) => peer.metrics(),
-        }
-    }
-
-    /// Returns the client information of the peer.
-    pub fn client_info(&self) -> &PeerClientInfo {
-        match self {
-            Peer::BitTorrent(peer) => peer.client_info(),
-            Peer::Http(peer) => peer.client_info(),
-            Peer::Other(peer) => peer.client_info(),
         }
     }
 
@@ -308,8 +320,11 @@ pub trait Extension: Debug + Display + Send + Sync + Callback<PeerEvent> {
     /// Returns the address of the remote peer.
     fn addr(&self) -> &SocketAddr;
 
-    /// Returns the client information of the peer.
-    fn client_info(&self) -> &PeerClientInfo;
+    /// Returns the connection type of the peer.
+    fn connection_type(&self) -> &ConnectionDirection;
+
+    /// Returns the underlying protocol used by the peer connection.
+    fn protocol(&self) -> &ConnectionProtocol;
 
     /// Returns the metrics of the peer.
     fn metrics(&self) -> &Metrics;

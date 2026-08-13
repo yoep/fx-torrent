@@ -2,7 +2,7 @@ use crate::bencode;
 use crate::channel::Reply;
 use crate::peer::extension::{Error, ExtensionNumber, Result};
 use crate::peer::protocol::Message;
-use crate::peer::{Peer, PeerContext};
+use crate::peer::{BitTorrentPeerContext, Peer};
 use log::{debug, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -156,7 +156,7 @@ impl HolepunchExtension {
     }
 
     /// Handle the given extension message payload which has been received from the remote peer.
-    pub async fn on_message(&mut self, payload: &[u8], peer: &PeerContext) -> Result<()> {
+    pub async fn on_message(&mut self, payload: &[u8], peer: &BitTorrentPeerContext) -> Result<()> {
         let message = bencode::from_bytes::<HolepunchMessage>(payload)?;
         let extension_number = match peer.find_remote_extension_number(Self::NAME) {
             None => return Err(Error::Unsupported),
@@ -191,7 +191,7 @@ impl HolepunchExtension {
         &mut self,
         target: SocketAddr,
         response: Reply<Result<SocketAddr>>,
-        peer: &PeerContext,
+        peer: &BitTorrentPeerContext,
     ) {
         let extension_number = match peer.find_remote_extension_number(Self::NAME) {
             None => {
@@ -248,7 +248,7 @@ impl HolepunchExtension {
     async fn on_rendezvous(
         &self,
         target_addr: SocketAddr,
-        peer: &PeerContext,
+        peer: &BitTorrentPeerContext,
     ) -> result::Result<(), ErrorCode> {
         // try to find the target peer in the torrent
         let target_peer = match peer.torrent().peer_by_addr(&target_addr).await {
@@ -306,7 +306,11 @@ impl HolepunchExtension {
     }
 
     /// Try to process a received [MessageType::Connect] message.
-    async fn on_connect(&mut self, message: &HolepunchMessage, peer: &PeerContext) -> Result<()> {
+    async fn on_connect(
+        &mut self,
+        message: &HolepunchMessage,
+        peer: &BitTorrentPeerContext,
+    ) -> Result<()> {
         let addr = message.addr()?;
         // check if we've got a pending rendezvous task for the target addr
         if let Some(response) = self.pending_rendezvous.remove(&addr) {
@@ -326,7 +330,7 @@ impl HolepunchExtension {
     }
 
     /// Process a received error message.
-    async fn on_error(&mut self, message: &HolepunchMessage, peer: &PeerContext) {
+    async fn on_error(&mut self, message: &HolepunchMessage, peer: &BitTorrentPeerContext) {
         let addr = match message.addr() {
             Ok(addr) => addr,
             Err(_) => return,
@@ -367,7 +371,7 @@ impl HolepunchExtension {
         err_code: ErrorCode,
         message: &HolepunchMessage,
         extension_number: ExtensionNumber,
-        peer: &PeerContext,
+        peer: &BitTorrentPeerContext,
     ) -> Result<()> {
         let payload = bencode::to_bytes(&HolepunchMessage {
             message_type: MessageType::Error,

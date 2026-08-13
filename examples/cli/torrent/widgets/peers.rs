@@ -1,7 +1,7 @@
 use crate::widgets::print_string_len;
 use fx_callback::{Callback, Subscription};
 use fx_torrent::format_bytes;
-use fx_torrent::peer::{Peer, PeerClientInfo, PeerEvent, PeerState};
+use fx_torrent::peer::{ConnectionProtocol, Peer, PeerEvent, PeerId, PeerState};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::{Color, Line, Style, Widget};
@@ -33,7 +33,9 @@ impl PeersWidget {
         self.peers.insert(
             *peer.addr(),
             TorrentPeerData {
-                client: peer.client_info().clone(),
+                id: *peer.id(),
+                addr: *peer.addr(),
+                protocol: *peer.protocol(),
                 available_pieces: metrics.available_pieces.get(),
                 client_interested: metrics.client_interested.get(),
                 remote_interested: metrics.remote_interested.get(),
@@ -121,9 +123,9 @@ impl Widget for &PeersWidget {
 
                 ListItem::new(vec![
                     Line::from(vec![
-                        print_string_len(peer.client.addr.to_string(), 21).into(),
+                        print_string_len(peer.addr.to_string(), 21).into(),
                         " :: ".into(),
-                        peer.client.connection_protocol.to_string().into(),
+                        peer.protocol.to_string().into(),
                         seed_text.into(),
                         peer_state_as_str(&peer.state).into(),
                     ])
@@ -165,7 +167,9 @@ impl Widget for &PeersWidget {
 #[derive(Debug)]
 struct TorrentPeerData {
     peer: Peer,
-    client: PeerClientInfo,
+    id: PeerId,
+    addr: SocketAddr,
+    protocol: ConnectionProtocol,
     state: PeerState,
     is_seed: bool,
     available_pieces: u64,

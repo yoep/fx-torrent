@@ -62,8 +62,8 @@ impl StatsOperation {
         };
 
         while let Ok(event) = receiver.try_recv() {
-            if let TorrentEvent::PeerConnected(peer) = &*event {
-                let peer = match context.peer_pool().get(&peer.addr) {
+            if let TorrentEvent::PeerConnected(peer_addr) = &*event {
+                let peer = match context.peer_pool().get(peer_addr) {
                     Some(peer) => peer,
                     None => continue,
                 };
@@ -183,8 +183,8 @@ mod tests {
         );
 
         // add the peer to the peer pool
-        let source_client = source.client_info().clone();
-        let result = context.peer_pool_mut().add_peer(source.into());
+        let source_peer_addr = *source.addr();
+        let result = context.peer_pool_mut().add_peer(source.into()).await;
         assert!(
             result.is_ok(),
             "expected the peer to be added, but got {:?}",
@@ -193,7 +193,7 @@ mod tests {
 
         // invoked the PeerConnected event for the torrent context
         // this makes the operation subscribe to the peer events
-        context.invoke_event(TorrentEvent::PeerConnected(source_client));
+        context.invoke_event(TorrentEvent::PeerConnected(source_peer_addr));
 
         // subscribe to the torrent context events
         let mut receiver = context.subscribe();

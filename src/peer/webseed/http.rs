@@ -1,7 +1,7 @@
 use crate::metrics::Metric;
+use crate::peer::peer_context::PeerContext;
 use crate::peer::{
-    ConnectionDirection, ConnectionProtocol, Error, Metrics, PeerClientInfo, PeerEvent, PeerId,
-    PeerState, Result,
+    ConnectionDirection, ConnectionProtocol, Error, Metrics, PeerEvent, PeerId, PeerState, Result,
 };
 use crate::torrent::InnerTorrent;
 use crate::{BitVec, FileAttributeFlags, PieceBlock, PieceIndex, TorrentFileInfo, TorrentMetadata};
@@ -19,7 +19,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
-use tokio::sync::Mutex;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -56,16 +55,14 @@ impl HttpPeer {
             .unwrap_or(SocketAddr::from(([120, 0, 0, 1], 80)));
         let inner = Arc::new(HttpPeerContext {
             client,
-            client_info: PeerClientInfo {
-                id: PeerId::new(),
-                addr,
-                connection_type: ConnectionDirection::Outbound,
-                connection_protocol: ConnectionProtocol::Http,
-            },
+            context: PeerContext::builder()
+                .id(PeerId::new())
+                .addr(addr)
+                .state(PeerState::Idle)
+                .connection_type(ConnectionDirection::Outbound)
+                .protocol(ConnectionProtocol::Http)
+                .build(),
             url,
-            addr,
-            state: Mutex::new(PeerState::Idle),
-            metrics: Metrics::new(),
             torrent,
             callbacks: MultiThreadedCallback::new(),
             cancellation_token: Default::default(),
@@ -82,27 +79,22 @@ impl HttpPeer {
 
     /// Returns the unique peer identifier within the torrent network.
     pub fn id(&self) -> &PeerId {
-        &self.inner.client_info.id
+        self.inner.context.id()
     }
 
     /// Returns the address of the remote peer.   
     pub fn addr(&self) -> &SocketAddr {
-        &self.inner.addr
-    }
-
-    /// Returns the client information of the peer.  
-    pub fn client_info(&self) -> &PeerClientInfo {
-        &self.inner.client_info
+        self.inner.context.addr()
     }
 
     /// Returns the metrics of the peer.
     pub fn metrics(&self) -> &Metrics {
-        &self.inner.metrics
+        self.inner.context.metrics()
     }
 
     /// Returns the state of the peer.
     pub async fn state(&self) -> PeerState {
-        *self.inner.state.lock().await
+        self.inner.context.state().await
     }
 
     /// Returns the bitfield of the remote peer.
@@ -120,7 +112,7 @@ impl HttpPeer {
                 for block in blocks {
                     self.inner
                         .torrent
-                        .piece_block_rejected(&self.inner.addr, block)
+                        .piece_block_rejected(self.inner.context.addr(), block)
                         .await;
                 }
                 return;
@@ -145,7 +137,7 @@ impl HttpPeer {
                 for block in blocks {
                     self.inner
                         .torrent
-                        .piece_block_rejected(&self.inner.addr, block)
+                        .piece_block_rejected(self.inner.context.addr(), block)
                         .await;
                 }
             }
@@ -171,14 +163,11 @@ impl Drop for HttpPeer {
 }
 
 #[derive(Debug, Display)]
-#[display("{}", client_info)]
+#[display("{}", context)]
 struct HttpPeerContext {
     client: Client,
-    client_info: PeerClientInfo,
+    context: PeerContext,
     url: Url,
-    addr: SocketAddr,
-    state: Mutex<PeerState>,
-    metrics: Metrics,
     torrent: InnerTorrent,
     callbacks: MultiThreadedCallback<PeerEvent>,
     cancellation_token: CancellationToken,
@@ -192,8 +181,8 @@ impl HttpPeerContext {
             select! {
                 _ = self.cancellation_token.cancelled() => break,
                 _ = stats_interval.tick() => {
-                    self.callbacks.invoke(PeerEvent::Stats(self.metrics.snapshot()));
-                    self.metrics.tick(STATUS_INTERVAL);
+                    self.callbacks.invoke(PeerEvent::Stats(self.context.metrics().snapshot()));
+                    self.context.metrics().tick(STATUS_INTERVAL);
                 }
             }
         }
@@ -248,7 +237,8 @@ impl HttpPeerContext {
                 .send()
                 .await
                 .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
-            self.metrics
+            self.context
+                .metrics()
                 .bytes_in
                 .inc_by(response.content_length().unwrap_or(0));
 
@@ -257,7 +247,10 @@ impl HttpPeerContext {
                     .bytes()
                     .await
                     .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
-                self.metrics.bytes_in_useful.inc_by(body.len() as u64);
+                self.context
+                    .metrics()
+                    .bytes_in_useful
+                    .inc_by(body.len() as u64);
 
                 if body.len() > request_len {
                     return Err(Error::InvalidLength(request_len as u32, body.len() as u32));
@@ -294,7 +287,7 @@ impl HttpPeerContext {
                 let data = &buffer[block_start..block_end];
                 let _ = self
                     .torrent
-                    .piece_block_received(&self.addr, block, data)
+                    .piece_block_received(self.context.addr(), block, data)
                     .await;
             }
         }
@@ -304,8 +297,7 @@ impl HttpPeerContext {
     }
 
     async fn update_state(&self, new_state: PeerState) {
-        let mut state = self.state.lock().await;
-        *state = new_state;
+        self.context.set_state(new_state).await;
     }
 
     fn create_request_url(

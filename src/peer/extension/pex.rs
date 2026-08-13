@@ -1,9 +1,9 @@
 use crate::peer::extension::{Error, ExtensionNumber, Result};
 use crate::peer::protocol::Message;
 use crate::peer::{
-    ConnectionDirection, ConnectionProtocol, PeerClientInfo, PeerContext, ProtocolExtensionFlags,
+    BitTorrentPeerContext, ConnectionDirection, ConnectionProtocol, Peer, ProtocolExtensionFlags,
 };
-use crate::{bencode, CompactIpv4Addrs, CompactIpv6Addrs, TorrentEvent};
+use crate::{bencode, CompactIpv4Addrs, CompactIpv6Addrs, InnerTorrent, TorrentEvent};
 use bitmask_enum::bitmask;
 use fx_callback::{Callback, Subscription};
 use log::{debug, warn};
@@ -123,7 +123,7 @@ impl PexExtension {
 
     /// Process an incoming extension message payload which has been received from the remote peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn on_message(&self, payload: &[u8], peer: &PeerContext) -> Result<()> {
+    pub async fn on_message(&self, payload: &[u8], peer: &BitTorrentPeerContext) -> Result<()> {
         let message: PexMessage = bencode::from_bytes(payload)?;
         debug!("Peer {} received PEX message {:?}", peer, message);
 
@@ -143,17 +143,17 @@ impl PexExtension {
     /// Invoked once per tick (typically once per second), providing a tick interval for the extension
     /// to process data.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn tick(&mut self, peer: &PeerContext) {
+    pub async fn tick(&mut self, peer: &BitTorrentPeerContext) {
         if self.initialized && !self.pex_supported {
             return;
         }
 
         self.initialize(peer);
-        self.process_torrent_events();
+        self.process_torrent_events(peer.torrent()).await;
         self.inform_peer(peer).await;
     }
 
-    fn initialize(&mut self, peer: &PeerContext) {
+    fn initialize(&mut self, peer: &BitTorrentPeerContext) {
         if self.initialized || peer.remote_peer().is_none() {
             return;
         }
@@ -186,18 +186,35 @@ impl PexExtension {
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    fn process_torrent_events(&mut self) {
+    async fn process_torrent_events(&mut self, torrent: &InnerTorrent) {
         let receiver = match self.torrent_event_receiver.as_mut() {
             None => return,
             Some(r) => r,
         };
 
         while let Ok(event) = receiver.try_recv() {
-            self.pool.on_torrent_event(&*event)
+            match &*event {
+                TorrentEvent::PeerConnected(peer_addr) => {
+                    let peer = match torrent.peer(peer_addr).await {
+                        None => continue,
+                        Some(peer) => peer,
+                    };
+                    self.pool.peer_added(peer)
+                }
+                TorrentEvent::PeerDisconnected(peer_addr) => {
+                    let peer = match torrent.peer(peer_addr).await {
+                        None => continue,
+                        Some(peer) => peer,
+                    };
+
+                    self.pool.peer_removed(peer)
+                }
+                _ => {}
+            }
         }
     }
 
-    async fn inform_peer(&mut self, peer: &PeerContext) {
+    async fn inform_peer(&mut self, peer: &BitTorrentPeerContext) {
         if !self.initialized || self.last_informed.elapsed() < self.interval {
             return;
         }
@@ -225,48 +242,44 @@ impl PexPool {
         }
     }
 
-    fn on_torrent_event(&mut self, event: &TorrentEvent) {
-        match event {
-            TorrentEvent::PeerConnected(peer) => self.peer_added(peer),
-            TorrentEvent::PeerDisconnected(peer) => self.peer_removed(peer),
-            _ => {}
-        }
-    }
-
-    fn peer_added(&mut self, peer: &PeerClientInfo) {
+    fn peer_added(&mut self, peer: Peer) {
         let mut flags = PexFlag::none();
 
-        if peer.connection_type == ConnectionDirection::Outbound {
+        if peer.connection_type() == &ConnectionDirection::Outbound {
             flags |= PexFlag::OutgoingConnection;
         }
-        if peer.connection_protocol == ConnectionProtocol::Utp {
+        if peer.protocol() == &ConnectionProtocol::Utp {
             flags |= PexFlag::UtpSupported;
         }
 
         self.added_peers.push(PexPeer {
-            addr: peer.addr.clone(),
+            addr: *peer.addr(),
             flags,
         });
     }
 
-    fn peer_removed(&mut self, peer: &PeerClientInfo) {
+    fn peer_removed(&mut self, peer: Peer) {
         let mut flags = PexFlag::none();
 
-        if peer.connection_type == ConnectionDirection::Outbound {
+        if peer.connection_type() == &ConnectionDirection::Outbound {
             flags |= PexFlag::OutgoingConnection;
         }
-        if peer.connection_protocol == ConnectionProtocol::Utp {
+        if peer.protocol() == &ConnectionProtocol::Utp {
             flags |= PexFlag::UtpSupported;
         }
 
         self.dropped_peers.push(PexPeer {
-            addr: peer.addr.clone(),
+            addr: *peer.addr(),
             flags,
         });
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn inform_peer(&mut self, extension_number: &ExtensionNumber, peer: &PeerContext) {
+    async fn inform_peer(
+        &mut self,
+        extension_number: &ExtensionNumber,
+        peer: &BitTorrentPeerContext,
+    ) {
         let message = self.message().await;
 
         if !message.is_empty() {
@@ -289,7 +302,7 @@ impl PexPool {
         &self,
         message: PexMessage,
         extension_number: &ExtensionNumber,
-        peer: &PeerContext,
+        peer: &BitTorrentPeerContext,
     ) -> Result<()> {
         let message_bytes = bencode::to_bytes(&message)?;
 
