@@ -50,7 +50,7 @@ sha1 = "0.11.0"
 sha2 = "0.11.0"
 socket2 = "0.6"
 thiserror = "2.0"
-tokio = { version = "1.52", features = ["rt-multi-thread", "time", "macros"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "time", "macros"] }
 tokio-util = "0.7"
 tracing = { version = "0.1", optional = true }
 tracing-futures = { version = "0.2", optional = true }
@@ -83,7 +83,7 @@ log4rs = { version = "1.4", features = ["console_writer"] }
 mockall = "0.15"
 ratatui = "0.30"
 tempfile = "3.27"
-tokio = { version = "1.52", features = ["signal"] }
+tokio = { version = "1.53", features = ["signal"] }
 
 [package.metadata.docs.rs]
 all-features = true
