@@ -10,13 +10,6 @@ use tokio::sync::RwLock;
 
 /// The data pool of a torrent storing info about pieces and files.
 /// It makes use of a separate loop task to handle operations on the data pool.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// let pool = DataPool::new();
-/// pool.num_of_pieces().await;
-/// ```
 #[derive(Debug, Clone)]
 pub struct DataPool {
     inner: Arc<RwLock<InnerDataPool>>,

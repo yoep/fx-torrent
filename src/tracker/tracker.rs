@@ -180,12 +180,16 @@ impl Tracker {
     /// Create a new udp tracker client connection.
     ///
     /// ```rust,no_run
-    /// use fx_torrent::tracker::Tracker;
+    /// # use fx_torrent::tracker::Result;
+    /// # use fx_torrent::tracker::Tracker;
+    /// # use url::Url;
     ///
+    /// # async fn example() -> Result<Tracker> {
     /// Tracker::builder()
-    ///     .url("udp://tracker.opentrackr.org:1337")
+    ///     .url(Url::parse("udp://tracker.opentrackr.org:1337").unwrap())
     ///     .build()
     ///     .await
+    /// # }
     /// ```
     pub fn builder() -> TrackerBuilder {
         TrackerBuilder::builder()
@@ -254,19 +258,24 @@ impl Tracker {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use fx_torrent::torrent::InfoHash;
-    /// use fx_torrent::torrent::peer::PeerId;
-    /// use fx_torrent::torrent::tracker::{Announcement, Tracker};
+    /// # use fx_torrent::InfoHash;
+    /// # use fx_torrent::peer::PeerId;
+    /// # use fx_torrent::tracker::AnnounceEvent;
+    /// # use fx_torrent::tracker::Announcement;
+    /// # use fx_torrent::tracker::Tracker;
+    /// # use std::str::FromStr;
     ///
-    /// let tracker = Tracker::new();
-    /// tracker.announce(Announcement {
-    ///     info_hash: InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap(),
-    ///     peer_id: PeerId::new(),
-    ///     peer_port: 6881,
-    ///     event: AnnounceEvent::Started,
-    ///     bytes_completed: 0,
-    ///     bytes_remaining: 0,
-    /// }).await
+    /// # async fn example() {
+    ///     let tracker = Tracker::new().await.unwrap();
+    ///     tracker.announce(Announcement {
+    ///         info_hash: InfoHash::from_str("urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7").unwrap(),
+    ///         peer_id: PeerId::new(),
+    ///         peer_port: 6881,
+    ///         event: AnnounceEvent::Started,
+    ///         bytes_completed: 0,
+    ///         bytes_remaining: 0,
+    ///     }).await;
+    /// # }
     /// ```
     ///
     /// # Arguments

@@ -392,13 +392,13 @@ pub trait Extension: Debug + Display + Send + Sync + Callback<PeerEvent> {
 /// # Usage
 ///
 /// ```rust,no_run
-/// use std::net::SocketAddr;
-/// use fx_torrent::torrent::PeerPriority;
+/// # use std::net::SocketAddr;
+/// # use fx_torrent::peer::PeerPriority;
 ///
 /// let left: SocketAddr = ([123, 213, 0, 1], 1234).into();
 /// let right: SocketAddr = ([230, 32, 123, 23], 300).into();
 ///
-/// PeerPriority::from((&left, &right))
+/// PeerPriority::from((&left, &right));
 /// ```
 ///
 /// # Explanation

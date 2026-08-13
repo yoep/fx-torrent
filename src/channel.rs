@@ -85,6 +85,7 @@ impl<T> ChannelReceiver<T> {
 ///
 /// ```rust,no_run
 /// use tokio::sync::oneshot;
+/// use fx_torrent::channel::Response;
 ///
 /// let (tx, rx) = oneshot::channel::<bool>();
 /// Response::from(rx).await; // returns Ok(true) or Err(ChannelError)
@@ -94,6 +95,7 @@ impl<T> ChannelReceiver<T> {
 ///
 /// ```rust,no_run
 /// use tokio::sync::oneshot;
+/// use fx_torrent::channel::Response;
 ///
 /// enum CustomError {
 ///     Parse,

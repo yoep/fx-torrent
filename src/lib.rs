@@ -58,8 +58,10 @@ For more advanced examples, see the [examples](https://github.com/yoep/fx-torren
 
 You can parse a magnet string or construct one manually using the builder pattern.
 
-```rust
+```rust,no_run
 # use fx_torrent::Magnet;
+# use std::str::FromStr;
+
 # fn example() {
     // Parsing from a string
     match Magnet::from_str("magnet:?xt=urn:btih:2C6B6858D61DA9543D4231A71DB4B1C9264B0685&...") {
@@ -108,15 +110,17 @@ Because [FileStream] implements the standard [futures::Stream] trait,
 it can be easily integrated into asynchronous loops or piped directly into web frameworks like axum.
 
 _Basic Usage_
-```rust
+```rust,no_run
 # use fx_torrent::Torrent;
+# use fx_torrent::TorrentMetadata;
 # use futures::StreamExt;
 
-# fn example() {
+# async fn example(metadata: TorrentMetadata) {
     let torrent = Torrent::request()
-         .build()
-         .unwrap();
-     let file = torrent.file_by_name("example.mp4").await.unwrap();
+        .metadata(metadata)
+        .build()
+        .unwrap();
+    let file = torrent.file_by_name("example.mp4").await.unwrap();
 
     let mut stream = torrent.stream(&file).await.unwrap();
     while let Some(bytes) = stream.next().await {
@@ -160,35 +164,35 @@ Once implemented, these extensions can be attached to individual torrents or glo
 
 _example peer extension_
 ```rust
-* # use fx_torrent::prelude::*;
-* # use fx_torrent::peer::BitTorrentPeerContext;
-* # use fx_torrent::peer::extension::Extension;
-* # use fx_torrent::peer::extension::Result;
-*
-* #[derive(Debug)]
-* pub struct MyPeerExtension;
-* impl Extension for MyPeerExtension {
-*     fn name(&self) -> &str {
-*         "my-extension"
-*     }
-*
-*     // Additional trait methods
-* }
-*
-* # fn example() {
-*     // 1. Peer extension directly in a torrent
-*     let torrent = Torrent::request()
-*         .extension(|| MyPeerExtension.into())
-*         .build()
-*         .unwrap();
-*
-*     // 2. Peer extension in a session
-*     let session = FxSession::builder()
-*         .extension(|| MyPeerExtension.into())
-*         .build()
-*         .unwrap();
-* # }
-* ```
+# use fx_torrent::prelude::*;
+# use fx_torrent::peer::BitTorrentPeerContext;
+# use fx_torrent::peer::extension::Extension;
+# use fx_torrent::peer::extension::Result;
+
+#[derive(Debug)]
+pub struct MyPeerExtension;
+impl Extension for MyPeerExtension {
+    fn name(&self) -> &str {
+        "my-extension"
+    }
+
+    // Additional trait methods
+}
+
+# fn example() {
+    // 1. Peer extension directly in a torrent
+    let torrent = Torrent::request()
+        .extension(|| MyPeerExtension.into())
+        .build()
+        .unwrap();
+
+    // 2. Peer extension in a session
+    let session = FxSession::builder()
+        .extension(|| MyPeerExtension.into())
+        .build()
+        .unwrap();
+# }
+```
 
 ### Storage Extension
 
@@ -198,7 +202,7 @@ This is useful for implementing custom caching layers, encrypted storage, or clo
 To create your own storage backend, implement the [storage::Extension] trait.
 
 _example storage extension_
-```rust
+```rust,no_run
 # use fx_torrent::prelude::*;
 # use fx_torrent::storage::Extension;
 # use fx_torrent::storage::StorageParams;
@@ -246,7 +250,7 @@ _example operation extension_
 # use fx_torrent::operation::Extension;
 # use fx_torrent::operation::TorrentOperationResult;
 # use fx_torrent::peer::PeerDiscovery;
-# use async_trait;
+# use async_trait::async_trait;
 
 #[derive(Debug)]
 pub struct MyOperation;
@@ -340,9 +344,8 @@ The [piece_picker::FxPiecePicker] architecture allows sub-strategies to be seque
 These strategies operate in an order-dependent chain,
 meaning their registration order explicitly dictates execution priority during the piece picking lifecycle.
 
-```rust
+```rust,no_run
 # use fx_torrent::DataPool;
-# use fx_torrent::PieceIndex;
 # use fx_torrent::TorrentHandle;
 # use fx_torrent::peer::Peer;
 # use fx_torrent::piece_picker::FxPiecePicker;
@@ -350,6 +353,7 @@ meaning their registration order explicitly dictates execution priority during t
 # use fx_torrent::piece_picker::PiecePicker;
 # use fx_torrent::piece_picker::PiecePickerBlock;
 # use fx_torrent::piece_picker::strategy::{Extension, PriorityStrategy};
+# use fx_torrent::prelude::*;
 # use fx_torrent::storage::Storage;
 # use std::sync::Arc;
 
@@ -500,8 +504,8 @@ const DEFAULT_TORRENT_PROTOCOL_EXTENSIONS: fn() -> ProtocolExtensionFlags = || {
 ///
 /// # Example
 ///
-/// ```rust,no_run
-/// use fx_torrent::torrent::format_bytes;
+/// ```rust
+/// # use fx_torrent::format_bytes;
 ///
 /// let formatted = format_bytes(1048576);
 /// println!("{}", formatted); // "1.00 MB"
@@ -538,7 +542,7 @@ pub fn format_bytes(bytes: usize) -> String {
 /// # Example
 ///
 /// ```rust,no_run
-/// use fx_torrent::torrent::calculate_byte_rate;
+/// use fx_torrent::calculate_byte_rate;
 ///
 /// let rate = calculate_byte_rate(1_000_000, 1_500_000);
 /// println!("{}", rate); // "666666" (bytes per second);

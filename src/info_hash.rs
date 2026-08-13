@@ -436,8 +436,8 @@ impl FromStr for InfoHash {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use std::str::FromStr;
-    /// use fx_torrent::torrent::InfoHash;
+    /// # use std::str::FromStr;
+    /// # use fx_torrent::InfoHash;
     ///
     /// // parse from a v1 info hash
     /// let xt_v1 = "urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7";
@@ -476,7 +476,7 @@ impl FromStr for InfoHash {
 /// # Examples
 ///
 /// ```rust
-/// use fx_torrent::torrent::InfoHash;
+/// use fx_torrent::InfoHash;
 ///
 /// let info_hash = InfoHash::builder()
 ///     .v1(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20])
