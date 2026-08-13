@@ -79,9 +79,11 @@ macro_rules! peer_context_pair {
     ($incoming:expr, $outgoing:expr, $incoming_extensions:expr, $outgoing_Extensions:expr) => {{
         use crate::peer::extension::PeerExtension;
         use crate::peer::peer_connection::PeerConnection;
+        use crate::peer::peer_context::PeerContext;
+        use crate::peer::BitTorrentPeerContext;
         use crate::peer::ConnectionDirection;
+        use crate::peer::ConnectionProtocol;
         use crate::peer::Metrics;
-        use crate::peer::PeerContext;
         use crate::peer::PeerId;
         use crate::InnerTorrent;
         use std::net::{Ipv4Addr, SocketAddr};
@@ -115,9 +117,14 @@ macro_rules! peer_context_pair {
         let outgoing = TcpStream::connect(listener_addr).await.unwrap();
         let (incoming, incoming_addr) = rx.await.unwrap();
         (
-            PeerContext::new(
-                incoming_peer_id,
-                incoming_addr,
+            BitTorrentPeerContext::new(
+                PeerContext::builder()
+                    .id(incoming_peer_id)
+                    .addr(incoming_addr)
+                    .connection_type(ConnectionDirection::Inbound)
+                    .protocol(ConnectionProtocol::Tcp)
+                    .metrics(incoming_metrics.clone())
+                    .build(),
                 incoming_torrent.peer_port().await,
                 incoming_torrent
                     .config()
@@ -129,23 +136,26 @@ macro_rules! peer_context_pair {
                     incoming_peer_id,
                     incoming_addr,
                     incoming,
-                    incoming_metrics.clone(),
+                    incoming_metrics,
                 ),
-                ConnectionDirection::Inbound,
                 incoming_torrent.clone(),
                 incoming_torrent.metadata().await.unwrap(),
                 incoming_torrent.data_pool().await.unwrap(),
                 incoming_torrent.storage().await.unwrap(),
                 incoming_torrent.protocol_extensions().await.unwrap(),
                 incoming_extensions,
-                incoming_metrics,
                 Duration::from_secs(1),
             )
             .await
             .expect("expected a peer context for the incoming connection"),
-            PeerContext::new(
-                outgoing_peer_id,
-                listener_addr,
+            BitTorrentPeerContext::new(
+                PeerContext::builder()
+                    .id(outgoing_peer_id)
+                    .addr(listener_addr)
+                    .connection_type(ConnectionDirection::Outbound)
+                    .protocol(ConnectionProtocol::Tcp)
+                    .metrics(outgoing_metrics.clone())
+                    .build(),
                 outgoing_torrent.peer_port().await,
                 outgoing_torrent
                     .config()
@@ -157,16 +167,14 @@ macro_rules! peer_context_pair {
                     outgoing_peer_id,
                     listener_addr,
                     outgoing,
-                    outgoing_metrics.clone(),
+                    outgoing_metrics,
                 ),
-                ConnectionDirection::Outbound,
                 outgoing_torrent.clone(),
                 outgoing_torrent.metadata().await.unwrap(),
                 outgoing_torrent.data_pool().await.unwrap(),
                 outgoing_torrent.storage().await.unwrap(),
                 outgoing_torrent.protocol_extensions().await.unwrap(),
                 outgoing_extensions,
-                outgoing_metrics,
                 Duration::from_secs(1),
             )
             .await

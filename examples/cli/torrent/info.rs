@@ -91,27 +91,27 @@ impl TorrentInfoWidget {
                     data.wanted_size = info.len() as u64;
                 }
             }
-            TorrentEvent::PeerConnected(peer) => {
+            TorrentEvent::PeerConnected(peer_addr) => {
                 data.peers = self.torrent.active_peer_connections().await;
 
-                match timeout(Duration::from_secs(1), self.torrent.peer(&peer.addr)).await {
+                match timeout(Duration::from_secs(1), self.torrent.peer(&peer_addr)).await {
                     Ok(Some(peer)) => {
                         self.content_widget.add_peer(peer).await;
                     }
                     Ok(None) => {
-                        warn!("Torrent {} failed to find peer {}", self.torrent, peer);
+                        warn!("Torrent {} failed to find peer {}", self.torrent, peer_addr);
                     }
                     Err(_) => {
                         debug!(
                             "Torrent {} timed out waiting for peer {}",
-                            self.torrent, peer
+                            self.torrent, peer_addr
                         );
                     }
                 }
             }
-            TorrentEvent::PeerDisconnected(peer) => {
+            TorrentEvent::PeerDisconnected(peer_addr) => {
                 data.peers = self.torrent.active_peer_connections().await;
-                self.content_widget.remove_peer(&peer.addr).await;
+                self.content_widget.remove_peer(peer_addr).await;
             }
             TorrentEvent::PiecesChanged(total_pieces) => {
                 data.total_pieces = *total_pieces as u64;

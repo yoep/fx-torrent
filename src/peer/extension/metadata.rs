@@ -1,6 +1,6 @@
 use crate::peer::extension::{Error, Result};
 use crate::peer::protocol::Message;
-use crate::peer::{extension, PeerContext, ProtocolExtensionFlags};
+use crate::peer::{extension, BitTorrentPeerContext, ProtocolExtensionFlags};
 use crate::{bencode, PieceIndex, TorrentMetadataInfo};
 use log::{debug, error, trace, warn};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -73,7 +73,7 @@ impl MetadataExtension {
 
     /// Process an incoming extension message payload which has been received from the remote peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn on_message(&mut self, payload: &[u8], peer: &PeerContext) -> Result<()> {
+    pub async fn on_message(&mut self, payload: &[u8], peer: &BitTorrentPeerContext) -> Result<()> {
         let message: MetadataExtensionMessage = Self::deserialize(payload)?;
         trace!("Received metadata message {:?}", message);
 
@@ -92,7 +92,7 @@ impl MetadataExtension {
     /// Invoked once per tick (typically once per second), providing a tick interval for the extension
     /// to process data.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn tick(&mut self, peer: &PeerContext) {
+    pub async fn tick(&mut self, peer: &BitTorrentPeerContext) {
         // early exit if the metadata extension is already initialized
         if self.initialized {
             return;
@@ -114,7 +114,11 @@ impl MetadataExtension {
         self.initialized = true;
     }
 
-    async fn send_metadata<'a>(&'a self, piece: PieceIndex, peer: &'a PeerContext) -> Result<()> {
+    async fn send_metadata<'a>(
+        &'a self,
+        piece: PieceIndex,
+        peer: &'a BitTorrentPeerContext,
+    ) -> Result<()> {
         // retrieve the current known metadata
         let metadata = peer.metadata().info.as_ref();
         let extension_number = match peer.find_remote_extension_number(Self::NAME) {
@@ -156,7 +160,7 @@ impl MetadataExtension {
     async fn process_metadata<'a>(
         &mut self,
         message: MetadataExtensionMessage,
-        peer: &PeerContext,
+        peer: &BitTorrentPeerContext,
     ) -> Result<()> {
         let mut total_pieces = self.total_pieces.as_ref().map(|e| e.clone());
         let current_piece = message.piece;
@@ -216,7 +220,7 @@ impl MetadataExtension {
     async fn request_metadata<'a>(
         &'a self,
         piece_index: PieceIndex,
-        peer: &'a PeerContext,
+        peer: &'a BitTorrentPeerContext,
     ) -> Result<()> {
         let extension_number = match peer.find_remote_extension_number(Self::NAME) {
             None => {
@@ -244,11 +248,11 @@ impl MetadataExtension {
     }
 
     /// Check if the metadata should be requested for the torrent.
-    async fn should_request_metadata<'a>(&'a self, peer: &'a PeerContext) -> bool {
+    async fn should_request_metadata<'a>(&'a self, peer: &'a BitTorrentPeerContext) -> bool {
         peer.metadata().info.is_none()
     }
 
-    async fn initialize(&self, peer: &PeerContext) {
+    async fn initialize(&self, peer: &BitTorrentPeerContext) {
         if peer.find_remote_extension_number(Self::NAME).is_some()
             && self.should_request_metadata(peer).await
         {
@@ -264,7 +268,7 @@ impl MetadataExtension {
     async fn send_metadata_piece(
         metadata: &TorrentMetadataInfo,
         piece: PieceIndex,
-        peer: &PeerContext,
+        peer: &BitTorrentPeerContext,
     ) -> Result<()> {
         // serialize the metadata
         let metadata_bytes = bencode::to_bytes(&metadata)?;

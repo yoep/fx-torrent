@@ -160,35 +160,35 @@ Once implemented, these extensions can be attached to individual torrents or glo
 
 _example peer extension_
 ```rust
-# use fx_torrent::prelude::*;
-# use fx_torrent::peer::PeerContext;
-# use fx_torrent::peer::extension::Extension;
-# use fx_torrent::peer::extension::Result;
-
-#[derive(Debug)]
-pub struct MyPeerExtension;
-impl Extension for MyPeerExtension {
-    fn name(&self) -> &str {
-        "my-extension"
-    }
-
-    // Additional trait methods
-}
-
-# fn example() {
-    // 1. Peer extension directly in a torrent
-    let torrent = Torrent::request()
-        .extension(|| MyPeerExtension.into())
-        .build()
-        .unwrap();
-
-    // 2. Peer extension in a session
-    let session = FxSession::builder()
-        .extension(|| MyPeerExtension.into())
-        .build()
-        .unwrap();
-# }
-```
+* # use fx_torrent::prelude::*;
+* # use fx_torrent::peer::BitTorrentPeerContext;
+* # use fx_torrent::peer::extension::Extension;
+* # use fx_torrent::peer::extension::Result;
+*
+* #[derive(Debug)]
+* pub struct MyPeerExtension;
+* impl Extension for MyPeerExtension {
+*     fn name(&self) -> &str {
+*         "my-extension"
+*     }
+*
+*     // Additional trait methods
+* }
+*
+* # fn example() {
+*     // 1. Peer extension directly in a torrent
+*     let torrent = Torrent::request()
+*         .extension(|| MyPeerExtension.into())
+*         .build()
+*         .unwrap();
+*
+*     // 2. Peer extension in a session
+*     let session = FxSession::builder()
+*         .extension(|| MyPeerExtension.into())
+*         .build()
+*         .unwrap();
+* # }
+* ```
 
 ### Storage Extension
 
@@ -664,35 +664,6 @@ pub mod tests {
                     while let Ok(event) = receiver.recv().await {
                         match &*event {
                             TorrentEvent::PiecesChanged(_) => break,
-                            _ => {}
-                        }
-                    }
-                } => {}
-            }
-        }
-
-        pub async fn wait_for_torrent_state(
-            torrent: &Torrent,
-            expected_state: TorrentState,
-            timeout: Duration,
-        ) {
-            let mut receiver = torrent.subscribe();
-            let mut state = torrent.state().await;
-            if state == expected_state {
-                return;
-            }
-
-            select! {
-                _ = time::sleep(timeout) => assert!(false, "expected state {}, but got {:?}", expected_state, state),
-                _ = async {
-                    while let Ok(event) = receiver.recv().await {
-                        match &*event {
-                            TorrentEvent::StateChanged(new_state) => {
-                                state = *new_state;
-                                if state == expected_state {
-                                    return;
-                                }
-                            },
                             _ => {}
                         }
                     }

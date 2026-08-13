@@ -5,7 +5,7 @@ use crate::peer::extension::HolepunchExtension;
 use crate::peer::extension::MetadataExtension;
 #[cfg(feature = "extension-pex")]
 use crate::peer::extension::PexExtension;
-use crate::peer::{ConnectionProtocol, PeerContext};
+use crate::peer::{BitTorrentPeerContext, ConnectionProtocol};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -41,12 +41,12 @@ pub trait Extension: Debug + Send + Sync {
     async fn on_message(
         &mut self,
         payload: &[u8],
-        peer: &mut PeerContext,
+        peer: &mut BitTorrentPeerContext,
     ) -> crate::peer::extension::Result<()>;
 
     /// Invoked once per tick (typically once per second), providing a tick interval for the extension
     /// to process data.
-    async fn tick(&mut self, peer: &mut PeerContext);
+    async fn tick(&mut self, peer: &mut BitTorrentPeerContext);
 }
 
 /// A peer extension that is used within the BitTorrent protocol.
@@ -96,7 +96,7 @@ impl PeerExtension {
     pub async fn on_message(
         &mut self,
         payload: &[u8],
-        peer: &mut PeerContext,
+        peer: &mut BitTorrentPeerContext,
     ) -> crate::peer::extension::Result<()> {
         match self {
             #[cfg(feature = "extension-donthave")]
@@ -113,7 +113,7 @@ impl PeerExtension {
     /// Invoked once per tick (typically once per second), providing a tick interval for the extension
     /// to process data.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn tick(&mut self, peer: &mut PeerContext) {
+    pub async fn tick(&mut self, peer: &mut BitTorrentPeerContext) {
         match self {
             #[cfg(feature = "extension-metadata")]
             PeerExtension::Metadata(e) => e.tick(peer).await,
@@ -181,12 +181,12 @@ mod tests {
         async fn on_message(
             &mut self,
             _: &[u8],
-            _: &mut PeerContext,
+            _: &mut BitTorrentPeerContext,
         ) -> crate::peer::extension::Result<()> {
             Ok(())
         }
 
-        async fn tick(&mut self, _: &mut PeerContext) {
+        async fn tick(&mut self, _: &mut BitTorrentPeerContext) {
             // no-op
         }
     }

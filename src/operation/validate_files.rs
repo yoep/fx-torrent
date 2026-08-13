@@ -1,15 +1,18 @@
 use crate::operation::TorrentOperationResult;
 use crate::{PieceIndex, Sha1Hash, Sha256Hash, TorrentContext, TorrentFlags, TorrentState};
 use futures::FutureExt;
-use log::debug;
+use log::info;
 use std::fmt::Debug;
+use std::time::Instant;
 use tokio::task::JoinSet;
 
 /// The torrent file validation operation validates existing files of the torrent and checks which pieces have been completed before/valid.
+#[derive(Debug)]
 pub struct FileValidationOperation {
     cursor: usize,
     num_of_pieces: usize,
-    max_parallel: usize,
+    max_concurrent: usize,
+    start_time: Instant,
     state: ValidationState,
     validation_tasks: JoinSet<ValidationResult>,
 }
@@ -19,7 +22,8 @@ impl FileValidationOperation {
         Self {
             cursor: 0,
             num_of_pieces: 0,
-            max_parallel: 0,
+            max_concurrent: 0,
+            start_time: Instant::now(),
             state: ValidationState::Validating,
             validation_tasks: Default::default(),
         }
@@ -29,7 +33,10 @@ impl FileValidationOperation {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn execute(&mut self, torrent: &mut TorrentContext) -> TorrentOperationResult {
         // early exit if the torrent is paused or in an error state
-        if !self.should_check_files(torrent) {
+        if self.state == ValidationState::Validated
+            || torrent.is_cancelled()
+            || !self.should_check_files(torrent)
+        {
             return TorrentOperationResult::Continue;
         }
 
@@ -37,11 +44,7 @@ impl FileValidationOperation {
         self.validate(torrent).await;
         self.poll_futures(torrent).await;
 
-        // check the current state of the validator
-        match self.state {
-            ValidationState::Validated => TorrentOperationResult::Continue,
-            ValidationState::Validating => TorrentOperationResult::Stop,
-        }
+        TorrentOperationResult::Stop
     }
 
     /// Returns `true` if the operation should validate existing files, else `false`.
@@ -54,8 +57,8 @@ impl FileValidationOperation {
     }
 
     /// Initialize the validation operation.
-    async fn initialize(&mut self, torrent: &TorrentContext) {
-        if self.max_parallel > 0 {
+    async fn initialize(&mut self, torrent: &mut TorrentContext) {
+        if self.max_concurrent > 0 {
             return;
         }
 
@@ -74,13 +77,19 @@ impl FileValidationOperation {
         };
 
         self.num_of_pieces = num_of_pieces;
-        self.max_parallel = (torrent.config().checking_mem_usage / piece_len).max(1);
+        self.max_concurrent = (torrent.config().checking_mem_usage / piece_len).max(1);
+        self.start_time = Instant::now();
+        torrent.update_state(TorrentState::CheckingFiles);
     }
 
     async fn validate(&mut self, torrent: &TorrentContext) {
-        let task_len = self.validation_tasks.len();
-        let len = self.max_parallel.saturating_sub(task_len);
+        if self.cursor >= self.num_of_pieces {
+            return;
+        }
 
+        let len = self
+            .max_concurrent
+            .saturating_sub(self.validation_tasks.len());
         for _ in 0..len {
             let piece = match torrent.data_pool().piece(&self.cursor).await {
                 Some(piece) => piece,
@@ -124,18 +133,24 @@ impl FileValidationOperation {
             }
         }
 
-        if self.cursor == self.num_of_pieces && self.validation_tasks.len() == 0 {
-            debug!("Torrent {} completed validation", torrent);
-            self.state = ValidationState::Validated;
-        }
-    }
-}
+        if self.cursor == self.num_of_pieces && self.validation_tasks.is_empty() {
+            let elapsed = self.start_time.elapsed();
+            let num_of_files = torrent
+                .metadata()
+                .info
+                .as_ref()
+                .map(|info| info.total_files())
+                .unwrap_or_default();
 
-impl Debug for FileValidationOperation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TorrentFileValidationOperation")
-            .field("state", &self.state)
-            .finish()
+            info!(
+                "Torrent {} validated {} file(s) in {:.3} seconds",
+                torrent,
+                num_of_files,
+                elapsed.as_secs_f64()
+            );
+            self.state = ValidationState::Validated;
+            torrent.update_state(torrent.determine_state().await);
+        }
     }
 }
 
