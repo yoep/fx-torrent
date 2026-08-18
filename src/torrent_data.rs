@@ -3,6 +3,7 @@ use crate::{
     PiecePriority,
 };
 use itertools::Itertools;
+use log::error;
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -117,11 +118,6 @@ impl DataPool {
     /// Set the priorities for the given pieces of the torrent.
     pub async fn set_piece_priorities(&self, priorities: &[(PieceIndex, PiecePriority)]) {
         self.inner.write().await.set_piece_priorities(priorities);
-    }
-
-    /// Set the priorities for the given files of the torrent.
-    pub async fn set_file_priorities(&self, priorities: &[(FileIndex, FilePriority)]) {
-        self.inner.write().await.set_file_priorities(priorities);
     }
 
     /// Returns `true` if the given piece is present within the pool, else `false`.
@@ -293,29 +289,47 @@ impl InnerDataPool {
                 piece.priority = *priority;
             }
         }
-    }
 
-    fn set_file_priorities(&mut self, priorities: &[(FileIndex, FilePriority)]) {
-        let mut piece_priorities = BTreeMap::new();
-
-        for (index, file_priority) in priorities {
-            if let Some(file) = self.files.get_mut(index) {
-                file.priority = *file_priority;
-
-                for piece in file.pieces.clone() {
-                    let piece_priority = piece_priorities
-                        .entry(piece)
-                        .or_insert(*file_priority as PiecePriority);
-                    *piece_priority = (*piece_priority).max(*file_priority);
-                }
+        // recalculate the file priorities
+        for file in self.files.values_mut() {
+            // early skip if the file was not touched by this update
+            if !file
+                .pieces
+                .clone()
+                .any(|piece| priorities.iter().any(|(k, _)| k == &piece))
+            {
+                continue;
             }
-        }
 
-        let priorities = piece_priorities
-            .into_iter()
-            .map(|(k, v)| (k, v))
-            .collect_vec();
-        self.set_piece_priorities(priorities.as_slice());
+            let len = file.pieces.len();
+            let highest_priority = match len {
+                0 => {
+                    // this should never happen unless the torrent is malformed
+                    error!("Torrent file \"{}\" is malformed", file.filename());
+                    FilePriority::None
+                }
+                1 => self
+                    .pieces
+                    .get(&file.pieces.start)
+                    .map(|piece| piece.priority)
+                    .unwrap_or(FilePriority::None),
+                _ => {
+                    let exclusive_range = file.pieces.start + 1..file.pieces.end - 1;
+                    exclusive_range
+                        .into_iter()
+                        .map(|piece| {
+                            self.pieces
+                                .get(&piece)
+                                .map(|piece| piece.priority)
+                                .unwrap_or(FilePriority::None)
+                        })
+                        .max()
+                        .unwrap_or(FilePriority::None)
+                }
+            };
+
+            file.priority = highest_priority;
+        }
     }
 
     fn is_piece_completed(&self, piece: &PieceIndex) -> bool {
@@ -744,93 +758,6 @@ mod tests {
         }
     }
 
-    mod prioritize_file {
-        use super::*;
-
-        #[tokio::test]
-        async fn test_set_file_priorities_single_file() {
-            init_logger!();
-            let pieces = vec![
-                create_piece(0, 1024),
-                create_piece(1, 1024),
-                create_piece(2, 1024),
-                create_piece(3, 1024),
-            ];
-            let files = vec![
-                create_file(0, 0, 2000, 0..2),
-                create_file(1, 2000, 1048, 1..3),
-                create_file(2, 3072, 1048, 3..4),
-            ];
-            let pool = DataPool::new();
-
-            // update the pool data
-            pool.set_pieces(pieces).await;
-            pool.set_files(files).await;
-
-            // prioritize the first file
-            pool.set_file_priorities(&create_file_priority(0)).await;
-            let result = pool.piece_priorities().await;
-            assert_eq!(
-                vec![
-                    (0, PiecePriority::Normal),
-                    (1, PiecePriority::Normal),
-                    (2, PiecePriority::None),
-                    (3, PiecePriority::None),
-                ]
-                .into_iter()
-                .collect::<BTreeMap<_, _>>(),
-                result,
-                "expected the first file to have priority Normal"
-            );
-
-            // prioritize the second file
-            pool.set_file_priorities(&create_file_priority(1)).await;
-            let result = pool.piece_priorities().await;
-            assert_eq!(
-                vec![
-                    (0, PiecePriority::None),
-                    (1, PiecePriority::Normal),
-                    (2, PiecePriority::Normal),
-                    (3, PiecePriority::None),
-                ]
-                .into_iter()
-                .collect::<BTreeMap<_, _>>(),
-                result,
-                "expected the first file to have priority Normal"
-            );
-
-            // prioritize the last file
-            pool.set_file_priorities(&create_file_priority(2)).await;
-            let result = pool.piece_priorities().await;
-            assert_eq!(
-                vec![
-                    (0, PiecePriority::None),
-                    (1, PiecePriority::None),
-                    (2, PiecePriority::None),
-                    (3, PiecePriority::Normal),
-                ]
-                .into_iter()
-                .collect::<BTreeMap<_, _>>(),
-                result,
-                "expected the first file to have priority Normal"
-            );
-        }
-
-        fn create_file_priority(index: FileIndex) -> Vec<(FileIndex, FilePriority)> {
-            (0..3)
-                .into_iter()
-                .map(|i| {
-                    let priority = if i == index {
-                        FilePriority::Normal
-                    } else {
-                        FilePriority::None
-                    };
-                    (i, priority)
-                })
-                .collect()
-        }
-    }
-
     mod interested {
         use super::*;
 
@@ -985,7 +912,10 @@ mod tests {
             );
 
             // set file 2 as not wanted
-            pool.set_file_priorities(&[(1, FilePriority::None)]).await;
+            let priorities = (2..4)
+                .map(|piece| (piece, PiecePriority::None))
+                .collect_vec();
+            pool.set_piece_priorities(&priorities).await;
 
             // check if partial seed is true, if none of the files have been completed
             let result = pool.is_partial_seed().await;
