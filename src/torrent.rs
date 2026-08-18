@@ -19,13 +19,13 @@ use crate::torrent_data::DataPool;
 use crate::tracker::{AnnounceEvent, AnnouncementResult, TrackerClient};
 #[cfg(feature = "lsd")]
 use crate::LocalServiceDiscovery;
-use crate::TorrentTracker;
 use crate::{BitVec, Result};
 use crate::{
     FileAttributeFlags, FileIndex, InfoHash, Metrics, Piece, PieceBlock, PieceIndex, PiecePriority,
     Sha1Hash, Sha256Hash, TorrentError, TorrentFlags, TorrentMetadata, TorrentMetadataInfo,
     DEFAULT_TORRENT_PROTOCOL_EXTENSIONS,
 };
+use crate::{FilePriority, TorrentTracker};
 use crate::{FileStream, TorrentHandle};
 use derive_more::Display;
 use futures::future::BoxFuture;
@@ -34,7 +34,7 @@ use futures::{FutureExt, StreamExt};
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use itertools::Itertools;
 use log::{debug, info, log, trace, warn, Level};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Debug, Display, Formatter};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -818,7 +818,7 @@ impl Torrent {
     /// Use [Torrent::files] to get the current files with their respective [FileIndex].
     ///
     /// Providing all file indexes of the torrent is not required.
-    pub async fn prioritize_files(&self, priorities: Vec<(FileIndex, PiecePriority)>) {
+    pub async fn prioritize_files(&self, priorities: Vec<(FileIndex, FilePriority)>) {
         let _ = self
             .inner
             .sender
@@ -2092,7 +2092,7 @@ impl TorrentContext {
     }
 
     /// Prioritize the given pieces within this torrent.
-    pub async fn prioritize_pieces(&mut self, priorities: Vec<(PieceIndex, PiecePriority)>) {
+    async fn prioritize_pieces(&mut self, priorities: Vec<(PieceIndex, PiecePriority)>) {
         self.data_pool
             .set_piece_priorities(priorities.as_slice())
             .await;
@@ -2113,9 +2113,35 @@ impl TorrentContext {
         }
     }
 
+    /// Prioritize the given files within this torrent.
+    async fn prioritize_files(&mut self, priorities: Vec<(FileIndex, FilePriority)>) {
+        let file_priorities =
+            futures::future::join_all(priorities.into_iter().map(|(file, priority)| {
+                let data_pool = self.data_pool.clone();
+                async move {
+                    let file = data_pool.file(&file).await?;
+                    Some((file, priority))
+                }
+            }))
+            .await;
+
+        let mut piece_priorities = HashMap::new();
+        for (file, priority) in file_priorities.into_iter().flatten() {
+            for piece in file.pieces {
+                piece_priorities
+                    .entry(piece)
+                    .and_modify(|p: &mut PiecePriority| *p = (*p).max(priority))
+                    .or_insert(priority);
+            }
+        }
+
+        self.prioritize_pieces(piece_priorities.into_iter().collect())
+            .await;
+    }
+
     /// Prioritize the given bytes within the torrent.
     /// This will match the bytes against the relevant pieces, and prioritize those pieces.
-    pub async fn prioritize_bytes(&mut self, bytes: &Range<usize>, priority: PiecePriority) {
+    async fn prioritize_bytes(&mut self, bytes: &Range<usize>, priority: PiecePriority) {
         let piece_priorities = self
             .find_relevant_pieces_for_bytes(bytes)
             .await
@@ -2304,17 +2330,6 @@ impl TorrentContext {
     /// If the torrent's metadata has not yet been fully retrieved, this method will return `0`.
     pub async fn total_files(&self) -> usize {
         self.data_pool.num_of_files().await
-    }
-
-    /// Prioritize the files of the torrent.
-    /// This will update the underlying piece priorities of each file.
-    ///
-    /// Providing all file indexes of the torrent is not required.
-    pub async fn prioritize_files(&self, priorities: Vec<(FileIndex, PiecePriority)>) {
-        trace!("Torrent {} is prioritizing files {:?}", self, priorities);
-        self.data_pool
-            .set_file_priorities(priorities.as_slice())
-            .await;
     }
 
     /// Get the absolute filesystem path to a given file in the torrent.
@@ -4006,6 +4021,83 @@ mod tests {
                 "debian-12.4.0-amd64-DVD-1.iso",
                 result.filename(),
                 "expected the filename to match"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_prioritize_files() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let torrent = torrent!(
+                "multifile.torrent",
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![CreatePiecesAndFilesOperation::new().into()],
+                vec![],
+                |_| MemoryStorage::new().into(),
+                None
+            );
+            let data_pool = torrent.inner.data_pool().await.unwrap();
+
+            // wait for the pieces to be created
+            wait_for_torrent_pieces(&torrent).await;
+
+            // prioritize the second file
+            torrent
+                .prioritize_files(vec![
+                    (0, FilePriority::None),
+                    (1, FilePriority::Normal),
+                    (2, FilePriority::None),
+                ])
+                .await;
+
+            // verify the 1st file
+            let file = data_pool.file(&0).await.unwrap();
+            assert_eq!(
+                FilePriority::None,
+                file.priority,
+                "expected file 0 to not be wanted"
+            );
+            let last_piece = data_pool.piece(&(file.pieces.end - 1)).await.unwrap();
+            assert_eq!(
+                PiecePriority::Normal,
+                last_piece.priority,
+                "expected the last overlapping piece to be wanted"
+            );
+
+            // verify the 2nd file
+            let file = data_pool.file(&1).await.unwrap();
+            assert_eq!(
+                FilePriority::Normal,
+                file.priority,
+                "expected file 1 to be wanted"
+            );
+            // make sure that all pieces are wanted of the 2nd file
+            for piece_index in file.pieces {
+                let piece = data_pool.piece(&piece_index).await.unwrap();
+                assert_eq!(
+                    PiecePriority::Normal,
+                    piece.priority,
+                    "expected piece {} of file 1 to be wanted",
+                    piece_index
+                );
+            }
+
+            // verify the 3th file
+            let file_2 = data_pool.file(&2).await.unwrap();
+            assert_eq!(
+                FilePriority::None,
+                file_2.priority,
+                "expected file 2 to not be wanted"
+            );
+            // file 1 fully ends with piece 725, so there is no overlap with file 2
+            let first_piece = data_pool.piece(&(file_2.pieces.end - 1)).await.unwrap();
+            assert_eq!(
+                PiecePriority::None,
+                first_piece.priority,
+                "expected the 1st piece of file 2 to not be wanted",
             );
         }
     }

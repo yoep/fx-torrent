@@ -74,6 +74,11 @@ impl AppLogger {
                         level: Level::Info,
                     },
                     Logger {
+                        name: "Storage".to_string(),
+                        target: "fx_torrent::storage".to_string(),
+                        level: Level::Info,
+                    },
+                    Logger {
                         name: "Torrent".to_string(),
                         target: "fx_torrent::torrent".to_string(),
                         level: Level::Info,
