@@ -8,8 +8,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Debug, Display, Formatter};
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
 use url::Url;
 
 /// Represents a list of URLs, which can be single, multiple, or ignored.
@@ -747,6 +749,28 @@ impl TorrentMetadata {
             )),
         }
     }
+
+    /// Returns the metadata of the torrent as bencoded bytes.
+    pub fn as_bytes(&self) -> Result<Vec<u8>> {
+        Vec::<u8>::try_from(self)
+    }
+
+    /// Saves the metadata of the torrent to the given file location.
+    /// If the target path already exists, it will be overridden.
+    pub async fn save(&self, filepath: impl AsRef<Path>) -> Result<()> {
+        let bytes = self.as_bytes()?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(filepath)
+            .await?;
+
+        file.write_all(&bytes).await?;
+        file.flush().await?;
+
+        Ok(())
+    }
 }
 
 impl TryFrom<&[u8]> for TorrentMetadata {
@@ -782,6 +806,14 @@ impl TryFrom<&[u8]> for TorrentMetadata {
         torrent_info.info_hash = info_hash;
         torrent_info.info_byte_size = Some(info_len);
         Ok(torrent_info)
+    }
+}
+
+impl TryFrom<&TorrentMetadata> for Vec<u8> {
+    type Error = TorrentError;
+
+    fn try_from(value: &TorrentMetadata) -> Result<Self> {
+        bencode::to_bytes(&value).map_err(|e| TorrentError::InvalidMetadata(e.to_string()))
     }
 }
 
@@ -1332,6 +1364,8 @@ mod tests {
     mod torrent_metadata {
         use super::*;
         use crate::tests::read_test_file_to_bytes;
+        use tempfile::tempdir;
+        use tokio::fs::read;
 
         #[test]
         fn test_tiered_trackers() {
@@ -1499,6 +1533,36 @@ mod tests {
             let result = info.calculate_info_hash().unwrap();
 
             assert_eq!(info.info_hash, result);
+        }
+
+        #[test]
+        fn as_bytes() {
+            init_logger!();
+            let original_data = read_test_file_to_bytes("debian-udp.torrent");
+            let metadata = TorrentMetadata::try_from(original_data.as_slice()).unwrap();
+
+            let result = metadata.as_bytes().unwrap();
+            assert_eq!(original_data, result);
+        }
+
+        #[tokio::test]
+        async fn test_save() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let target_filepath = temp_dir.path().join("test.torrent");
+            let original_data = read_test_file_to_bytes("debian-udp.torrent");
+            let metadata = TorrentMetadata::try_from(original_data.as_slice()).unwrap();
+
+            // write the file to the given location
+            let result = metadata.save(&target_filepath).await;
+            assert_eq!(Ok(()), result, "expected the metadata to have been saved");
+
+            // read the written file and verify that the data matches the original file
+            let result = read(&target_filepath).await.unwrap();
+            assert_eq!(
+                original_data, result,
+                "expected the savec metadata to match"
+            );
         }
     }
 

@@ -170,6 +170,24 @@ impl TorrentInfoWidget {
         });
     }
 
+    fn save(&self) {
+        let torrent = self.torrent.clone();
+        tokio::spawn(async move {
+            match torrent.metadata().await {
+                Ok(metadata) => match metadata.name() {
+                    Some(name) => match metadata.save(format!("{}.torrent", name)).await {
+                        Ok(_) => info!("Torrent metadata {} has been saved", name),
+                        Err(e) => error!("Failed to save torrent metadata {}, {}", name, e),
+                    },
+                    None => {
+                        warn!("Unable to save torrent metadata, torrent name is unknown");
+                    }
+                },
+                Err(e) => error!("Failed to save torrent metadata, {}", e),
+            }
+        });
+    }
+
     /// Process any pending events from the torrent.
     async fn process_torrent_events(&mut self) {
         while let Ok(event) = self.event_receiver.try_recv() {
@@ -219,6 +237,11 @@ impl FXWidget for TorrentInfoWidget {
                 KeyCode::Char('p') => {
                     event.consume();
                     self.toggle_pause_state();
+                    return;
+                }
+                KeyCode::Char('s') => {
+                    event.consume();
+                    self.save();
                     return;
                 }
                 _ => {}
@@ -292,7 +315,7 @@ impl FXWidget for TorrentInfoWidget {
         .block(
             Block::bordered()
                 .title(" Metadata ")
-                .title_bottom(" Press P to pause/resume, A to add peer "),
+                .title_bottom(" Press P to pause/resume, A to add peer, S to save .torrent "),
         )
         .render(metadata_area, frame.buffer_mut());
 
