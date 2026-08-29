@@ -152,7 +152,11 @@ impl DiskStorage {
                     None => return Err(unavailable()),
                 };
                 let piece_offset = torrent_offset.saturating_sub(cur_piece.offset);
-                let parts_len = min(bytes_remaining, file.len());
+                let file_start_offset = torrent_offset.saturating_sub(file.torrent_offset);
+                let parts_len = min(
+                    bytes_remaining,
+                    file.len().saturating_sub(file_start_offset),
+                );
                 let bytes_written = self
                     .part_file
                     .write(
@@ -171,8 +175,8 @@ impl DiskStorage {
 
             // try to open the torrent file
             let mut fs_file = self.open(&file.torrent_path, true).await?;
-            let file_len = min(bytes_remaining, file.len());
             let start_offset = torrent_offset.saturating_sub(file.torrent_offset);
+            let file_len = min(bytes_remaining, file.len().saturating_sub(start_offset));
             fs_file.seek(SeekFrom::Start(start_offset as u64)).await?;
             fs_file.write_all(&data[cursor..cursor + file_len]).await?;
             fs_file.flush().await?;
@@ -363,6 +367,7 @@ mod tests {
     use crate::operation::{CreatePiecesAndFilesOperation, TorrentOperationResult};
     use crate::tests::read_test_file_to_bytes;
     use crate::torrent::TorrentContext;
+    use crate::{Piece, TorrentFileInfo};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -474,6 +479,106 @@ mod tests {
                 "expected the hash to equal the piece hash"
             );
         }
+    }
+
+    /// Test that a piece spanning two files is correctly written to both files.
+    ///
+    /// Layout:
+    ///   Piece 0: bytes   0-63  (entirely in file_a)
+    ///   Piece 1: bytes  64-127 (36 bytes in file_a, 28 bytes in file_b) ← cross-file
+    ///   Piece 2: bytes 128-191 (entirely in file_b)
+    ///
+    ///   file_a: torrent bytes   0-99  (length 100)
+    ///   file_b: torrent bytes 100-191 (length 92)
+    #[tokio::test]
+    async fn test_write_piece_spanning_two_files() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path();
+        let piece_size: usize = 64;
+        let file_a_len: usize = 100;
+        let file_b_len: usize = 92;
+
+        // Build pieces
+        let pieces = vec![
+            Piece::new(InfoHash::default(), 0, 0, piece_size),
+            Piece::new(InfoHash::default(), 1, piece_size, piece_size),
+            Piece::new(InfoHash::default(), 2, piece_size * 2, piece_size),
+        ];
+
+        // Build files: file_a covers torrent bytes 0-99, file_b covers 100-191
+        let make_file_info = |length: usize| TorrentFileInfo {
+            length: length as u64,
+            path: None,
+            path_utf8: None,
+            md5sum: None,
+            attr: None,
+            symlink_path: None,
+            sha1: None,
+        };
+        let files = vec![
+            crate::File {
+                index: 0,
+                torrent_path: PathBuf::from("file_a.bin"),
+                torrent_offset: 0,
+                info: make_file_info(file_a_len),
+                priority: FilePriority::Normal,
+                pieces: 0..2,
+            },
+            crate::File {
+                index: 1,
+                torrent_path: PathBuf::from("file_b.bin"),
+                torrent_offset: file_a_len,
+                info: make_file_info(file_b_len),
+                priority: FilePriority::Normal,
+                pieces: 1..3,
+            },
+        ];
+
+        let data_pool = DataPool::new();
+        data_pool.set_pieces(pieces).await;
+        data_pool.set_files(files).await;
+
+        let storage = DiskStorage::new(InfoHash::default(), temp_path, data_pool);
+
+        // Generate deterministic data for piece 1
+        let data: Vec<u8> = (0u8..piece_size as u8).collect();
+
+        let result = storage.write(&data, &1, 0).await;
+        assert!(
+            result.is_ok(),
+            "expected write to succeed, got {:?}",
+            result
+        );
+        assert_eq!(
+            piece_size,
+            result.unwrap(),
+            "expected all bytes to be written"
+        );
+
+        // Verify file_a.bin received bytes data[0..36] at offset 64
+        let bytes_in_a = file_a_len - piece_size; // 36
+        let file_a_path = temp_path.join("file_a.bin");
+        let file_a_content = tokio::fs::read(&file_a_path)
+            .await
+            .expect("expected file_a.bin to exist");
+        assert_eq!(
+            &data[..bytes_in_a],
+            &file_a_content[piece_size..],
+            "expected file_a.bin tail to match piece data head"
+        );
+
+        // Verify file_b.bin received bytes data[36..64] at offset 0
+        let bytes_in_b = piece_size - bytes_in_a; // 28
+        let file_b_path = temp_path.join("file_b.bin");
+        let file_b_content = tokio::fs::read(&file_b_path)
+            .await
+            .expect("expected file_b.bin to exist");
+        assert_eq!(
+            &data[bytes_in_a..piece_size],
+            &file_b_content[..bytes_in_b],
+            "expected file_b.bin head to match piece data tail"
+        );
     }
 
     async fn create_pieces_and_files(context: &mut TorrentContext) {
