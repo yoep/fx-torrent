@@ -6,11 +6,13 @@ use crate::peer::{
 use crate::{bencode, CompactIpv4Addrs, CompactIpv6Addrs, InnerTorrent, TorrentEvent};
 use bitmask_enum::bitmask;
 use fx_callback::{Callback, Subscription};
-use log::{debug, warn};
+use log::{debug, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 /// The Peer Exchange message.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -182,36 +184,50 @@ impl PexExtension {
         self.torrent_event_receiver = Some(peer.torrent().subscribe());
         self.pex_supported = true;
         self.initialized = true;
-        debug!("Peer {} PEX has been initialized", peer);
+        trace!("Peer {} PEX has been initialized", peer);
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn process_torrent_events(&mut self, torrent: &InnerTorrent) {
-        let receiver = match self.torrent_event_receiver.as_mut() {
-            None => return,
-            Some(r) => r,
+        let events = {
+            let receiver = match self.torrent_event_receiver.as_mut() {
+                None => return,
+                Some(r) => r,
+            };
+
+            let mut events = vec![];
+            while let Ok(event) = receiver.try_recv() {
+                events.push(event.clone());
+            }
+            events
         };
 
-        while let Ok(event) = receiver.try_recv() {
-            match &*event {
-                TorrentEvent::PeerConnected(peer_addr) => {
-                    let peer = match torrent.peer(peer_addr).await {
-                        None => continue,
-                        Some(peer) => peer,
-                    };
-                    self.pool.peer_added(peer)
-                }
-                TorrentEvent::PeerDisconnected(peer_addr) => {
-                    let peer = match torrent.peer(peer_addr).await {
-                        None => continue,
-                        Some(peer) => peer,
-                    };
+        // offload to a separate task, to prevent a deadlock between the torrent and peer
+        // FIXME: improve the pex peers
+        let torrent = torrent.clone();
+        let pool = self.pool.clone();
+        spawn!("PexExtension::process_torrent_events", async move {
+            for event in events {
+                match &*event {
+                    TorrentEvent::PeerConnected(peer_addr) => {
+                        let peer = match torrent.peer(peer_addr).await {
+                            None => continue,
+                            Some(peer) => peer,
+                        };
+                        pool.peer_added(peer).await
+                    }
+                    TorrentEvent::PeerDisconnected(peer_addr) => {
+                        let peer = match torrent.peer(peer_addr).await {
+                            None => continue,
+                            Some(peer) => peer,
+                        };
 
-                    self.pool.peer_removed(peer)
+                        pool.peer_removed(peer).await
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
+        });
     }
 
     async fn inform_peer(&mut self, peer: &BitTorrentPeerContext) {
@@ -223,26 +239,28 @@ impl PexExtension {
             Some(e) => e,
         };
 
-        self.pool.inform_peer(&extension_number, peer).await;
-        self.last_informed = Instant::now();
+        if self.pool.inform_peer(&extension_number, peer).await {
+            self.last_informed = Instant::now();
+        }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PexPool {
-    added_peers: Vec<PexPeer>,
-    dropped_peers: Vec<PexPeer>,
+    inner: Arc<Mutex<InnerPool>>,
 }
 
 impl PexPool {
     fn new() -> Self {
         Self {
-            added_peers: Default::default(),
-            dropped_peers: Default::default(),
+            inner: Arc::new(Mutex::new(InnerPool {
+                added_peers: Default::default(),
+                dropped_peers: Default::default(),
+            })),
         }
     }
 
-    fn peer_added(&mut self, peer: Peer) {
+    async fn peer_added(&self, peer: Peer) {
         let mut flags = PexFlag::none();
 
         if peer.connection_type() == &ConnectionDirection::Outbound {
@@ -252,13 +270,14 @@ impl PexPool {
             flags |= PexFlag::UtpSupported;
         }
 
-        self.added_peers.push(PexPeer {
+        self.inner.lock().await.added_peers.push(PexPeer {
             addr: *peer.addr(),
             flags,
         });
+        trace!("Pex peer {} (added) to pool", peer.addr());
     }
 
-    fn peer_removed(&mut self, peer: Peer) {
+    async fn peer_removed(&self, peer: Peer) {
         let mut flags = PexFlag::none();
 
         if peer.connection_type() == &ConnectionDirection::Outbound {
@@ -268,10 +287,11 @@ impl PexPool {
             flags |= PexFlag::UtpSupported;
         }
 
-        self.dropped_peers.push(PexPeer {
+        self.inner.lock().await.dropped_peers.push(PexPeer {
             addr: *peer.addr(),
             flags,
         });
+        trace!("Pex peer {} (dropped) to pool", peer.addr());
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
@@ -279,21 +299,24 @@ impl PexPool {
         &mut self,
         extension_number: &ExtensionNumber,
         peer: &BitTorrentPeerContext,
-    ) {
+    ) -> bool {
         let message = self.message().await;
+        if message.is_empty() {
+            return false;
+        }
 
-        if !message.is_empty() {
-            let message_info = format!("{:?}", message);
-            match self.try_inform_peer(message, extension_number, peer).await {
-                Ok(_) => {
-                    debug!("Peer {} sent PEX message {}", peer, message_info);
-                }
-                Err(e) => {
-                    debug!(
-                        "Peer {} failed to send PEX message {}, {}",
-                        peer, message_info, e
-                    );
-                }
+        let message_info = format!("{:?}", message);
+        match self.try_inform_peer(message, extension_number, peer).await {
+            Ok(_) => {
+                debug!("Peer {} sent PEX message {}", peer, message_info);
+                true
+            }
+            Err(e) => {
+                debug!(
+                    "Peer {} failed to send PEX message {}, {}",
+                    peer, message_info, e
+                );
+                false
             }
         }
     }
@@ -316,8 +339,8 @@ impl PexPool {
 
     /// Get the PEX message to send to the peer and reset the pool.
     async fn message(&mut self) -> PexMessage {
-        let added_peers = std::mem::take(&mut self.added_peers);
-        let dropped_peers = std::mem::take(&mut self.dropped_peers);
+        let added_peers = std::mem::take(&mut self.inner.lock().await.added_peers);
+        let dropped_peers = std::mem::take(&mut self.inner.lock().await.dropped_peers);
         let mut added = vec![];
         let mut added_flags = vec![];
         let mut added6 = vec![];
@@ -367,6 +390,12 @@ impl PexPool {
             dropped6: dropped6.into(),
         }
     }
+}
+
+#[derive(Debug)]
+struct InnerPool {
+    added_peers: Vec<PexPeer>,
+    dropped_peers: Vec<PexPeer>,
 }
 
 #[derive(Debug)]
@@ -448,7 +477,7 @@ mod tests {
         assert_eq!(expected_result, result);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_on_message() {
         init_logger!();
         let temp_dir = tempdir().unwrap();
@@ -461,8 +490,8 @@ mod tests {
         let (source, in_between) = tcp_peer_pair!(
             &source_torrent,
             &in_between_torrent,
-            vec![PexExtension::new(Duration::from_secs(1)).into()],
-            vec![PexExtension::new(Duration::from_secs(1)).into()],
+            vec![PexExtension::new(Duration::from_millis(500)).into()],
+            vec![PexExtension::new(Duration::from_millis(500)).into()],
             ProtocolExtensionFlags::LTEP
         );
         source_torrent.inner.peer_connected(source.into()).await;
@@ -480,8 +509,8 @@ mod tests {
         let (in_between, target) = tcp_peer_pair!(
             &in_between_torrent,
             &target_torrent,
-            vec![PexExtension::new(Duration::from_secs(1)).into()],
-            vec![PexExtension::new(Duration::from_secs(1)).into()],
+            vec![PexExtension::new(Duration::from_millis(500)).into()],
+            vec![PexExtension::new(Duration::from_millis(500)).into()],
             ProtocolExtensionFlags::LTEP
         );
         in_between_torrent
@@ -492,7 +521,7 @@ mod tests {
 
         // wait for the pex extension to exchange target addr to the source
         assert_timeout!(
-            Duration::from_secs(2),
+            Duration::from_secs(4),
             source_torrent.inner.peer_addrs_len().await == 2,
             "expected the source torrent to be connected to the target"
         );
