@@ -230,7 +230,7 @@ impl FxPiecePicker {
 
         // early exit if the peer is unable to queue any requests
         let mut target_queue_len =
-            match timeout(Duration::from_millis(500), peer.target_request_queue_len()).await {
+            match timeout(Duration::from_millis(250), peer.target_request_queue_len()).await {
                 Ok(len) => len,
                 Err(_) => {
                     warn!(
