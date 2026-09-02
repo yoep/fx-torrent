@@ -4,7 +4,8 @@ use crate::peer::extension::HolepunchExtension;
 use crate::peer::webseed::HttpPeer;
 use crate::peer::{extension, BitTorrentPeer, CloseReason, Peer, PeerDiscovery};
 use crate::torrent::InnerTorrent;
-use crate::{Result, TorrentCommand, TorrentContext, TorrentError};
+use crate::torrent_data::DataPool;
+use crate::{Result, TorrentCommand, TorrentContext, TorrentError, TorrentMetadata};
 use futures::FutureExt;
 use itertools::Itertools;
 use log::{debug, trace, warn};
@@ -262,8 +263,10 @@ impl ConnectPeersOperation {
                 context.command_sender().clone(),
                 context.callbacks().clone(),
             );
+            let data_pool = context.data_pool().clone();
+            let metadata = context.metadata().clone();
             let sender = context.command_sender().clone();
-            if let Err(e) = self.create_http_peer(torrent, sender, url) {
+            if let Err(e) = self.create_http_peer(torrent, data_pool, metadata, sender, url) {
                 warn!(
                     "Torrent {} failed to create webseed peer connection, {}",
                     context, e
@@ -381,6 +384,8 @@ impl ConnectPeersOperation {
     fn create_http_peer(
         &mut self,
         torrent: InnerTorrent,
+        data_pool: DataPool,
+        metadata: TorrentMetadata,
         sender: ChannelSender<TorrentCommand>,
         url: Url,
     ) -> Result<()> {
@@ -391,7 +396,7 @@ impl ConnectPeersOperation {
                 "Torrent {} is trying to create webseed peer connection to {}",
                 handle_info, url
             );
-            match HttpPeer::new(url, torrent) {
+            match HttpPeer::new(url, torrent, data_pool, metadata) {
                 Ok(peer) => {
                     sender
                         .fire_and_forget(TorrentCommand::PeerConnected { peer: peer.into() })
