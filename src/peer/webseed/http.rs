@@ -1,14 +1,19 @@
+use crate::channel::{ChannelReceiver, ChannelSender, Reply};
 use crate::metrics::Metric;
 use crate::peer::peer_context::PeerContext;
 use crate::peer::{
     ConnectionDirection, ConnectionProtocol, Error, Metrics, PeerEvent, PeerId, PeerState, Result,
 };
 use crate::torrent::InnerTorrent;
-use crate::{BitVec, FileAttributeFlags, PieceBlock, PieceIndex, TorrentFileInfo, TorrentMetadata};
+use crate::torrent_data::DataPool;
+use crate::{
+    BitVec, FileAttributeFlags, PieceBlock, PieceIndex, TorrentEvent, TorrentFileInfo,
+    TorrentMetadata,
+};
 use derive_more::Display;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use itertools::Itertools;
-use log::{debug, warn};
+use log::debug;
 use percent_encoding::{percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use reqwest::redirect::Policy;
 use reqwest::Client;
@@ -16,7 +21,6 @@ use std::cmp::min;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
 use tokio::time::interval;
@@ -32,28 +36,29 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The HTTP peer, also known as webseed, implementation that exchanges data with a HTTP server.
 #[derive(Debug, Display, Clone)]
-#[display("{}", inner)]
+#[display("{}", context)]
 pub struct HttpPeer {
-    inner: Arc<HttpPeerContext>,
+    context: PeerContext,
+    sender: ChannelSender<HttpPeerCommand>,
+    callbacks: MultiThreadedCallback<PeerEvent>,
+    cancellation_token: CancellationToken,
 }
 
 impl HttpPeer {
     /// Create a new HTTP/webseed peer instance.
-    pub fn new(url: Url, torrent: InnerTorrent) -> Result<Self> {
+    pub fn new(
+        url: Url,
+        torrent: InnerTorrent,
+        data_pool: DataPool,
+        metadata: TorrentMetadata,
+    ) -> Result<Self> {
+        let (sender, receiver) = channel!(512);
         let client = Client::builder()
             .redirect(Policy::limited(3))
             .build()
             .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
-        let addr = url
-            .socket_addrs(|| match url.scheme() {
-                "http" => Some(80),
-                "https" => Some(443),
-                _ => None,
-            })
-            .unwrap_or(Vec::new())
-            .pop()
-            .unwrap_or(SocketAddr::from(([120, 0, 0, 1], 80)));
-        let inner = Arc::new(HttpPeerContext {
+        let addr = Self::resolve_url(&url)?;
+        let mut context = HttpPeerContext {
             client,
             context: PeerContext::builder()
                 .id(PeerId::new())
@@ -64,102 +69,103 @@ impl HttpPeer {
                 .build(),
             url,
             torrent,
+            data_pool,
+            metadata,
             callbacks: MultiThreadedCallback::new(),
             cancellation_token: Default::default(),
+        };
+        let event_receiver = context.torrent.subscribe();
+        let peer_context = context.context.clone();
+        let callbacks = context.callbacks.clone();
+        let cancellation_token = context.cancellation_token.clone();
+
+        spawn!("HttpPeerContext::run", async move {
+            context.run(receiver, event_receiver).await
         });
 
-        let main_inner = inner.clone();
-        spawn!(
-            "HttpPeerContext::run",
-            async move { main_inner.run().await }
-        );
-
-        Ok(Self { inner })
+        Ok(Self {
+            context: peer_context,
+            sender,
+            callbacks,
+            cancellation_token,
+        })
     }
 
     /// Returns the unique peer identifier within the torrent network.
     pub fn id(&self) -> &PeerId {
-        self.inner.context.id()
+        self.context.id()
     }
 
-    /// Returns the address of the remote peer.   
+    /// Returns the address of the remote peer.
     pub fn addr(&self) -> &SocketAddr {
-        self.inner.context.addr()
+        self.context.addr()
     }
 
     /// Returns the metrics of the peer.
     pub fn metrics(&self) -> &Metrics {
-        self.inner.context.metrics()
+        self.context.metrics()
     }
 
     /// Returns the state of the peer.
     pub async fn state(&self) -> PeerState {
-        self.inner.context.state().await
+        self.context.state().await
     }
 
     /// Returns the bitfield of the remote peer.
     pub async fn remote_piece_bitfield(&self) -> BitVec {
-        let total_pieces = self.inner.torrent.total_pieces().await;
-        BitVec::repeat(true, total_pieces)
+        self.sender
+            .send(|tx| HttpPeerCommand::GetRemotePieceBitfield { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
     }
 
     /// Request one or more piece blocks from the remote peer.
     pub async fn request(&self, blocks: &[PieceBlock]) {
-        let metadata = match self.inner.torrent.metadata().await {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                warn!("Peer {} failed to retrieve metadata", self);
-                for block in blocks {
-                    self.inner
-                        .torrent
-                        .piece_block_rejected(self.inner.context.addr(), block)
-                        .await;
-                }
-                return;
-            }
-        };
-        let requests = blocks
-            .into_iter()
-            .map(|block| (block.piece, block))
-            .into_group_map();
-
-        // TODO: move the actual requests to a separate task with download queue
-        for (piece, blocks) in requests {
-            if let Err(e) = self
-                .inner
-                .request_piece(&piece, blocks.clone(), &metadata)
-                .await
-            {
-                debug!(
-                    "Peer {} failed to request piece {} blocks, {}",
-                    self, piece, e
-                );
-                for block in blocks {
-                    self.inner
-                        .torrent
-                        .piece_block_rejected(self.inner.context.addr(), block)
-                        .await;
-                }
-            }
-        }
+        self.sender
+            .fire_and_forget(HttpPeerCommand::Request {
+                blocks: blocks.to_vec(),
+            })
+            .await
     }
 
     /// Close the peer connection.
     pub fn close(&self) {
-        self.inner.cancellation_token.cancel();
+        self.cancellation_token.cancel();
+    }
+
+    /// Resolve the given url to a usable socket address.
+    fn resolve_url(url: &Url) -> Result<SocketAddr> {
+        url.socket_addrs(|| match url.scheme() {
+            "http" => Some(80),
+            "https" => Some(443),
+            _ => None,
+        })
+        .unwrap_or(Vec::new())
+        .pop()
+        .ok_or(Error::Io(io::Error::new(
+            io::ErrorKind::HostUnreachable,
+            "unable to resolve url",
+        )))
     }
 }
 
 impl Callback<PeerEvent> for HttpPeer {
     fn subscribe(&self) -> Subscription<PeerEvent> {
-        self.inner.callbacks.subscribe()
+        self.callbacks.subscribe()
     }
 }
 
 impl Drop for HttpPeer {
     fn drop(&mut self) {
-        self.inner.cancellation_token.cancel();
+        self.close();
     }
+}
+
+#[derive(Debug)]
+enum HttpPeerCommand {
+    GetRemotePieceBitfield { response: Reply<BitVec> },
+    Request { blocks: Vec<PieceBlock> },
 }
 
 #[derive(Debug, Display)]
@@ -169,17 +175,25 @@ struct HttpPeerContext {
     context: PeerContext,
     url: Url,
     torrent: InnerTorrent,
+    data_pool: DataPool,
+    metadata: TorrentMetadata,
     callbacks: MultiThreadedCallback<PeerEvent>,
     cancellation_token: CancellationToken,
 }
 
 impl HttpPeerContext {
-    async fn run(&self) {
+    async fn run(
+        &mut self,
+        mut command_receiver: ChannelReceiver<HttpPeerCommand>,
+        mut event_receiver: Subscription<TorrentEvent>,
+    ) {
         let mut stats_interval = interval(STATUS_INTERVAL);
 
         loop {
             select! {
                 _ = self.cancellation_token.cancelled() => break,
+                Some(command) = command_receiver.recv() => self.on_command(command).await,
+                Ok(event) = event_receiver.recv() => self.on_torrent_event(&*event).await,
                 _ = stats_interval.tick() => {
                     self.callbacks.invoke(PeerEvent::Stats(self.context.metrics().snapshot()));
                     self.context.metrics().tick(STATUS_INTERVAL);
@@ -190,20 +204,61 @@ impl HttpPeerContext {
         debug!("Http peer {} main loop ended", self);
     }
 
+    async fn on_command(&mut self, command: HttpPeerCommand) {
+        match command {
+            HttpPeerCommand::GetRemotePieceBitfield { response } => {
+                response.send(self.remote_piece_bitfield().await)
+            }
+            HttpPeerCommand::Request { blocks } => self.on_request(&blocks).await,
+        }
+    }
+
+    async fn on_torrent_event(&mut self, event: &TorrentEvent) {
+        match event {
+            TorrentEvent::MetadataChanged(metadata) => self.metadata = metadata.clone(),
+            _ => {}
+        }
+    }
+
+    async fn remote_piece_bitfield(&self) -> BitVec {
+        let total_pieces = self.data_pool.num_of_pieces().await;
+        BitVec::repeat(true, total_pieces)
+    }
+
+    async fn on_request(&mut self, blocks: &[PieceBlock]) {
+        let requests = blocks
+            .into_iter()
+            .map(|block| (block.piece, block))
+            .into_group_map();
+
+        for (piece, blocks) in requests {
+            if let Err(e) = self.request_piece(&piece, blocks.clone()).await {
+                debug!(
+                    "Peer {} failed to request piece {} blocks, {}",
+                    self, piece, e
+                );
+                for block in blocks {
+                    self.torrent
+                        .piece_block_rejected(self.context.addr(), block)
+                        .await;
+                }
+            }
+        }
+    }
+
     /// Try to request the given piece.
     /// It returns an error if the piece couldn't be requested from the webseed.
     async fn request_piece(
         &self,
         piece_index: &PieceIndex,
         blocks: Vec<&PieceBlock>,
-        metadata: &TorrentMetadata,
     ) -> Result<()> {
         let file_index = self
             .torrent
             .file_index_for(piece_index)
             .await
             .ok_or(Error::InvalidPiece(*piece_index))?;
-        let piece = match self.torrent.piece(piece_index).await {
+        let piece = match self.data_pool.piece(piece_index).await {
             None => return Err(Error::InvalidPiece(*piece_index)),
             Some(piece) => piece,
         };
@@ -225,7 +280,7 @@ impl HttpPeerContext {
                 continue;
             }
 
-            let url = self.create_request_url(metadata, &file.info)?;
+            let url = self.create_request_url(&self.metadata, &file.info)?;
             let request_len = min(piece.length, file.len());
             let range_start = piece.offset.saturating_sub(file.torrent_offset);
             let range_end = range_start.saturating_add(request_len);
@@ -374,7 +429,10 @@ mod tests {
             vec![],
             vec![]
         );
-        let peer = HttpPeer::new(url, torrent.inner.clone()).expect("expected an http peer");
+        let data_pool = torrent.inner.data_pool().await.unwrap();
+        let metadata = torrent.inner.metadata().await.unwrap();
+        let peer = HttpPeer::new(url, torrent.inner.clone(), data_pool, metadata)
+            .expect("expected an http peer");
 
         let result = peer.state().await;
 
@@ -395,8 +453,11 @@ mod tests {
             vec![],
             vec![]
         );
+        let data_pool = torrent.inner.data_pool().await.unwrap();
+        let metadata = torrent.inner.metadata().await.unwrap();
         let total_pieces = torrent.total_pieces().await;
-        let peer = HttpPeer::new(url, torrent.inner.clone()).expect("expected an http peer");
+        let peer = HttpPeer::new(url, torrent.inner.clone(), data_pool, metadata)
+            .expect("expected an http peer");
 
         let result = peer.remote_piece_bitfield().await;
 
@@ -430,10 +491,28 @@ mod tests {
             symlink_path: None,
             sha1: None,
         };
-        let peer = HttpPeer::new(url, torrent.inner.clone()).expect("expected an http peer");
 
-        let result = peer
-            .inner
+        let data_pool = torrent.inner.data_pool().await.unwrap();
+        let metadata = torrent.inner.metadata().await.unwrap();
+        let addr = HttpPeer::resolve_url(&url).unwrap();
+        let context = HttpPeerContext {
+            client: Default::default(),
+            context: PeerContext::builder()
+                .id(PeerId::new())
+                .addr(addr)
+                .state(PeerState::Idle)
+                .connection_type(ConnectionDirection::Outbound)
+                .protocol(ConnectionProtocol::Http)
+                .build(),
+            url,
+            torrent: torrent.inner.clone(),
+            data_pool,
+            metadata: metadata.clone(),
+            callbacks: MultiThreadedCallback::new(),
+            cancellation_token: Default::default(),
+        };
+
+        let result = context
             .create_request_url(&metadata, &file)
             .expect("expected the request url to be created");
 

@@ -1175,6 +1175,7 @@ impl BitTorrentPeerContext {
                             self,
                             extension.name(),
                         );
+                        let start_time = Instant::now();
                         if let Err(e) = extension.on_message(payload.as_ref(), self).await {
                             error!(
                                 "Peer {} failed to process extension {} message, {}",
@@ -1183,6 +1184,18 @@ impl BitTorrentPeerContext {
                                 e
                             );
                         }
+                        let elapsed = start_time.elapsed();
+                        log!(
+                            if elapsed > PEER_TICK_INTERVAL {
+                                Level::Warn
+                            } else {
+                                Level::Trace
+                            },
+                            "Peer {} extension {} on_message took {:.3}ms",
+                            self,
+                            extension.name(),
+                            elapsed.as_secs_f64() * 1000.0
+                        )
                     } else {
                         warn!(
                             "Peer {} received unsupported extension message for extension number {}",
