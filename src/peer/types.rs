@@ -242,7 +242,7 @@ impl Peer {
     pub async fn target_request_queue_len(&self) -> usize {
         match self {
             Peer::BitTorrent(peer) => peer.target_request_queue_len().await,
-            Peer::Http(_) => 100,
+            Peer::Http(peer) => peer.target_request_queue_len().await,
             Peer::Other(peer) => peer.target_request_queue_len().await,
         }
     }

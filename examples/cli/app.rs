@@ -155,7 +155,12 @@ impl App {
                 _ = self.cancellation_token.cancelled() => return Ok(()),
                 _ = time::sleep(RENDER_INTERVAL) => {},
                 event = reader.next().fuse() => self.on_event(event).await,
-                Some(command) = self.app_command_receiver.recv() => self.on_command(command).await,
+                command = self.app_command_receiver.recv() => {
+                    match command {
+                        Some(command) => self.on_command(command).await,
+                        None => return Ok(()),
+                    }
+                },
                 Ok(event) = self.session_event_receiver.recv() => self.on_session_event(&*event).await,
             }
 

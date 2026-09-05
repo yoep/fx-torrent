@@ -447,7 +447,10 @@ impl UtpStreamContext {
                         break;
                     }
                 },
-                Some(command) = command_receiver.recv() => self.on_command(command).await,
+                command = command_receiver.recv() => match command {
+                    Some(command) => self.on_command(command).await,
+                    None => break,
+                },
                 _ = resend_interval.tick() => self.resend_timeout_packets().await,
             }
 

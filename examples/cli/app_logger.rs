@@ -64,6 +64,11 @@ impl AppLogger {
                         level: Level::Info,
                     },
                     Logger {
+                        name: "Peer webseed".to_string(),
+                        target: "fx_torrent::peer::webseed".to_string(),
+                        level: Level::Info,
+                    },
+                    Logger {
                         name: "Piece picker".to_string(),
                         target: "fx_torrent::piece_picker".to_string(),
                         level: Level::Info,

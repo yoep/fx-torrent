@@ -329,16 +329,19 @@ impl FxPiecePicker {
                 continue;
             }
 
+            let request_start_time = Instant::now();
             let blocks = picked_blocks
                 .iter()
                 .map(|block| block.piece_block)
                 .collect_vec();
             peer.request(blocks.as_slice()).await;
+            let elapsed = request_start_time.elapsed();
             debug!(
-                "Piece picker {} requested {} blocks from peer {}",
+                "Piece picker {} requested {} blocks from peer {} in {:.3}ms",
                 self,
                 picked_blocks.len(),
-                peer
+                peer,
+                elapsed.as_secs_f64() * 1000.0
             );
 
             let mut picked_piece_blocks = vec![];
