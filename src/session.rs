@@ -890,11 +890,29 @@ impl FxSessionBuilder {
         self
     }
 
+    /// Enable the default torrent operations to use within the session.
+    pub fn default_operations(&mut self) -> &mut Self {
+        self.operation_factories = Some(Self::default_operations_list());
+        self
+    }
+
     /// Add an operation to the session.
     pub fn operation(&mut self, operation: TorrentOperationFactory) -> &mut Self {
         self.operation_factories
             .get_or_insert(Vec::new())
             .push(operation);
+        self
+    }
+
+    /// Insert the operation at position `index` within the operations.
+    pub fn operation_insert(
+        &mut self,
+        index: usize,
+        operation: TorrentOperationFactory,
+    ) -> &mut Self {
+        self.operation_factories
+            .get_or_insert(Vec::new())
+            .insert(index, operation);
         self
     }
 
@@ -963,24 +981,10 @@ impl FxSessionBuilder {
             .protocol_extensions
             .unwrap_or_else(DEFAULT_TORRENT_PROTOCOL_EXTENSIONS);
         let extensions = std::mem::take(&mut self.extension_factories);
-        let torrent_operations = self.operation_factories.take().unwrap_or_else(|| {
-            // FIXME: this is currently a duplicate list, consolidate with the torrent request operations
-            vec![
-                TorrentOperationFactory::new(|| StatsOperation::new().into()),
-                TorrentOperationFactory::new(|| TrackersOperation::new().into()),
-                #[cfg(feature = "dht")]
-                TorrentOperationFactory::new(|| DhtNodesOperation::new().into()),
-                #[cfg(feature = "dht")]
-                TorrentOperationFactory::new(|| DhtPeersOperation::new().into()),
-                #[cfg(feature = "lsd")]
-                TorrentOperationFactory::new(|| LsdPeersOperation::new().into()),
-                TorrentOperationFactory::new(|| TrackerPeersOperation::new().into()),
-                TorrentOperationFactory::new(|| ConnectPeersOperation::new(true).into()),
-                TorrentOperationFactory::new(|| MetadataOperation::new(None).into()),
-                TorrentOperationFactory::new(|| CreatePiecesAndFilesOperation::new().into()),
-                TorrentOperationFactory::new(|| FileValidationOperation::new().into()),
-            ]
-        });
+        let torrent_operations = self
+            .operation_factories
+            .take()
+            .unwrap_or_else(Self::default_operations_list);
         let storage = self.storage.take().unwrap_or_else(|| {
             Arc::new(|params| {
                 DiskStorage::new(params.info_hash, params.path, params.data_pool).into()
@@ -1014,6 +1018,25 @@ impl FxSessionBuilder {
             session_cache,
             trackers,
         ))
+    }
+
+    fn default_operations_list() -> Vec<TorrentOperationFactory> {
+        // FIXME: this is currently a duplicate list, consolidate with the torrent request operations
+        vec![
+            TorrentOperationFactory::new(|| StatsOperation::new().into()),
+            TorrentOperationFactory::new(|| TrackersOperation::new().into()),
+            #[cfg(feature = "dht")]
+            TorrentOperationFactory::new(|| DhtNodesOperation::new().into()),
+            #[cfg(feature = "dht")]
+            TorrentOperationFactory::new(|| DhtPeersOperation::new().into()),
+            #[cfg(feature = "lsd")]
+            TorrentOperationFactory::new(|| LsdPeersOperation::new().into()),
+            TorrentOperationFactory::new(|| TrackerPeersOperation::new().into()),
+            TorrentOperationFactory::new(|| ConnectPeersOperation::new(true).into()),
+            TorrentOperationFactory::new(|| MetadataOperation::new(None).into()),
+            TorrentOperationFactory::new(|| CreatePiecesAndFilesOperation::new().into()),
+            TorrentOperationFactory::new(|| FileValidationOperation::new().into()),
+        ]
     }
 }
 
@@ -1072,14 +1095,17 @@ impl InnerSession {
         loop {
             select! {
                 _ = self.cancellation_token.cancelled() => break,
-                Some(command) = command_receiver.recv() => self.handle_command(command).await,
+                command = command_receiver.recv() => match command {
+                    Some(command) => self.on_command(command).await,
+                    None => break,
+                },
             }
         }
 
         debug!("Session {} main loop ended", self);
     }
 
-    async fn handle_command(&self, command: SessionCommand) {
+    async fn on_command(&self, command: SessionCommand) {
         match command {
             SessionCommand::StoreMetadata(metadata) => self.add_torrent_metadata(&metadata).await,
         }

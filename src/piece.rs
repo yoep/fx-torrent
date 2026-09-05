@@ -93,25 +93,25 @@ impl Piece {
     /// * `offset` - The beginning offset of the piece within the torrent.
     /// * `length` - The length of the piece bytes.
     pub fn new(hash: InfoHash, index: PieceIndex, offset: usize, length: usize) -> Self {
-        let num_of_parts = (length + PieceBlock::MAX_LEN - 1) / PieceBlock::MAX_LEN;
-        let mut parts = Vec::with_capacity(num_of_parts);
+        let num_of_blocks = (length + PieceBlock::MAX_LEN - 1) / PieceBlock::MAX_LEN;
+        let mut blocks = Vec::with_capacity(num_of_blocks);
         let mut part_offset = 0;
 
         // create the parts of this piece
         // the parts will represent the requests to peers which need to be made to complete this piece
-        for part in 0..num_of_parts {
+        for block in 0..num_of_blocks {
             // calculate the part length.
             // if this part is the last one, it might be smaller
-            let part_end = (part + 1) * PieceBlock::MAX_LEN;
+            let part_end = (block + 1) * PieceBlock::MAX_LEN;
             let part_length = if part_end > length {
-                length - (part * PieceBlock::MAX_LEN)
+                length - (block * PieceBlock::MAX_LEN)
             } else {
                 PieceBlock::MAX_LEN
             };
 
-            parts.push(PieceBlock {
+            blocks.push(PieceBlock {
                 piece: index,
-                block: part,
+                block,
                 begin: part_offset,
                 length: part_length,
             });
@@ -125,7 +125,7 @@ impl Piece {
             offset,
             length,
             priority: PiecePriority::default(),
-            blocks: parts,
+            blocks,
             availability: 0,
         }
     }

@@ -948,7 +948,10 @@ impl BitTorrentPeerContext {
                 _ = self.cancellation_token.cancelled() => break,
                 _ = time::sleep(Duration::from_secs(KEEP_ALIVE_SECONDS)) => self.send_keep_alive().await,
                 Some(event) = self.connection.recv() => self.on_reader_event(event, extensions.as_mut_slice()).await,
-                Some(event) = command_receiver.recv() => self.on_command(event, extensions.as_mut_slice()).await,
+                command = command_receiver.recv() => match command {
+                    Some(command) => self.on_command(command, extensions.as_mut_slice()).await,
+                    None => break,
+                },
                 Ok(event) = torrent_event_receiver.recv() => self.on_torrent_event(&*event).await,
                 _ = interval.tick() => self.on_tick(extensions.as_mut_slice(), PEER_TICK_INTERVAL).await,
             }

@@ -1491,12 +1491,9 @@ impl TrackerContext {
             select! {
                 _ = self.cancellation_token.cancelled() => break,
                 Some(message) = self.receiver.recv() => self.on_message_received(message, &mut observer, &mut traversal).await,
-                command = command_receiver.recv() => {
-                    if let Some(command) = command {
-                        self.handle_command(command, &mut traversal).await
-                    } else {
-                        break;
-                    }
+                command = command_receiver.recv() => match command {
+                    Some(command) => self.handle_command(command, &mut traversal).await,
+                    None => break,
                 },
                 _ = refresh_interval.tick() => self.refresh_routing_table().await,
                 _ = bootstrap_interval.tick() => self.bootstrap(&mut traversal).await,
