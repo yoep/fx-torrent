@@ -17,7 +17,7 @@ use log::{debug, trace};
 use percent_encoding::{percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use reqwest::redirect::Policy;
 use reqwest::Client;
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -165,6 +165,7 @@ struct HttpPeerContext {
     data_pool: DataPool,
     metadata: TorrentMetadata,
     desired_queue_len: usize,
+    min_desired_queue_len: usize,
     requested_queue_len: usize,
     pending_requests: JoinSet<RequestTask>,
     callbacks: MultiThreadedCallback<PeerEvent>,
@@ -203,6 +204,7 @@ impl HttpPeerContext {
             data_pool,
             metadata,
             desired_queue_len,
+            min_desired_queue_len: desired_queue_len,
             requested_queue_len: 0,
             pending_requests: Default::default(),
             callbacks: MultiThreadedCallback::new(),
@@ -276,6 +278,16 @@ impl HttpPeerContext {
             }
         }
 
+        // recalculate the desired queue length for this peer
+        let download_rate = self.context.metrics().bytes_in_useful.rate();
+        let target_queue_len = max(
+            (Duration::from_secs(3).as_secs() * download_rate as u64) as usize
+                / PieceBlock::MAX_LEN,
+            self.min_desired_queue_len,
+        );
+        self.desired_queue_len = target_queue_len;
+
+        // update the peer state if all pending requests have been completed
         if self.pending_requests.is_empty() {
             self.update_state(PeerState::Idle).await;
         }
@@ -294,6 +306,7 @@ impl HttpPeerContext {
             .as_ref()
             .map(|e| Self::calculate_desired_queue_len(e.piece_length as usize))
             .unwrap_or(DEFAULT_DESIRED_QUEUE_LEN);
+        self.min_desired_queue_len = self.desired_queue_len;
         self.inform_piece_availability().await;
     }
 
@@ -407,7 +420,7 @@ impl HttpPeerContext {
             None => return Err(Error::InvalidPiece(piece_index)),
             Some(piece) => piece,
         };
-        let mut file_index = torrent
+        let mut file_index = data_pool
             .file_index_for(&piece_index)
             .await
             .ok_or(Error::InvalidPiece(piece_index))?;
@@ -417,7 +430,7 @@ impl HttpPeerContext {
         let mut buffer = vec![0u8; len];
 
         while cursor < len {
-            let file = torrent
+            let file = data_pool
                 .file(&file_index)
                 .await
                 .ok_or(Error::InvalidPiece(piece_index))?;
