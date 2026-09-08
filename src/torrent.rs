@@ -2714,7 +2714,9 @@ impl TorrentContext {
         } else {
             trace!("Torrent {} piece {} validation failed", self, piece_index);
             self.piece_picker.set_failed(piece_index);
-            self.metrics.wasted.inc_by(piece.length as u64);
+            if self.state != TorrentState::CheckingFiles {
+                self.metrics.wasted.inc_by(piece.length as u64);
+            }
         }
     }
 
