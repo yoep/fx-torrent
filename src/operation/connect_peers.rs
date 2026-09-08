@@ -9,7 +9,7 @@ use crate::{Result, TorrentCommand, TorrentContext, TorrentError, TorrentMetadat
 use futures::FutureExt;
 use itertools::Itertools;
 use log::{debug, trace, warn};
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io;
 use std::net::SocketAddr;
@@ -25,10 +25,10 @@ const HOLEPUNCH_TIMEOUT: Duration = Duration::from_secs(6);
 /// Establishes additional peer connections for the torrent.
 pub struct ConnectPeersOperation {
     initialized: bool,
-    /// Indicates whether webseed connections are enabled for the torrent
+    /// Indicates whether webseed connections are enabled for the torrent.
     webseeds_enabled: bool,
-    /// The webseed urls to connect to
-    webseed_urls: VecDeque<Url>,
+    /// The available torrent webseeds.
+    webseeds: HashMap<SocketAddr, Vec<Url>>,
     /// The maximum amount of in-flight peer connections being established
     max_in_flight: usize,
     /// Indicates the time since the operation started bursting the initial connections
@@ -51,7 +51,7 @@ impl ConnectPeersOperation {
         Self {
             initialized: false,
             webseeds_enabled,
-            webseed_urls: VecDeque::new(),
+            webseeds: Default::default(),
             max_in_flight: 0,
             bursting_since: None,
             in_flight: Default::default(),
@@ -125,30 +125,22 @@ impl ConnectPeersOperation {
 
     /// Create the webseed url cache from the torrent context.
     fn create_webseed_urls(&mut self, torrent: &TorrentContext) {
-        let mut urls: VecDeque<_> = torrent
-            .metadata()
-            .url_list
-            .as_ref()
-            .map(|list| {
-                list.iter()
-                    .flat_map(|url| Self::parse_url(torrent, url))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let metadata = torrent.metadata();
 
-        let mut http_seeds = torrent
-            .metadata()
-            .http_seeds
-            .as_ref()
-            .map(|e| {
-                e.iter()
-                    .flat_map(|url| Self::parse_url(torrent, url))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let url_iter = metadata.url_list.iter().flatten();
+        let http_seed_iter = metadata.http_seeds.iter().flatten();
 
-        urls.append(&mut http_seeds);
-        self.webseed_urls = urls;
+        self.webseeds = url_iter
+            .chain(http_seed_iter)
+            .flat_map(|url| Self::parse_url(torrent, url))
+            .filter_map(|url| match Self::resolve_url(&url) {
+                Ok(addr) => Some((addr, url)),
+                Err(e) => {
+                    debug!("Torrent {} failed to resolve webseed url, {}", torrent, e);
+                    None
+                }
+            })
+            .into_group_map();
     }
 
     /// Update the available in-flight permits from the latest torrent config.
@@ -245,32 +237,41 @@ impl ConnectPeersOperation {
     }
 
     fn create_webseed_peers(&mut self, wanted_connections: &mut usize, context: &TorrentContext) {
-        let available_permits = self.max_in_flight.saturating_sub(self.in_flight.len());
-        let new_connections_len = (*wanted_connections).min(available_permits);
-        let len = new_connections_len.min(self.webseed_urls.len());
-        let webseed_urls = self.webseed_urls.drain(0..len).collect_vec();
-        if webseed_urls.is_empty() {
+        if self.webseeds.is_empty() {
             return;
         }
 
-        // update the wanted connections
-        let picked_webseed_urls = webseed_urls.len().min(new_connections_len);
-        *wanted_connections = wanted_connections.saturating_sub(picked_webseed_urls);
+        let available_permits = self.max_in_flight.saturating_sub(self.in_flight.len());
+        let new_connections_len = (*wanted_connections).min(available_permits);
+        let len = new_connections_len.min(self.webseeds.len());
 
-        for url in webseed_urls {
-            let torrent = InnerTorrent::new(
-                context.handle(),
-                context.command_sender().clone(),
-                context.callbacks().clone(),
-            );
-            let data_pool = context.data_pool().clone();
-            let metadata = context.metadata().clone();
-            let sender = context.command_sender().clone();
-            if let Err(e) = self.create_http_peer(torrent, data_pool, metadata, sender, url) {
-                warn!(
-                    "Torrent {} failed to create webseed peer connection, {}",
-                    context, e
+        // update the wanted connections
+        *wanted_connections = wanted_connections.saturating_sub(len);
+
+        let mut picked_webseeds = 0;
+        while let Some(addr) = self.webseeds.keys().next().copied() {
+            if picked_webseeds >= len {
+                break;
+            }
+
+            picked_webseeds += 1;
+            if let Some((addr, urls)) = self.webseeds.remove_entry(&addr) {
+                let torrent = InnerTorrent::new(
+                    context.handle(),
+                    context.command_sender().clone(),
+                    context.callbacks().clone(),
                 );
+                let data_pool = context.data_pool().clone();
+                let metadata = context.metadata().clone();
+                let sender = context.command_sender().clone();
+                if let Err(e) =
+                    self.create_http_peer(addr, urls, torrent, data_pool, metadata, sender)
+                {
+                    warn!(
+                        "Torrent {} failed to create webseed peer connection, {}",
+                        context, e
+                    );
+                }
             }
         }
     }
@@ -383,20 +384,23 @@ impl ConnectPeersOperation {
     /// Try to create a new HTTP (webseed) peer.
     fn create_http_peer(
         &mut self,
+        addr: SocketAddr,
+        urls: Vec<Url>,
         torrent: InnerTorrent,
         data_pool: DataPool,
         metadata: TorrentMetadata,
         sender: ChannelSender<TorrentCommand>,
-        url: Url,
     ) -> Result<()> {
         let handle_info = torrent.handle();
 
         self.in_flight.spawn(async move {
-            debug!(
-                "Torrent {} is trying to create webseed peer connection to {}",
-                handle_info, url
+            trace!(
+                "Torrent {} is creating webseed connection {} for {:?}",
+                handle_info,
+                addr,
+                urls
             );
-            match HttpPeer::new(url, torrent, data_pool, metadata) {
+            match HttpPeer::new(addr, urls, torrent, data_pool, metadata).await {
                 Ok(peer) => {
                     sender
                         .fire_and_forget(TorrentCommand::PeerConnected { peer: peer.into() })
@@ -474,13 +478,27 @@ impl ConnectPeersOperation {
             })
             .ok()
     }
+
+    fn resolve_url(url: &Url) -> Result<SocketAddr> {
+        url.socket_addrs(|| match url.scheme() {
+            "http" => Some(80),
+            "https" => Some(443),
+            _ => None,
+        })
+        .unwrap_or(Vec::new())
+        .pop()
+        .ok_or(TorrentError::Io(io::Error::new(
+            io::ErrorKind::HostUnreachable,
+            format!("unable to resolve {}", url),
+        )))
+    }
 }
 
 impl Debug for ConnectPeersOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TorrentConnectPeersOperation")
             .field("webseeds_enabled", &self.webseeds_enabled)
-            .field("webseed_urls", &self.webseed_urls)
+            .field("webseed_urls", &self.webseeds)
             .field("max_in_flight", &self.max_in_flight)
             .field("bursting_since", &self.bursting_since)
             .finish()
@@ -728,10 +746,7 @@ mod tests {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
-            let expected_result: VecDeque<Url> =
-                vec![Url::parse("https://archive.org/download/").unwrap()]
-                    .into_iter()
-                    .collect();
+            let expected_url = Url::parse("https://archive.org/download/").unwrap();
             let uri = "magnet:?xt=urn:btih:EADAF0EFEA39406914414D359E0EA16416409BD7&dn=debian-12.4.0-amd64-DVD-1.iso&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Ftracker.bittor.pw%3A1337%2Fannounce&tr=udp%3A%2F%2Fpublic.popcorn-tracker.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fannounce&ws=https%3A%2F%2Farchive.org%2Fdownload%2F";
             let (context, _) = torrent_context!(
                 uri,
@@ -746,7 +761,8 @@ mod tests {
 
             operation.create_webseed_urls(&context);
 
-            assert_eq!(&expected_result, &operation.webseed_urls);
+            assert_eq!(1, operation.webseeds.len());
+            assert_eq!(expected_url, operation.webseeds.values().next().unwrap()[0]);
         }
 
         #[tokio::test]
@@ -767,9 +783,15 @@ mod tests {
             let mut operation = ConnectPeersOperation::new(true);
 
             // set the webseed urls
-            operation.webseed_urls = vec![
-                Url::parse("https://test-url-1.com/").unwrap(),
-                Url::parse("https://test-url-2.com/").unwrap(),
+            operation.webseeds = vec![
+                (
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, 80)),
+                    vec![Url::parse("https://test-url-1.com/").unwrap()],
+                ),
+                (
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, 443)),
+                    vec![Url::parse("https://test-url-2.com/").unwrap()],
+                ),
             ]
             .into_iter()
             .collect();
@@ -786,7 +808,7 @@ mod tests {
             );
             assert_eq!(
                 0,
-                operation.webseed_urls.len(),
+                operation.webseeds.len(),
                 "expected the webseed urls to be consumed"
             );
         }

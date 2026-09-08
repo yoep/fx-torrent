@@ -48,20 +48,23 @@ pub struct HttpPeer {
 
 impl HttpPeer {
     /// Create a new HTTP/webseed peer instance.
-    pub fn new(
-        url: Url,
+    pub async fn new(
+        addr: SocketAddr,
+        urls: Vec<Url>,
         torrent: InnerTorrent,
         data_pool: DataPool,
         metadata: TorrentMetadata,
     ) -> Result<Self> {
         let (sender, receiver) = channel!(512);
         let event_receiver = torrent.subscribe();
-        let addr = Self::resolve_url(&url)?;
-        let mut context = HttpPeerContext::new(url, addr, torrent, data_pool, metadata)?;
+        let mut context = HttpPeerContext::new(addr, urls, torrent, data_pool, metadata)?;
         let peer_context = context.context.clone();
         let callbacks = context.callbacks.clone();
         let cancellation_token = context.cancellation_token.clone();
 
+        // verify the provided urls
+        context.verify_urls().await?;
+        // run the context on a separate task
         spawn!("HttpPeerContext::run", async move {
             context.run(receiver, event_receiver).await
         });
@@ -125,21 +128,6 @@ impl HttpPeer {
     pub fn close(&self) {
         self.cancellation_token.cancel();
     }
-
-    /// Resolve the given url to a usable socket address.
-    fn resolve_url(url: &Url) -> Result<SocketAddr> {
-        url.socket_addrs(|| match url.scheme() {
-            "http" => Some(80),
-            "https" => Some(443),
-            _ => None,
-        })
-        .unwrap_or(Vec::new())
-        .pop()
-        .ok_or(Error::Io(io::Error::new(
-            io::ErrorKind::HostUnreachable,
-            "unable to resolve url",
-        )))
-    }
 }
 
 impl Callback<PeerEvent> for HttpPeer {
@@ -160,7 +148,7 @@ enum HttpPeerCommand {
 struct HttpPeerContext {
     client: Client,
     context: PeerContext,
-    url: Url,
+    urls: Vec<HttpUrl>,
     torrent: InnerTorrent,
     data_pool: DataPool,
     metadata: TorrentMetadata,
@@ -174,8 +162,8 @@ struct HttpPeerContext {
 
 impl HttpPeerContext {
     fn new(
-        url: Url,
         addr: SocketAddr,
+        urls: Vec<Url>,
         torrent: InnerTorrent,
         data_pool: DataPool,
         metadata: TorrentMetadata,
@@ -199,7 +187,7 @@ impl HttpPeerContext {
                 .connection_type(ConnectionDirection::Outbound)
                 .protocol(ConnectionProtocol::Http)
                 .build(),
-            url,
+            urls: urls.into_iter().map(HttpUrl::from).collect(),
             torrent,
             data_pool,
             metadata,
@@ -271,11 +259,8 @@ impl HttpPeerContext {
                 "Peer {} failed to request piece {} blocks, {}",
                 self, task.piece_index, err
             );
-            for block in task.blocks {
-                self.torrent
-                    .piece_block_rejected(self.context.addr(), &block)
-                    .await;
-            }
+            Self::reject_blocks(self.context.addr(), &task.blocks, &self.torrent).await;
+            self.failure(&task.url);
         }
 
         // recalculate the desired queue length for this peer
@@ -290,6 +275,64 @@ impl HttpPeerContext {
         // update the peer state if all pending requests have been completed
         if self.pending_requests.is_empty() {
             self.update_state(PeerState::Idle).await;
+        }
+    }
+
+    async fn reject_blocks(addr: &SocketAddr, blocks: &[PieceBlock], torrent: &InnerTorrent) {
+        for block in blocks {
+            torrent.piece_block_rejected(addr, &block).await;
+        }
+    }
+
+    /// Verifies the availability of all configured URLs by issuing HTTP HEAD requests.
+    ///
+    /// Iterates through the configured URL pool and marks any URL as disabled if the
+    /// probe fails or returns a non-2xx status code (4xx client errors or 5xx server errors).
+    async fn verify_urls(&mut self) -> Result<()> {
+        for url in &mut self.urls {
+            match self.client.head(url.url.clone()).send().await {
+                Ok(response) => {
+                    if response.status().is_client_error() || response.status().is_server_error() {
+                        trace!(
+                            "Peer {} received status {} for \"{}\"",
+                            self.context,
+                            response.status(),
+                            url.url
+                        );
+                        url.disabled = true;
+                    }
+                }
+                Err(e) => {
+                    trace!(
+                        "Peer {} disabled \"{}\", reason: {}",
+                        self.context,
+                        url.url,
+                        e
+                    );
+                    url.disabled = true;
+                }
+            }
+        }
+
+        if self.urls.iter().all(|e| e.disabled) {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "no available URLs",
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Register a failure for the given url.
+    fn failure(&mut self, url: &Url) {
+        if let Some(url) = self.urls.iter_mut().find(|e| &e.url == url) {
+            url.failures += 1;
+
+            if url.failures >= 2 {
+                url.disabled = true;
+                trace!("Peer {} disabled url {}", self.context, url.url);
+            }
         }
     }
 
@@ -326,15 +369,21 @@ impl HttpPeerContext {
 
         self.update_state(PeerState::Downloading).await;
         for (piece, blocks) in requests {
-            self.request_piece(piece, blocks.clone());
+            self.request_piece(piece, blocks.clone()).await;
         }
     }
 
     /// Try to request the given piece.
     /// It returns an error if the piece couldn't be requested from the webseed.
-    fn request_piece(&mut self, piece_index: PieceIndex, blocks: Vec<PieceBlock>) {
+    async fn request_piece(&mut self, piece_index: PieceIndex, blocks: Vec<PieceBlock>) {
         let client = self.client.clone();
-        let url = self.url.clone();
+        let url = match self.url() {
+            Some(url) => url,
+            None => {
+                Self::reject_blocks(self.context.addr(), &blocks, &self.torrent).await;
+                return;
+            }
+        };
         let context = self.context.clone();
         let torrent = self.torrent.clone();
         let data_pool = self.data_pool.clone();
@@ -342,7 +391,7 @@ impl HttpPeerContext {
         self.pending_requests.spawn(async move {
             let err = Self::execute_request(
                 client,
-                url,
+                url.clone(),
                 piece_index,
                 &blocks,
                 context,
@@ -353,11 +402,19 @@ impl HttpPeerContext {
             .await
             .err();
             RequestTask {
+                url,
                 piece_index,
                 blocks,
                 err,
             }
         });
+    }
+
+    fn url(&self) -> Option<Url> {
+        self.urls
+            .iter()
+            .find(|e| !e.disabled)
+            .map(|e| e.url.clone())
     }
 
     async fn update_state(&self, new_state: PeerState) {
@@ -535,7 +592,25 @@ impl HttpPeerContext {
 }
 
 #[derive(Debug)]
+struct HttpUrl {
+    url: Url,
+    failures: usize,
+    disabled: bool,
+}
+
+impl From<Url> for HttpUrl {
+    fn from(url: Url) -> Self {
+        Self {
+            url,
+            failures: 0,
+            disabled: false,
+        }
+    }
+}
+
+#[derive(Debug)]
 struct RequestTask {
+    url: Url,
     piece_index: PieceIndex,
     blocks: Vec<PieceBlock>,
     err: Option<Error>,
@@ -552,7 +627,8 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let url = Url::parse("https://mirror.com/pub/").unwrap();
+        let url = Url::parse("https://cdimage.debian.org/cdimage/release/13.6.0/amd64/iso-cd/debian-13.6.0-amd64-netinst.iso").unwrap();
+        let addr = resolve_url(&url);
         let torrent = torrent!(
             "debian.torrent",
             temp_path,
@@ -563,7 +639,8 @@ mod tests {
         );
         let data_pool = torrent.inner.data_pool().await.unwrap();
         let metadata = torrent.inner.metadata().await.unwrap();
-        let peer = HttpPeer::new(url, torrent.inner.clone(), data_pool, metadata)
+        let peer = HttpPeer::new(addr, vec![url], torrent.inner.clone(), data_pool, metadata)
+            .await
             .expect("expected an http peer");
 
         let result = peer.state().await;
@@ -576,7 +653,8 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let url = Url::parse("https://mirror.com/pub/").unwrap();
+        let url = Url::parse("https://cdimage.debian.org/cdimage/release/13.6.0/amd64/iso-cd/debian-13.6.0-amd64-netinst.iso").unwrap();
+        let addr = resolve_url(&url);
         let torrent = torrent!(
             "debian.torrent",
             temp_path,
@@ -588,7 +666,8 @@ mod tests {
         let data_pool = torrent.inner.data_pool().await.unwrap();
         let metadata = torrent.inner.metadata().await.unwrap();
         let total_pieces = torrent.total_pieces().await;
-        let peer = HttpPeer::new(url, torrent.inner.clone(), data_pool, metadata)
+        let peer = HttpPeer::new(addr, vec![url], torrent.inner.clone(), data_pool, metadata)
+            .await
             .expect("expected an http peer");
 
         let result = peer.remote_piece_bitfield().await;
@@ -601,7 +680,8 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let url = Url::parse("https://mirror.com/pub/").unwrap();
+        let url = Url::parse("https://cdimage.debian.org/cdimage/release/13.6.0/amd64/iso-cd/debian-13.6.0-amd64-netinst.iso").unwrap();
+        let addr = resolve_url(&url);
         let torrent = torrent!(
             "debian.torrent",
             temp_path,
@@ -618,7 +698,8 @@ mod tests {
             .map(|e| e.piece_length as usize)
             .unwrap();
         let expected_result = (piece_len + PieceBlock::MAX_LEN - 1) / PieceBlock::MAX_LEN;
-        let peer = HttpPeer::new(url, torrent.inner.clone(), data_pool, metadata)
+        let peer = HttpPeer::new(addr, vec![url], torrent.inner.clone(), data_pool, metadata)
+            .await
             .expect("expected an http peer");
 
         let result = peer.target_request_queue_len().await;
@@ -632,6 +713,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let url = Url::parse("https://mirror.com/pub/").unwrap();
+        let addr = resolve_url(&url);
         let expected_result =
             Url::parse("https://mirror.com/pub/debian-11.6.0-amd64-netinst.iso/README%25201.md")
                 .unwrap();
@@ -643,7 +725,6 @@ mod tests {
             vec![],
             vec![]
         );
-        let metadata = torrent.metadata().await.unwrap();
         let file = TorrentFileInfo {
             length: 0,
             path: Some(vec!["README 1.md".to_string()]),
@@ -656,18 +737,18 @@ mod tests {
 
         let data_pool = torrent.inner.data_pool().await.unwrap();
         let metadata = torrent.inner.metadata().await.unwrap();
-        let addr = HttpPeer::resolve_url(&url).unwrap();
         let context = HttpPeerContext::new(
-            url,
             addr,
+            vec![url],
             torrent.inner.clone(),
             data_pool,
             metadata.clone(),
         )
         .unwrap();
 
-        let result = HttpPeerContext::create_multi_file_request_url(&context.url, &metadata, &file)
-            .expect("expected the request url to be created");
+        let result =
+            HttpPeerContext::create_multi_file_request_url(&context.urls[0].url, &metadata, &file)
+                .expect("expected the request url to be created");
 
         assert_eq!(expected_result, result);
     }
@@ -697,5 +778,16 @@ mod tests {
         let result = HttpPeerContext::create_filepath(&metadata, &file)
             .expect("expected a filepath to have been returned");
         assert_eq!(expected_result, result);
+    }
+
+    fn resolve_url(url: &Url) -> SocketAddr {
+        url.socket_addrs(|| match url.scheme() {
+            "http" => Some(80),
+            "https" => Some(443),
+            _ => None,
+        })
+        .unwrap()
+        .pop()
+        .unwrap()
     }
 }
