@@ -619,29 +619,27 @@ struct RequestTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::operation::CreatePiecesAndFilesOperation;
+    use crate::tests::helpers::wait_for_torrent_pieces;
     use crate::tests::read_test_file_to_bytes;
+    use crate::Torrent;
     use tempfile::tempdir;
+    use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn test_state() {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
-        let url = Url::parse("https://cdimage.debian.org/cdimage/release/13.6.0/amd64/iso-cd/debian-13.6.0-amd64-netinst.iso").unwrap();
-        let addr = resolve_url(&url);
         let torrent = torrent!(
-            "debian.torrent",
+            "debian-http.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
             vec![]
         );
-        let data_pool = torrent.inner.data_pool().await.unwrap();
-        let metadata = torrent.inner.metadata().await.unwrap();
-        let peer = HttpPeer::new(addr, vec![url], torrent.inner.clone(), data_pool, metadata)
-            .await
-            .expect("expected an http peer");
+        let peer = create_webseed_peer(&torrent).await;
 
         let result = peer.state().await;
 
@@ -656,22 +654,18 @@ mod tests {
         let url = Url::parse("https://cdimage.debian.org/cdimage/release/13.6.0/amd64/iso-cd/debian-13.6.0-amd64-netinst.iso").unwrap();
         let addr = resolve_url(&url);
         let torrent = torrent!(
-            "debian.torrent",
+            "debian-http.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![],
             vec![]
         );
-        let data_pool = torrent.inner.data_pool().await.unwrap();
-        let metadata = torrent.inner.metadata().await.unwrap();
-        let total_pieces = torrent.total_pieces().await;
-        let peer = HttpPeer::new(addr, vec![url], torrent.inner.clone(), data_pool, metadata)
-            .await
-            .expect("expected an http peer");
+        let peer = create_webseed_peer(&torrent).await;
 
         let result = peer.remote_piece_bitfield().await;
 
+        let total_pieces = torrent.total_pieces().await;
         assert_eq!(BitVec::repeat(true, total_pieces), result);
     }
 
@@ -690,7 +684,6 @@ mod tests {
             vec![],
             vec![]
         );
-        let data_pool = torrent.inner.data_pool().await.unwrap();
         let metadata = torrent.inner.metadata().await.unwrap();
         let piece_len = metadata
             .info
@@ -698,13 +691,56 @@ mod tests {
             .map(|e| e.piece_length as usize)
             .unwrap();
         let expected_result = (piece_len + PieceBlock::MAX_LEN - 1) / PieceBlock::MAX_LEN;
-        let peer = HttpPeer::new(addr, vec![url], torrent.inner.clone(), data_pool, metadata)
-            .await
-            .expect("expected an http peer");
+        let peer = create_webseed_peer(&torrent).await;
 
         let result = peer.target_request_queue_len().await;
 
         assert_eq!(expected_result, result);
+    }
+
+    #[tokio::test]
+    async fn test_request() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let (tx_event, mut rx_event) = oneshot::channel();
+        let url = Url::parse("https://cdimage.debian.org/cdimage/release/13.6.0/amd64/iso-cd/debian-13.6.0-amd64-netinst.iso").unwrap();
+        let addr = resolve_url(&url);
+        let torrent = torrent!(
+            "debian-http.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![CreatePiecesAndFilesOperation::new().into()],
+            vec![]
+        );
+        let data_pool = torrent.inner.data_pool().await.unwrap();
+        let peer = create_webseed_peer(&torrent).await;
+
+        // add the peer to the torrent
+        torrent.inner.peer_connected(peer.clone().into()).await;
+
+        // wait for the pieces to be created
+        wait_for_torrent_pieces(&torrent).await;
+
+        // subscribe to the torrent events
+        let mut events = torrent.subscribe();
+        tokio::spawn(async move {
+            while let Ok(event) = events.recv().await {
+                if let TorrentEvent::PieceCompleted(piece) = &*event {
+                    tx_event.send(*piece).unwrap();
+                    break;
+                }
+            }
+        });
+
+        // request the first piece from the webseed
+        let piece = data_pool.piece(&0).await.unwrap();
+        peer.request(&piece.blocks).await;
+
+        // wait for the first piece to complete
+        let result = timeout!(Duration::from_millis(1500), &mut rx_event).unwrap();
+        assert_eq!(0, result, "expected the completed piece to match");
     }
 
     #[tokio::test]
@@ -778,6 +814,30 @@ mod tests {
         let result = HttpPeerContext::create_filepath(&metadata, &file)
             .expect("expected a filepath to have been returned");
         assert_eq!(expected_result, result);
+    }
+
+    async fn create_webseed_peer(torrent: &Torrent) -> HttpPeer {
+        let metadata = torrent.metadata().await.unwrap();
+        let urls = metadata
+            .url_list
+            .as_ref()
+            .map(|urls| {
+                urls.into_iter()
+                    .filter_map(|url| Url::parse(&url).ok())
+                    .collect_vec()
+            })
+            .unwrap();
+        let addr = resolve_url(urls.get(0).unwrap());
+
+        HttpPeer::new(
+            addr,
+            urls,
+            torrent.inner.clone(),
+            torrent.inner.data_pool().await.unwrap(),
+            metadata,
+        )
+        .await
+        .expect("expected a webseed peer")
     }
 
     fn resolve_url(url: &Url) -> SocketAddr {
