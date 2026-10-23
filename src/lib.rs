@@ -447,6 +447,7 @@ pub mod peer;
 mod peer_pool;
 mod piece;
 pub mod piece_picker;
+mod serde;
 mod session;
 mod session_cache;
 pub mod storage;

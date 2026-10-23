@@ -325,7 +325,7 @@ pub struct GetPeersRequest {
     #[serde(
         default,
         skip_serializing_if = "std::ops::Not::not",
-        with = "serde_int_bool"
+        with = "crate::serde::int_bool"
     )]
     pub no_seed: bool,
     /// BEP33 - The responding node has database entries for that info hash,
@@ -333,7 +333,7 @@ pub struct GetPeersRequest {
     #[serde(
         default,
         skip_serializing_if = "std::ops::Not::not",
-        with = "serde_int_bool"
+        with = "crate::serde::int_bool"
     )]
     pub scrape: bool,
     #[serde(default, skip_serializing_if = "WantFamily::is_none")]
@@ -368,7 +368,7 @@ pub struct GetPeersResponse {
 pub struct AnnouncePeerRequest {
     pub id: NodeId,
     /// Indicates if the `port` field should be ignored and the source port of the packet should be used instead.
-    #[serde(with = "serde_int_bool")]
+    #[serde(with = "crate::serde::int_bool")]
     pub implied_port: bool,
     pub info_hash: InfoHash,
     pub port: u16,
@@ -380,7 +380,7 @@ pub struct AnnouncePeerRequest {
     #[serde(
         default,
         skip_serializing_if = "std::ops::Not::not",
-        with = "serde_int_bool"
+        with = "crate::serde::int_bool"
     )]
     pub seed: bool,
 }
@@ -407,7 +407,7 @@ pub struct SampleInfoHashesResponse {
     /// The number of info hashes in storage
     pub num: u32,
     /// The subset of stored info hashes as 20 byte string
-    #[serde(with = "serde_info_hash")]
+    #[serde(with = "crate::serde::info_hash")]
     pub samples: Vec<InfoHash>,
 }
 
@@ -944,7 +944,7 @@ pub struct Message {
     #[serde(
         default,
         rename = "ro",
-        with = "serde_int_bool",
+        with = "crate::serde::int_bool",
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub read_only: bool,
@@ -1068,120 +1068,6 @@ where
     E: de::Error,
 {
     bencode::from_value(value).map_err(E::custom)
-}
-
-mod serde_info_hash {
-    use super::*;
-    use itertools::Itertools;
-    use serde::de::Visitor;
-
-    pub fn serialize<S>(value: &Vec<InfoHash>, serializer: S) -> result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let bytes = value
-            .iter()
-            .map(|e| e.short_info_hash_bytes().to_vec())
-            .concat();
-        serializer.serialize_bytes(&bytes)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> result::Result<Vec<InfoHash>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct InfoHashVisitor;
-        impl<'de> Visitor<'de> for InfoHashVisitor {
-            type Value = Vec<InfoHash>;
-
-            fn expecting(&self, f: &mut Formatter) -> std::fmt::Result {
-                write!(f, "expected a sequence of info hash bytes")
-            }
-
-            fn visit_bytes<E>(self, bytes: &[u8]) -> result::Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                let n = bytes.len() / 20;
-                let mut info_hashes = Vec::with_capacity(n);
-                for chunk in bytes.chunks(20) {
-                    info_hashes.push(InfoHash::try_from_bytes(chunk).map_err(de::Error::custom)?);
-                }
-                Ok(info_hashes)
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> result::Result<Self::Value, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
-                let mut info_hashes = Vec::new();
-                while let Some(e) = seq.next_element::<InfoHash>()? {
-                    info_hashes.push(e);
-                }
-                Ok(info_hashes)
-            }
-        }
-
-        D::deserialize_any(deserializer, InfoHashVisitor {})
-    }
-}
-
-/// Serialize a boolean as an integer (0 or 1).
-mod serde_int_bool {
-    use super::*;
-    use serde::de::Visitor;
-
-    pub fn serialize<S>(value: &bool, serializer: S) -> result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_i64(i64::from(*value))
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> result::Result<bool, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct BoolVisitor;
-        impl<'de> Visitor<'de> for BoolVisitor {
-            type Value = bool;
-
-            fn expecting(&self, f: &mut Formatter) -> std::fmt::Result {
-                write!(f, "expected an integer representing a boolean value")
-            }
-
-            fn visit_bool<E>(self, v: bool) -> result::Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(v)
-            }
-
-            fn visit_i64<E>(self, v: i64) -> result::Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                match v {
-                    0 => Ok(false),
-                    1 => Ok(true),
-                    _ => Err(de::Error::custom("invalid boolean value")),
-                }
-            }
-
-            fn visit_u64<E>(self, v: u64) -> result::Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                match v {
-                    0 => Ok(false),
-                    1 => Ok(true),
-                    _ => Err(de::Error::custom("invalid boolean value")),
-                }
-            }
-        }
-
-        deserializer.deserialize_any(BoolVisitor {})
-    }
 }
 
 #[cfg(test)]
