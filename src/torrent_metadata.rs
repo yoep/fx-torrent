@@ -343,8 +343,12 @@ pub struct TorrentMetadataInfo {
     )]
     pub name_utf8: Option<String>,
     /// Flag indicating if the torrent is private, see BEP27.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub private: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        with = "crate::serde::int_bool"
+    )]
+    pub private: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// An integer value, set to 2 to indicate compatibility with the current revision of BEP52.
@@ -361,6 +365,11 @@ pub struct TorrentMetadataInfo {
 }
 
 impl TorrentMetadataInfo {
+    /// Create a new builder instance for the metadata info of the torrent.
+    pub fn builder() -> TorrentMetadataInfoBuilder {
+        TorrentMetadataInfoBuilder::builder()
+    }
+
     /// Get the name of the torrent.
     ///
     /// # Returns
@@ -483,7 +492,7 @@ pub struct TorrentMetadataInfoBuilder {
     piece_length: Option<u64>,
     name: Option<String>,
     name_utf8: Option<String>,
-    private: Option<i64>,
+    private: Option<bool>,
     source: Option<String>,
     files: Option<TorrentFiles>,
 }
@@ -493,56 +502,59 @@ impl TorrentMetadataInfoBuilder {
         TorrentMetadataInfoBuilder::default()
     }
 
-    pub fn pieces(mut self, pieces: Vec<u8>) -> Self {
+    pub fn pieces(&mut self, pieces: Vec<u8>) -> &mut Self {
         self.pieces = Some(pieces);
         self
     }
 
-    pub fn piece_length(mut self, piece_length: u64) -> Self {
+    pub fn piece_length(&mut self, piece_length: u64) -> &mut Self {
         self.piece_length = Some(piece_length);
         self
     }
 
-    pub fn name(mut self, name: String) -> Self {
+    pub fn name(&mut self, name: String) -> &mut Self {
         self.name = Some(name);
         self
     }
 
-    pub fn name_utf8(mut self, name_utf8: String) -> Self {
+    pub fn name_utf8(&mut self, name_utf8: String) -> &mut Self {
         self.name_utf8 = Some(name_utf8);
         self
     }
 
-    pub fn private(mut self, private: i64) -> Self {
+    /// Set if the torrent is private (see BEP27).
+    pub fn private(&mut self, private: bool) -> &mut Self {
         self.private = Some(private);
         self
     }
 
-    pub fn source(mut self, source: String) -> Self {
+    pub fn source(&mut self, source: String) -> &mut Self {
         self.source = Some(source);
         self
     }
 
-    pub fn files(mut self, files: TorrentFiles) -> Self {
+    pub fn files(&mut self, files: TorrentFiles) -> &mut Self {
         self.files = Some(files);
         self
     }
 
-    pub fn build(self) -> Result<TorrentMetadataInfo> {
-        let name = self.name.ok_or(TorrentError::InvalidMetadata(
+    pub fn build(&mut self) -> Result<TorrentMetadataInfo> {
+        let name = self.name.take().ok_or(TorrentError::InvalidMetadata(
             "name must be set".to_string(),
         ))?;
-        let files = self.files.ok_or(TorrentError::InvalidMetadata(
+        let files = self.files.take().ok_or(TorrentError::InvalidMetadata(
             "files must be set".to_string(),
         ))?;
+        let pieces = self.pieces.take().unwrap_or_default();
+        let piece_length = self.piece_length.take().unwrap_or_default();
 
         Ok(TorrentMetadataInfo {
-            pieces: self.pieces.unwrap_or_default(),
-            piece_length: self.piece_length.unwrap_or_default(),
+            pieces,
+            piece_length,
             name,
-            name_utf8: self.name_utf8,
-            private: self.private,
-            source: self.source,
+            name_utf8: self.name_utf8.take(),
+            private: self.private.take().unwrap_or_default(),
+            source: self.source.take(),
             meta_version: None,
             files,
         })
@@ -1680,7 +1692,7 @@ mod tests {
                 pieces: vec![],
                 name: "MyTorrentDir".to_string(),
                 name_utf8: None,
-                private: None,
+                private: false,
                 source: None,
                 meta_version: None,
                 files: TorrentFiles::Multiple {

@@ -620,6 +620,7 @@ struct RequestTask {
 mod tests {
     use super::*;
     use crate::operation::CreatePiecesAndFilesOperation;
+    use crate::storage::DiskStorage;
     use crate::tests::helpers::wait_for_torrent_pieces;
     use crate::tests::read_test_file_to_bytes;
     use crate::Torrent;
@@ -704,24 +705,21 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
         let (tx_event, mut rx_event) = oneshot::channel();
+        // TODO: replace with mock server
         let url = Url::parse("https://cdimage.debian.org/cdimage/release/13.6.0/amd64/iso-cd/debian-13.6.0-amd64-netinst.iso").unwrap();
-        let addr = resolve_url(&url);
+        let _addr = resolve_url(&url);
         let torrent = torrent!(
             "debian-http.torrent",
             temp_path,
             TorrentFlags::none(),
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into()],
-            vec![]
+            vec![],
+            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            None
         );
         let data_pool = torrent.inner.data_pool().await.unwrap();
         let peer = create_webseed_peer(&torrent).await;
-
-        // add the peer to the torrent
-        torrent.inner.peer_connected(peer.clone().into()).await;
-
-        // wait for the pieces to be created
-        wait_for_torrent_pieces(&torrent).await;
 
         // subscribe to the torrent events
         let mut events = torrent.subscribe();
@@ -734,12 +732,19 @@ mod tests {
             }
         });
 
+        // add the peer to the torrent
+        torrent.inner.peer_connected(peer.clone().into()).await;
+
+        // wait for the pieces to be created
+        wait_for_torrent_pieces(&torrent).await;
+
         // request the first piece from the webseed
         let piece = data_pool.piece(&0).await.unwrap();
         peer.request(&piece.blocks).await;
 
         // wait for the first piece to complete
-        let result = timeout!(Duration::from_millis(1500), &mut rx_event).unwrap();
+        // TODO: reduce the timeout once switched to internal server
+        let result = timeout!(Duration::from_secs(3), &mut rx_event).unwrap();
         assert_eq!(0, result, "expected the completed piece to match");
     }
 

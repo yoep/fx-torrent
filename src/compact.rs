@@ -43,7 +43,7 @@ impl CompactIpv4Addrs {
 }
 
 impl Serialize for CompactIpv4Addrs {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -53,7 +53,7 @@ impl Serialize for CompactIpv4Addrs {
 }
 
 impl<'de> Deserialize<'de> for CompactIpv4Addrs {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
