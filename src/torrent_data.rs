@@ -414,13 +414,16 @@ impl InnerDataPool {
     }
 
     fn update_piece_availability(&mut self, piece: &PieceIndex, change: i32) {
-        if let Some(piece) = self.pieces.get_mut(piece) {
-            if change >= 0 {
-                piece.availability = piece.availability.saturating_add(change as u32);
-            } else {
-                piece.availability = piece.availability.saturating_sub(change.abs() as u32);
-            }
-        }
+        let Some(piece) = self.pieces.get_mut(piece) else {
+            return;
+        };
+
+        let delta = change.unsigned_abs();
+        piece.availability = if change >= 0 {
+            piece.availability.saturating_add(delta)
+        } else {
+            piece.availability.saturating_sub(delta)
+        };
     }
 
     fn file_index_for(&self, piece: &PieceIndex) -> Option<FileIndex> {

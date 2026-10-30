@@ -777,6 +777,16 @@ impl Torrent {
         self.inner.has_bytes(range).await
     }
 
+    /// Returns the total of connected peers have the given piece available.
+    pub async fn availability(&self, index: PieceIndex) -> usize {
+        self.inner.availability(index).await
+    }
+
+    /// Returns the availability of all pieces.
+    pub async fn availabilities(&self) -> BTreeMap<PieceIndex, usize> {
+        self.inner.availabilities().await
+    }
+
     /// Get the total files of the torrent.
     /// If the metadata is still being retrieved, the files cannot yet be created and will result in [None].
     ///
@@ -1309,6 +1319,27 @@ impl InnerTorrent {
             .await
     }
 
+    /// Returns the total of connected peers have the given piece available.
+    pub async fn availability(&self, piece: PieceIndex) -> usize {
+        self.sender
+            .send(|tx| TorrentCommand::Availability {
+                piece,
+                response: tx,
+            })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Returns the availability of all pieces.
+    pub async fn availabilities(&self) -> BTreeMap<PieceIndex, usize> {
+        self.sender
+            .send(|tx| TorrentCommand::Availabilities { response: tx })
+            .await
+            .await
+            .unwrap_or_default()
+    }
+
     /// Returns the files of the torrent, if the metadata is known (see [Torrent::is_metadata_known]).
     /// If the metadata is still being retrieved, the returned files array will be empty.
     pub async fn files(&self) -> Vec<File> {
@@ -1691,6 +1722,13 @@ pub enum TorrentCommand {
     ReadBytes {
         range: Range<usize>,
         response: Reply<Result<Vec<u8>>>,
+    },
+    Availability {
+        piece: PieceIndex,
+        response: Reply<usize>,
+    },
+    Availabilities {
+        response: Reply<BTreeMap<PieceIndex, usize>>,
     },
     HashV1Data {
         piece: PieceIndex,
@@ -2385,7 +2423,7 @@ impl TorrentContext {
             Ok(bitfield) => {
                 // decrease the availability of the pieces that the peer had
                 for (piece_index, _) in bitfield.iter().enumerate().filter(|(_, value)| **value) {
-                    self.data_pool.update_availability(&piece_index, -1).await;
+                    self.update_availability(&piece_index, -1).await;
                 }
             }
             Err(e) => {
@@ -2576,7 +2614,7 @@ impl TorrentContext {
     ///
     /// * `pieces` - The piece indexes that need to be updated.
     ///* `available` - Indicates if the pieces become available or unavailable.
-    pub async fn update_piece_availabilities(&self, pieces: Vec<PieceIndex>, available: bool) {
+    pub async fn update_piece_availabilities(&mut self, pieces: Vec<PieceIndex>, available: bool) {
         // check if the metadata is known and the pieces have been created
         if !self.is_metadata_known() || self.data_pool().num_of_pieces().await == 0 {
             trace!(
@@ -2588,8 +2626,14 @@ impl TorrentContext {
 
         for piece in pieces {
             let change = if available { 1 } else { -1 };
-            self.data_pool.update_availability(&piece, change).await;
+            self.update_availability(&piece, change).await;
         }
+    }
+
+    /// Modify the availability of the given piece in both the data pool and the piece picker.
+    async fn update_availability(&mut self, piece: &PieceIndex, change: i32) {
+        self.piece_picker.update_availability(piece, change);
+        self.data_pool.update_availability(piece, change).await;
     }
 
     /// Set the pieces of the torrent.
@@ -2623,9 +2667,7 @@ impl TorrentContext {
         let availability_len = availability.len();
         if availability_len > 0 {
             for (piece, availability) in availability {
-                self.data_pool
-                    .update_availability(&piece, availability as i32)
-                    .await;
+                self.update_availability(&piece, availability as i32).await;
             }
             debug!(
                 "Torrent {} updated {} piece availabilities from {} peers",
@@ -2994,6 +3036,12 @@ impl TorrentContext {
             }
             TorrentCommand::ReadBytes { range, response } => {
                 response.send(self.read_bytes(range).await);
+            }
+            TorrentCommand::Availability { piece, response } => {
+                response.send(self.piece_picker.availability(&piece))
+            }
+            TorrentCommand::Availabilities { response } => {
+                response.send(self.piece_picker.availabilities())
             }
             TorrentCommand::HashV1Data { piece, response } => {
                 response.send(self.storage().hash_v1(&piece).await.map_err(Into::into));
@@ -3664,6 +3712,44 @@ mod tests {
                 0, result.downloaded,
                 "expected scrape results to have been returned"
             )
+        }
+    }
+
+    mod availability {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_piece_availabilities() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let temp_path = temp_dir.path().to_str().unwrap();
+            let torrent = torrent!(
+                "debian-udp.torrent",
+                temp_path,
+                TorrentFlags::none(),
+                TorrentConfig::builder().build(),
+                vec![CreatePiecesAndFilesOperation::new().into()]
+            );
+            assert_timeout!(
+                Duration::from_secs(5),
+                torrent.total_pieces().await > 0,
+                "expected the pieces to have been created"
+            );
+
+            torrent.inner.piece_availabilities(vec![0, 1], true).await;
+            assert_timeout!(
+                Duration::from_secs(2),
+                torrent.availability(0).await == 1,
+                "expected the piece availability to have been increased"
+            );
+            assert_eq!(1, torrent.availabilities().await[&1]);
+
+            torrent.inner.piece_availabilities(vec![0], false).await;
+            assert_timeout!(
+                Duration::from_secs(2),
+                torrent.availability(0).await == 0,
+                "expected the piece availability to have been decreased"
+            );
         }
     }
 

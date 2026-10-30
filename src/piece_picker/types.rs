@@ -4,6 +4,7 @@ use crate::{Piece, PieceBlock, PieceIndex, PiecePriority};
 use async_trait::async_trait;
 use bitmask_enum::bitmask;
 use itertools::Itertools;
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::net::SocketAddr;
 
@@ -113,6 +114,30 @@ impl PiecePicker {
         }
     }
 
+    /// Returns the total number of peers that have the given piece.
+    pub fn availability(&self, piece: &PieceIndex) -> usize {
+        match self {
+            PiecePicker::Picker(picker) => picker.availability(piece),
+            PiecePicker::Other(picker) => picker.availability(piece),
+        }
+    }
+
+    /// Returns the availability of all pieces.
+    pub fn availabilities(&self) -> BTreeMap<PieceIndex, usize> {
+        match self {
+            PiecePicker::Picker(picker) => picker.availabilities(),
+            PiecePicker::Other(picker) => picker.availabilities(),
+        }
+    }
+
+    /// Change the availability of the given piece.
+    pub fn update_availability(&mut self, piece: &PieceIndex, change: i32) {
+        match self {
+            PiecePicker::Picker(picker) => picker.update_availability(piece, change),
+            PiecePicker::Other(picker) => picker.update_availability(piece, change),
+        }
+    }
+
     /// Process the data for a piece block that has been downloaded from a peer.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn block_received(&mut self, peer: &Peer, block: PieceBlock, data: Vec<u8>) {
@@ -210,6 +235,15 @@ pub trait Extension: Debug + Send + Sync {
     /// Returns true if the given piece index has finished downloading all blocks.
     fn is_piece_finished(&self, piece: &PieceIndex) -> bool;
 
+    /// Returns the total number of peers that have the given piece.
+    fn availability(&self, piece: &PieceIndex) -> usize;
+
+    /// Returns the availability of all pieces.
+    fn availabilities(&self) -> BTreeMap<PieceIndex, usize>;
+
+    /// Change the availability of the given piece.
+    fn update_availability(&mut self, piece: &PieceIndex, change: i32);
+
     /// Process the data for a piece block that has been downloaded from a peer.
     async fn block_received<'a>(&'a mut self, peer: &'a Peer, block: PieceBlock, data: Vec<u8>);
 
@@ -269,6 +303,9 @@ mod tests {
             fn set_max_outstanding(&mut self, max_outstanding_pieces: usize);
             fn is_end_game(&self) -> bool;
             fn is_piece_finished(&self, piece: &PieceIndex) -> bool;
+            fn availability(&self, piece: &PieceIndex ) -> usize;
+            fn availabilities(&self) -> BTreeMap<PieceIndex, usize>;
+            fn update_availability(&mut self, piece: &PieceIndex, change: i32);
             async fn block_received<'a>(&'a mut self, peer: &'a Peer, block: PieceBlock, data: Vec<u8>);
             async fn block_rejected(&mut self, peer_addr: &SocketAddr, block: PieceBlock);
             async fn pick_pieces(&mut self, peer: &Peer);
