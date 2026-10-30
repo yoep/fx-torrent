@@ -444,7 +444,7 @@ mod pex_flags {
         }
     }
 
-    pub fn serialize<S>(flags: &Vec<PexFlag>, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    pub fn serialize<S>(flags: &[PexFlag], serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {

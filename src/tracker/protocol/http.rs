@@ -818,7 +818,7 @@ mod tests {
             .await;
 
         // scrape the torrent results
-        match connection.scrape(&vec![info_hash.clone()]).await {
+        match connection.scrape(&[info_hash.clone()]).await {
             Ok(scrape_result) => match scrape_result.files.get(&info_hash) {
                 Some(scrape_file) => assert_eq!(1, scrape_file.complete),
                 None => assert!(false, "expected a scrape file result"),

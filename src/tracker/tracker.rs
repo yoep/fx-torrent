@@ -677,7 +677,7 @@ mod tests {
             .unwrap();
 
         let result = tracker
-            .scrape(&vec![info_hash])
+            .scrape(&[info_hash])
             .await
             .expect("expected a scrape response");
 

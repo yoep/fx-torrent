@@ -561,7 +561,7 @@ impl FxSession {
 
             trace!("Trying to fetch metadata for {}", magnet_uri);
             select! {
-                _ = time::sleep(timeout) => Err(TorrentError::Timeout),
+                _ = time::sleep(timeout) => Err(TorrentError::Io(io::Error::new(io::ErrorKind::TimedOut, "metadata timed out"))),
                 _ = Self::wait_for_metadata(&torrent) => Ok(()),
             }?;
         }

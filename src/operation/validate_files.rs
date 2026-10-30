@@ -174,6 +174,7 @@ mod tests {
     use crate::storage::DiskStorage;
     use crate::tests::copy_test_file;
     use crate::TorrentError;
+    use std::io;
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::{select, time};
@@ -250,7 +251,7 @@ mod tests {
         // validate the file
         let result = loop {
             select! {
-                _ = time::sleep(Duration::from_secs(25)) => break Err(TorrentError::Timeout),
+                _ = time::sleep(Duration::from_secs(25)) => break Err(TorrentError::Io(io::Error::new(io::ErrorKind::TimedOut, "timeout"))),
                 _ = async {
                     loop {
                         if operation.execute(&mut context).await == TorrentOperationResult::Continue {

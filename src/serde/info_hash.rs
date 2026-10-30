@@ -4,7 +4,7 @@ use serde::de::{SeqAccess, Visitor};
 use serde::{de, Deserializer, Serializer};
 use std::fmt::Formatter;
 
-pub fn serialize<S>(value: &Vec<InfoHash>, serializer: S) -> Result<S::Ok, S::Error>
+pub fn serialize<S>(value: &[InfoHash], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {

@@ -71,9 +71,6 @@ pub enum TorrentError {
     Dht(dht::Error),
     #[error("an io error occurred, {0}")]
     Io(io::Error),
-    // TODO: refactor to io::ErrorKind::TimedOut with context info
-    #[error("the torrent operation has timed out")]
-    Timeout,
     #[error("a torrent piece error occurred, {0}")]
     Piece(PieceError),
     #[error("the requested data is unavailable")]
@@ -98,7 +95,6 @@ impl PartialEq for TorrentError {
             #[cfg(feature = "dht")]
             (Self::Dht(le), Self::Dht(re)) => le == re,
             (Self::Io(_), Self::Io(_)) => true,
-            (Self::Timeout, Self::Timeout) => true,
             (Self::Piece(_), Self::Piece(_)) => true,
             (Self::DataUnavailable, Self::DataUnavailable) => true,
             _ => false,
