@@ -1,5 +1,5 @@
 use fx_callback::{Callback, Subscription};
-use fx_torrent::{BitVec, Torrent, TorrentEvent};
+use fx_torrent::{BitVec, PieceIndex, Torrent, TorrentEvent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint::Length;
 use ratatui::layout::{Alignment, Layout, Rect};
@@ -7,12 +7,17 @@ use ratatui::prelude::{Color, Style};
 use ratatui::widgets::{Block, Borders, Widget};
 use ratatui::{symbols, Frame};
 use std::cmp::min;
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+const AVAILABILITY_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub struct ProgressWidget {
     progress: Progress,
     torrent: Torrent,
     event_receiver: Subscription<TorrentEvent>,
+    last_availability_update: Instant,
 }
 
 impl ProgressWidget {
@@ -24,6 +29,7 @@ impl ProgressWidget {
             progress: Default::default(),
             torrent,
             event_receiver,
+            last_availability_update: Instant::now(),
         }
     }
 
@@ -31,25 +37,45 @@ impl ProgressWidget {
     pub async fn tick(&mut self) {
         self.init().await;
         self.process_torrent_events().await;
+        self.update_availability().await;
     }
 
     /// Render this widget for the given frame and area.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        let availability_percent = self
+            .progress
+            .availability
+            .iter()
+            .filter(|(_, available)| **available > 0)
+            .count() as f32
+            / self.progress.availability.len().max(1) as f32;
+        let downloaded: Vec<f32> = self
+            .progress
+            .downloaded
+            .iter()
+            .map(|b| if *b { 1.0 } else { 0.0 })
+            .collect();
+        let availability: Vec<f32> = self
+            .progress
+            .availability
+            .values()
+            .map(|c| (*c).min(1) as f32)
+            .collect();
         let block = Block::default()
             .borders(Borders::all())
             .title_top(format!(" Progress ({:.1}%) ", self.progress.value * 100f32))
             .title_bottom(format!(
                 " Availability ({:.1}%) ",
-                self.progress.value * 100f32
+                availability_percent * 100f32
             ))
             .title_alignment(Alignment::Center);
         let layout = Layout::vertical([Length(1), Length(1)]);
         let [downloaded_area, availability_area] = layout.areas(block.inner(area));
 
-        BlockProgressWidget::new(&self.progress.downloaded)
+        BlockProgressWidget::new(&downloaded)
             .style(Style::default().fg(Color::Yellow))
             .render(downloaded_area, frame.buffer_mut());
-        BlockProgressWidget::new(&self.progress.availability)
+        BlockProgressWidget::new(&availability)
             .style(Style::default().fg(Color::Yellow))
             .render(availability_area, frame.buffer_mut());
 
@@ -62,8 +88,12 @@ impl ProgressWidget {
         }
 
         if let Some(metadata) = self.torrent.metadata().await.ok().and_then(|e| e.info) {
-            self.progress.downloaded = BitVec::repeat(false, metadata.pieces.len());
-            self.progress.availability = BitVec::repeat(false, metadata.pieces.len());
+            let num_of_pieces = metadata.pieces.len();
+            self.progress.downloaded = BitVec::repeat(false, num_of_pieces);
+            self.progress.availability = (0..num_of_pieces)
+                .into_iter()
+                .map(|index| (index, 0))
+                .collect();
         }
     }
 
@@ -82,11 +112,21 @@ impl ProgressWidget {
                 }
                 TorrentEvent::PiecesChanged(pieces) => {
                     self.progress.downloaded.resize(*pieces, false);
-                    self.progress.availability.resize(*pieces, false);
+                    self.progress.availability =
+                        (0..*pieces).into_iter().map(|index| (index, 0)).collect();
                 }
                 _ => {}
             }
         }
+    }
+
+    async fn update_availability(&mut self) {
+        if self.last_availability_update.elapsed() < AVAILABILITY_INTERVAL {
+            return;
+        }
+
+        self.progress.availability = self.torrent.availabilities().await;
+        self.last_availability_update = Instant::now();
     }
 }
 
@@ -94,17 +134,17 @@ impl ProgressWidget {
 struct Progress {
     value: f32,
     downloaded: BitVec,
-    availability: BitVec,
+    availability: BTreeMap<PieceIndex, usize>,
 }
 
 #[derive(Debug)]
 struct BlockProgressWidget<'a> {
-    progress: &'a BitVec,
+    progress: &'a [f32],
     style: Style,
 }
 
 impl<'a> BlockProgressWidget<'a> {
-    fn new(progress: &'a BitVec) -> Self {
+    fn new(progress: &'a [f32]) -> Self {
         Self {
             progress,
             style: Default::default(),
@@ -130,16 +170,21 @@ impl<'a> Widget for &BlockProgressWidget<'a> {
         buf.set_style(area, self.style);
 
         let width = area.width as usize;
-        let pieces_per_block = (self.progress.len() + 1) / width;
+        let len = self.progress.len();
 
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
-                // count the completed pieces in the block
-                let block_start = x as usize * pieces_per_block;
-                let block_end = min((x as usize + 1) * pieces_per_block, self.progress.len());
-                let completed = self.progress[block_start..block_end].count_ones();
-                let fraction_completed = completed as f32 / pieces_per_block as f32;
-                let symbol = get_unicode_block(fraction_completed);
+                // average the progress of the pieces in the block
+                let col = (x - area.left()) as usize;
+                let block_start = len * col / width;
+                let block_end = min(len * (col + 1) / width, len);
+                let block = &self.progress[block_start..block_end];
+                let fraction = if block.is_empty() {
+                    0.0
+                } else {
+                    (block.iter().sum::<f32>() / block.len() as f32).clamp(0.0, 1.0)
+                };
+                let symbol = get_unicode_block(fraction);
 
                 buf[(x, y)]
                     .set_symbol(symbol)

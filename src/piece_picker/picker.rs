@@ -9,7 +9,7 @@ use derive_more::Display;
 use futures::future::Either;
 use itertools::Itertools;
 use log::{debug, log, trace, warn, Level};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
@@ -171,6 +171,49 @@ impl FxPiecePicker {
             .get(piece)
             .map(|blocks| blocks.iter().all(|b| b.state == PieceBlockState::Finished))
             .unwrap_or_default()
+    }
+
+    /// Returns the total number of peers that have the given piece.
+    pub fn availability(&self, piece: &PieceIndex) -> usize {
+        self.downloads
+            .get(piece)
+            .and_then(|blocks| blocks.iter().map(|block| block.availability).max())
+            .unwrap_or(0)
+    }
+
+    /// Returns the availability of all pieces.
+    pub fn availabilities(&self) -> BTreeMap<PieceIndex, usize> {
+        self.downloads
+            .iter()
+            .map(|(index, blocks)| {
+                (
+                    *index,
+                    blocks
+                        .iter()
+                        .map(|block| block.availability)
+                        .max()
+                        .unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    /// Change the availability of the given piece.
+    pub fn update_availability(&mut self, piece: &PieceIndex, change: i32) {
+        let Some(blocks) = self.downloads.get_mut(piece) else {
+            return;
+        };
+
+        let delta = change.unsigned_abs() as usize;
+        let apply: fn(usize, usize) -> usize = if change >= 0 {
+            usize::saturating_add
+        } else {
+            usize::saturating_sub
+        };
+
+        for block in blocks {
+            block.availability = apply(block.availability, delta);
+        }
     }
 
     /// Process a received piece block from a peer.
