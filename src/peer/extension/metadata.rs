@@ -194,8 +194,11 @@ impl MetadataExtension {
         if let Some(total_pieces) = total_pieces {
             if total_pieces - 1 == message.piece as usize {
                 // try to deserialize the metadata
-                let metadata: TorrentMetadataInfo =
-                    bencode::from_bytes(self.metadata_buffer.as_ref().unwrap())?;
+                let metadata: TorrentMetadataInfo = bencode::from_bytes(
+                    self.metadata_buffer
+                        .as_ref()
+                        .ok_or(Error::Parsing("metadata buffer is invalid".to_string()))?,
+                )?;
                 debug!("Peer {} completed metadata requests, {:?}", peer, metadata);
 
                 // update the metadata of the underlying torrent through the peer
