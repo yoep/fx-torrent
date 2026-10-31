@@ -1,35 +1,36 @@
 use crate::operation::TorrentOperationResult;
 use crate::tracker::TrackerClientEvent;
 use crate::TorrentContext;
+use futures::FutureExt;
 use fx_callback::{Callback, Subscription};
 use log::{debug, warn};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
+use tokio::task::JoinHandle;
 
 const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Retrieve torrent peers from connected trackers.
 #[derive(Debug)]
 pub struct TrackerPeersOperation {
-    initialized: bool,
     receiver: Option<Subscription<TrackerClientEvent>>,
+    task: Option<JoinHandle<Vec<SocketAddr>>>,
     last_peers_discovery: Option<Instant>,
 }
 
 impl TrackerPeersOperation {
     pub fn new() -> Self {
         Self {
-            initialized: false,
             receiver: None,
+            task: None,
             last_peers_discovery: None,
         }
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn execute(&mut self, context: &mut TorrentContext) -> TorrentOperationResult {
-        if !self.initialized {
-            self.initialize(context).await;
-        }
-
+        self.initialize(context);
+        self.poll_task(context);
         self.process_tracker_events(context);
         self.retrieve_discovered_peers(context).await;
 
@@ -38,34 +39,46 @@ impl TrackerPeersOperation {
 
     /// Returns `true` if peer discovery is allowed based on the last time it was scraped.
     fn is_peer_discovery_allowed(&self) -> bool {
-        self.last_peers_discovery.map_or(true, |last_discovery| {
-            last_discovery.elapsed() >= PEER_DISCOVERY_INTERVAL
-        })
+        self.task.is_none()
+            && self.last_peers_discovery.map_or(true, |last_discovery| {
+                last_discovery.elapsed() >= PEER_DISCOVERY_INTERVAL
+            })
     }
 
-    async fn initialize(&mut self, context: &mut TorrentContext) {
-        self.initialized = true;
-        let tracker = match context.tracker() {
-            None => return,
-            Some(tracker) => tracker,
+    fn initialize(&mut self, context: &mut TorrentContext) {
+        // check if the operation is already initialized
+        if self.receiver.is_some() {
+            return;
+        }
+
+        let Some(tracker) = context.tracker() else {
+            return;
         };
         // subscribe to the tracker events
         self.receiver = Some(tracker.subscribe());
         // retrieve previously discovered peers from the tracker client
-        match tracker
-            .discovered_peers(&context.metadata().info_hash)
-            .await
-        {
-            Some(peers) => {
-                debug!(
-                    "Torrent {} discovered {} initial peer(s)",
-                    context,
-                    peers.len()
-                );
-                context.add_peer_addresses(peers);
-            }
-            None => debug!("Torrent {} discovered no initial peers", context),
-        }
+        self.discover_peers(context);
+    }
+
+    /// Poll the current discover task for completion, if one is present.
+    fn poll_task(&mut self, context: &mut TorrentContext) {
+        let Some(peers) = self
+            .task
+            .as_mut()
+            .and_then(|task| task.now_or_never())
+            .and_then(|result| result.ok())
+        else {
+            return;
+        };
+
+        debug!(
+            "Torrent {} discovered {} peers through trackers",
+            context,
+            peers.len()
+        );
+        context.add_peer_addresses(peers);
+        self.task = None;
+        self.last_peers_discovery = Some(Instant::now());
     }
 
     /// Get the discovered peers from the trackers.
@@ -95,6 +108,32 @@ impl TrackerPeersOperation {
         self.last_peers_discovery = Some(Instant::now());
     }
 
+    /// Try to discover peers through the registered trackers for the torrent context.
+    fn discover_peers(&mut self, context: &mut TorrentContext) {
+        let Some(tracker) = context.tracker() else {
+            return;
+        };
+
+        let handle = context.handle();
+        let info_hash = context.metadata().info_hash.clone();
+        let tracker = tracker.clone();
+        self.task = Some(spawn!(
+            "TrackerPeersOperation::discover_peers",
+            async move {
+                match tracker.discovered_peers(&info_hash).await {
+                    Some(peers) => peers,
+                    None => {
+                        warn!(
+                            "Torrent {} is no longer being tracked by {}",
+                            handle, tracker
+                        );
+                        vec![]
+                    }
+                }
+            }
+        ));
+    }
+
     /// Process pending tracker events.
     fn process_tracker_events(&mut self, context: &mut TorrentContext) {
         let receiver = match self.receiver.as_mut() {
@@ -111,6 +150,14 @@ impl TrackerPeersOperation {
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+impl Drop for TrackerPeersOperation {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
         }
     }
 }
@@ -163,10 +210,54 @@ mod tests {
             operation.receiver.is_some(),
             "expected a subscription to the tracker events"
         );
-        // verify that the last discovered peers scrape time has been set
+        // verify that the discovery task has been spawned
         assert!(
-            operation.last_peers_discovery.is_some(),
+            operation.task.is_some(),
+            "expected the discovery task to have been spawned"
+        );
+
+        // wait for the discovery task to complete
+        assert_timeout!(
+            Duration::from_secs(2),
+            {
+                let _ = operation.execute(&mut context).await;
+                operation.last_peers_discovery.is_some()
+            },
             "expected the last peers discovery time to be set"
+        );
+        assert!(
+            operation.task.is_none(),
+            "expected the discovery task to have been completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_does_not_wait_for_discovery() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let uri = "debian-udp.torrent";
+        let (mut context, _) = torrent_context!(
+            uri,
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![],
+            vec![],
+            None
+        );
+        let mut operation = TrackerPeersOperation::new();
+
+        let result = timeout!(
+            Duration::from_millis(250),
+            operation.execute(&mut context),
+            "expected the operation not to wait for the peer discovery"
+        );
+
+        assert_eq!(TorrentOperationResult::Continue, result);
+        assert!(
+            operation.task.is_some(),
+            "expected the discovery to run in the background"
         );
     }
 
@@ -235,13 +326,13 @@ mod tests {
             "expected the peer to have been discovered"
         );
 
-        // execute the operation to scrape the cached peers
-        let _ = operation.execute(&mut context).await;
-
-        // verify that the peer from the cache was added to the peer pool
-        let result = context.peer_pool().num_connect_candidates();
-        assert_eq!(
-            1, result,
+        // execute the operation until the cached peers have been retrieved by the background task
+        assert_timeout!(
+            Duration::from_secs(2),
+            {
+                let _ = operation.execute(&mut context).await;
+                context.peer_pool().num_connect_candidates() == 1
+            },
             "expected the peer to have been added to the peer pool"
         );
     }
