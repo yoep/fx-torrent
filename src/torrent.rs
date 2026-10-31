@@ -2717,76 +2717,101 @@ impl TorrentContext {
         v1_hash: Option<Sha1Hash>,
         v2_hash: Option<Sha256Hash>,
     ) {
-        // early exit if the piece couldn't be hashed
-        // this is most of the time due to missing data in the storage
-        if v1_hash.is_none() && v2_hash.is_none() {
-            self.piece_picker.set_failed(piece_index);
+        self.on_pieces_verified(vec![(*piece_index, v1_hash, v2_hash)])
+            .await;
+    }
+
+    /// Verify the given hashes of the pieces in a single batch.
+    /// The completed pieces are stored in the data pool with a single update.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub async fn on_pieces_verified(
+        &mut self,
+        results: Vec<(PieceIndex, Option<Sha1Hash>, Option<Sha256Hash>)>,
+    ) {
+        let mut completed_pieces = Vec::with_capacity(results.len());
+
+        for (piece_index, v1_hash, v2_hash) in results {
+            // early exit if the piece couldn't be hashed
+            // this is most of the time due to missing data in the storage
+            if v1_hash.is_none() && v2_hash.is_none() {
+                self.piece_picker.set_failed(&piece_index);
+                continue;
+            }
+
+            let piece = match self.data_pool.piece(&piece_index).await {
+                None => {
+                    warn!(
+                        "Torrent {} failed to verify piece {}, piece not found",
+                        self, piece_index
+                    );
+                    continue;
+                }
+                Some(piece) => piece,
+            };
+            let expected_v1 = piece.hash.hash_v1();
+            let expected_v2 = piece.hash.hash_v2();
+
+            let validation_result = match (expected_v1, expected_v2) {
+                (Some(_), Some(hash_v2)) | (None, Some(hash_v2)) => {
+                    v2_hash.map(|hash| hash_v2 == hash).unwrap_or(false)
+                }
+                (Some(hash_v1), None) => v1_hash.map(|hash| hash == hash_v1).unwrap_or(false),
+                (None, None) => {
+                    debug!(
+                        "Torrent {} is unable to verify piece {}, piece hash is missing or invalid",
+                        self, piece_index
+                    );
+                    continue;
+                }
+            };
+
+            if validation_result {
+                completed_pieces.push(piece);
+            } else {
+                trace!("Torrent {} piece {} validation failed", self, piece_index);
+                self.piece_picker.set_failed(&piece_index);
+                if self.state != TorrentState::CheckingFiles {
+                    self.metrics.wasted.inc_by(piece.length as u64);
+                }
+            }
+        }
+
+        self.on_pieces_completed(&completed_pieces).await;
+    }
+
+    /// Process the completed pieces.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    async fn on_pieces_completed(&mut self, pieces: &[Piece]) {
+        if pieces.is_empty() {
             return;
         }
 
-        let piece = match self.data_pool.piece(piece_index).await {
-            None => {
-                warn!(
-                    "Torrent {} failed to verify piece {}, piece not found",
-                    self, piece_index
-                );
-                return;
-            }
-            Some(piece) => piece,
-        };
-        let expected_v1 = piece.hash.hash_v1();
-        let expected_v2 = piece.hash.hash_v2();
+        // mark the pieces as completed
+        let indexes = pieces.iter().map(|piece| piece.index).collect::<Vec<_>>();
+        self.data_pool.set_completed(&indexes, true).await;
 
-        let validation_result = match (expected_v1, expected_v2) {
-            (Some(_), Some(hash_v2)) | (None, Some(hash_v2)) => {
-                v2_hash.map(|hash| hash_v2 == hash).unwrap_or(false)
-            }
-            (Some(hash_v1), None) => v1_hash.map(|hash| hash == hash_v1).unwrap_or(false),
-            (None, None) => {
-                debug!(
-                    "Torrent {} is unable to verify piece {}, piece hash is missing or invalid",
-                    self, piece_index
-                );
-                return;
-            }
-        };
+        for piece in pieces {
+            self.piece_picker.set_completed(&piece.index);
 
-        if validation_result {
-            self.on_piece_completed(&piece).await;
-        } else {
-            trace!("Torrent {} piece {} validation failed", self, piece_index);
-            self.piece_picker.set_failed(piece_index);
-            if self.state != TorrentState::CheckingFiles {
-                self.metrics.wasted.inc_by(piece.length as u64);
+            // update the metrics
+            if piece.priority != PiecePriority::None {
+                self.metrics
+                    .wanted_completed_size
+                    .inc_by(piece.length as u64);
+                self.metrics.wanted_completed_pieces.inc();
             }
+
+            self.metrics.completed_pieces.inc();
+            self.metrics.completed_size.inc_by(piece.length as u64);
+
+            // inform the subscribers
+            debug!("Torrent {} piece {} has been completed", self, piece.index);
+            self.invoke_event(TorrentEvent::PieceCompleted(piece.index));
         }
-    }
-
-    /// Process the completed piece.
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn on_piece_completed(&mut self, piece: &Piece) {
-        // mark the piece as completed
-        self.piece_picker.set_completed(&piece.index);
-        self.data_pool.set_completed(&[piece.index], true).await;
-
-        // update the metrics
-        if piece.priority != PiecePriority::None {
-            self.metrics
-                .wanted_completed_size
-                .inc_by(piece.length as u64);
-            self.metrics.wanted_completed_pieces.inc();
-        }
-
-        self.metrics.completed_pieces.inc();
-        self.metrics.completed_size.inc_by(piece.length as u64);
-
-        // inform the subscribers
-        debug!("Torrent {} piece {} has been completed", self, piece.index);
-        self.invoke_event(TorrentEvent::PieceCompleted(piece.index));
 
         // check if the all wanted pieces have been completed
-        let is_completed = self.is_completed().await;
-        if is_completed {
+        // this is skipped while checking files, as the state is determined once all files have been validated
+        if self.state != TorrentState::CheckingFiles && self.is_completed().await {
             // offload the state change to the main loop
             self.update_state(TorrentState::Finished);
         }
@@ -4724,11 +4749,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(expected_result, result);
 
-        for piece in 0..2 {
-            context
-                .on_piece_completed(pieces.get(piece).as_ref().unwrap())
-                .await;
-        }
+        context.on_pieces_completed(&pieces[0..2]).await;
 
         let expected_result: Vec<PieceIndex> = (2..30)
             .into_iter()

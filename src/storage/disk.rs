@@ -4,17 +4,21 @@ use crate::torrent_data::DataPool;
 use crate::{
     FileAttributeFlags, FileIndex, FilePriority, InfoHash, PieceIndex, Sha1Hash, Sha256Hash,
 };
+use sha1::digest::Output;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::cmp::min;
 use std::io;
-use std::io::SeekFrom;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use tokio::fs::{create_dir_all, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
+
+/// The buffer size used to stream piece data from the disk while hashing.
+const HASH_BUFFER_SIZE: usize = 128 * 1024;
 
 /// File system storage for the torrent piece data.
 #[derive(Debug)]
@@ -192,28 +196,14 @@ impl DiskStorage {
 
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     pub async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash> {
-        let len = self.piece_len(piece).await;
-        let mut buffer = vec![0u8; len];
-        let bytes_read = self.read(&mut buffer, piece, 0).await?;
-        if bytes_read != len {
-            return Err(unavailable());
-        }
-
-        Sha1Hash::try_from(Sha1::digest(buffer.as_slice()))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        let hash = self.hash::<Sha1>(piece).await?;
+        Sha1Hash::try_from(hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     pub async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash> {
-        let len = self.piece_len(piece).await;
-        let mut buffer = vec![0u8; len];
-        let bytes_read = self.read(&mut buffer, piece, 0).await?;
-        if bytes_read != len {
-            return Err(unavailable());
-        }
-
-        Sha256Hash::try_from(Sha256::digest(buffer.as_slice()))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        let hash = self.hash::<Sha256>(piece).await?;
+        Sha256Hash::try_from(hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
     /// Move the storage to a new location.
@@ -224,6 +214,121 @@ impl DiskStorage {
     /// Returns the storage metrics.
     pub fn metrics(&self) -> &Metrics {
         &self.metrics
+    }
+
+    /// Calculate the digest of the given piece.
+    ///
+    /// The piece data is streamed from the disk and hashed on the blocking thread pool,
+    /// preventing the async runtime from being blocked by the file I/O and hash computation.
+    async fn hash<D: Digest + Send + 'static>(&self, piece: &PieceIndex) -> Result<Output<D>> {
+        let segments = match self.piece_segments(piece).await? {
+            Some(segments) => segments,
+            None => {
+                // the piece is (partially) stored within the parts file
+                let len = self.piece_len(piece).await;
+                let mut buffer = vec![0u8; len];
+                let bytes_read = self.read(&mut buffer, piece, 0).await?;
+                if bytes_read != len {
+                    return Err(unavailable());
+                }
+
+                return tokio::task::spawn_blocking(move || D::digest(buffer.as_slice()))
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
+            }
+        };
+
+        let (hash, bytes_read) =
+            tokio::task::spawn_blocking(move || Self::hash_segments::<D>(segments))
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))??;
+        self.metrics.bytes_read.inc_by(bytes_read as u64);
+
+        Ok(hash)
+    }
+
+    /// Resolve the file segments which make up the data of the given piece.
+    /// It returns `None` when the piece data is (partially) stored within the parts file.
+    async fn piece_segments(&self, piece: &PieceIndex) -> Result<Option<Vec<PieceSegment>>> {
+        let len = self.piece_len(piece).await;
+        let (mut file_index, mut torrent_offset) = self.readwrite(piece, 0, len).await?;
+        let mut segments = Vec::new();
+        let mut remaining = len;
+
+        while remaining > 0 {
+            let file = self
+                .data_pool
+                .file(&file_index)
+                .await
+                .ok_or(unavailable())?;
+            let start_offset = torrent_offset.saturating_sub(file.torrent_offset);
+            let segment_len = min(remaining, file.len().saturating_sub(start_offset));
+
+            if segment_len > 0 {
+                if file.attributes().contains(FileAttributeFlags::PaddingFile) {
+                    segments.push(PieceSegment::Padding(segment_len));
+                } else if file.priority == FilePriority::None {
+                    return Ok(None);
+                } else {
+                    let path = self.absolute_filepath(&file.torrent_path).await;
+                    self.assert_valid_filepath(&path).await?;
+                    segments.push(PieceSegment::File {
+                        path,
+                        offset: start_offset as u64,
+                        len: segment_len,
+                    });
+                }
+            }
+
+            remaining -= segment_len;
+            torrent_offset += segment_len;
+            file_index += 1;
+        }
+
+        Ok(Some(segments))
+    }
+
+    /// Calculate the digest of the given piece segments.
+    /// This is a blocking operation and should be executed on the blocking thread pool.
+    ///
+    /// It returns the digest and the number of bytes read from the disk.
+    fn hash_segments<D: Digest>(segments: Vec<PieceSegment>) -> Result<(Output<D>, usize)> {
+        let mut hasher = D::new();
+        let mut buffer = vec![0u8; HASH_BUFFER_SIZE];
+        let mut total_bytes_read = 0;
+
+        for segment in segments {
+            match segment {
+                PieceSegment::Padding(len) => {
+                    buffer.fill(0);
+                    let mut remaining = len;
+                    while remaining > 0 {
+                        let chunk_len = min(remaining, buffer.len());
+                        hasher.update(&buffer[..chunk_len]);
+                        remaining -= chunk_len;
+                    }
+                }
+                PieceSegment::File { path, offset, len } => {
+                    let mut file = std::fs::File::open(path)?;
+                    file.seek(SeekFrom::Start(offset))?;
+
+                    let mut remaining = len;
+                    while remaining > 0 {
+                        let chunk_len = min(remaining, buffer.len());
+                        file.read_exact(&mut buffer[..chunk_len])
+                            .map_err(|e| match e.kind() {
+                                io::ErrorKind::UnexpectedEof => unavailable(),
+                                _ => e,
+                            })?;
+                        hasher.update(&buffer[..chunk_len]);
+                        remaining -= chunk_len;
+                        total_bytes_read += chunk_len;
+                    }
+                }
+            }
+        }
+
+        Ok((hasher.finalize(), total_bytes_read))
     }
 
     /// Get the absolute filepath for the given filepath within the storage.
@@ -353,6 +458,19 @@ impl DiskStorage {
 
         result
     }
+}
+
+/// A contiguous segment of piece data.
+#[derive(Debug)]
+enum PieceSegment {
+    /// A segment within a torrent file on the disk.
+    File {
+        path: PathBuf,
+        offset: u64,
+        len: usize,
+    },
+    /// A segment of zero bytes within a padding file.
+    Padding(usize),
 }
 
 impl Drop for DiskStorage {
@@ -490,6 +608,76 @@ mod tests {
     ///
     ///   file_a: torrent bytes   0-99  (length 100)
     ///   file_b: torrent bytes 100-191 (length 92)
+    #[test]
+    fn test_hash_segments() {
+        let temp_dir = tempdir().unwrap();
+        let file_a = temp_dir.path().join("a.bin");
+        let file_b = temp_dir.path().join("b.bin");
+        std::fs::write(&file_a, b"loremipsum").unwrap();
+        std::fs::write(&file_b, b"dolorsitamet").unwrap();
+        let segments = vec![
+            PieceSegment::File {
+                path: file_a,
+                offset: 5,
+                len: 5,
+            },
+            PieceSegment::Padding(4),
+            PieceSegment::File {
+                path: file_b,
+                offset: 0,
+                len: 5,
+            },
+        ];
+        let expected_hash = Sha1::digest(b"ipsum\0\0\0\0dolor");
+
+        let (result, bytes_read) = DiskStorage::hash_segments::<Sha1>(segments)
+            .expect("expected the segments to have been hashed");
+
+        assert_eq!(expected_hash, result);
+        assert_eq!(10, bytes_read, "expected the padding bytes to not be read");
+    }
+
+    #[test]
+    fn test_hash_segments_incomplete_file() {
+        let temp_dir = tempdir().unwrap();
+        let filepath = temp_dir.path().join("incomplete.bin");
+        std::fs::write(&filepath, b"lorem").unwrap();
+        let segments = vec![PieceSegment::File {
+            path: filepath,
+            offset: 0,
+            len: 10,
+        }];
+
+        let result = DiskStorage::hash_segments::<Sha1>(segments);
+
+        let err = result.expect_err("expected an error to be returned");
+        assert_eq!(io::ErrorKind::NotFound, err.kind());
+    }
+
+    #[tokio::test]
+    async fn test_hash_v1_missing_file() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let (mut context, _) = torrent_context!(
+            "debian-udp.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().path(temp_path).build(),
+            vec![]
+        );
+        let data_pool = context.data_pool().clone();
+        let storage = DiskStorage::new(context.metadata().info_hash.clone(), temp_path, data_pool);
+
+        // create pieces & files
+        create_pieces_and_files(&mut context).await;
+
+        let result = storage.hash_v1(&0).await;
+
+        let err = result.expect_err("expected an error to be returned");
+        assert_eq!(io::ErrorKind::NotFound, err.kind());
+    }
+
     #[tokio::test]
     async fn test_write_piece_spanning_two_files() {
         init_logger!();

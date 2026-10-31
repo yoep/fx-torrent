@@ -652,8 +652,9 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
+        // TODO: replace with mock server
         let url = Url::parse("https://cdimage.debian.org/cdimage/release/13.6.0/amd64/iso-cd/debian-13.6.0-amd64-netinst.iso").unwrap();
-        let addr = resolve_url(&url);
+        let _addr = resolve_url(&url);
         let torrent = torrent!(
             "debian-http.torrent",
             temp_path,
@@ -675,8 +676,9 @@ mod tests {
         init_logger!();
         let temp_dir = tempdir().unwrap();
         let temp_path = temp_dir.path().to_str().unwrap();
+        // TODO: replace with mock server
         let url = Url::parse("https://cdimage.debian.org/cdimage/release/13.6.0/amd64/iso-cd/debian-13.6.0-amd64-netinst.iso").unwrap();
-        let addr = resolve_url(&url);
+        let _addr = resolve_url(&url);
         let torrent = torrent!(
             "debian.torrent",
             temp_path,
