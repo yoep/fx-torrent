@@ -127,11 +127,11 @@ impl TraversalAlgorithm {
                             nodes.iter().map(|e| e.addr).collect::<Vec<_>>()
                         );
                         for node in nodes {
-                            let _ = command_sender
-                                .fire_and_forget(TrackerCommand::AddTraversalNode((
-                                    node.id, node.addr,
-                                )))
-                                .await;
+                            if !command_sender.try_fire_and_forget(
+                                TrackerCommand::AddTraversalNode((node.id, node.addr)),
+                            ) {
+                                trace!("DHT traversal dropped node {}, tracker is busy", node.addr);
+                            }
                         }
                     }
                     Err(e) => {

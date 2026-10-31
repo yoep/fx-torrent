@@ -37,7 +37,7 @@ impl<T> ChannelSender<T> {
     {
         let (tx, rx) = oneshot::channel::<S>();
         match self.inner.send(message(Reply::new(tx))).await {
-            Ok(()) => rx.into(),
+            Ok(()) => Response::from(rx),
             Err(_) => Response::closed(),
         }
     }
@@ -46,6 +46,14 @@ impl<T> ChannelSender<T> {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     pub async fn fire_and_forget(&self, message: T) {
         let _ = self.inner.send(message).await;
+    }
+
+    /// Try to send the given message to the channel without waiting for a response or for capacity.
+    /// Returns `false` if the message couldn't be queued, because the channel is full or closed.
+    ///
+    /// Use this for non-critical messages, or messages sent to a channel which is handled by the current task.
+    pub fn try_fire_and_forget(&self, message: T) -> bool {
+        self.inner.0.try_send(message).is_ok()
     }
 }
 
@@ -114,7 +122,10 @@ impl<T> ChannelReceiver<T> {
 #[derive(Debug)]
 pub struct Response<T, E> {
     inner: InnerResponse<T, E>,
-    timeout: Option<Pin<Box<Sleep>>>,
+    /// The maximum duration to wait for the response.
+    timeout: Duration,
+    /// The active running timeout timer
+    timeout_timer: Option<Pin<Box<Sleep>>>,
 }
 
 impl<T, E> Response<T, E> {
@@ -122,15 +133,24 @@ impl<T, E> Response<T, E> {
     pub fn err(e: E) -> Self {
         Self {
             inner: InnerResponse::Err(Some(e)),
-            timeout: Default::default(),
+            timeout: RESPONSE_TIMEOUT,
+            timeout_timer: Default::default(),
         }
+    }
+
+    /// Set the maximum duration to wait for the response.
+    pub fn with_timeout(mut self, limit: Duration) -> Self {
+        self.timeout = limit;
+        self.timeout_timer = None;
+        self
     }
 
     /// Create a closed response which immediately returns as an closed error.
     pub fn closed() -> Self {
         Self {
             inner: InnerResponse::Closed,
-            timeout: Default::default(),
+            timeout: RESPONSE_TIMEOUT,
+            timeout_timer: Default::default(),
         }
     }
 }
@@ -145,18 +165,25 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        let timeout = this
-            .timeout
-            .get_or_insert_with(|| Box::pin(sleep(RESPONSE_TIMEOUT)));
-        if timeout.as_mut().poll(cx).is_ready() {
+        // always give precedence to the response,
+        // a ready reply must never be discarded by the timeout
+        if let Poll::Ready(result) = Pin::new(&mut this.inner).poll(cx) {
+            return Poll::Ready(result);
+        }
+
+        let timeout = this.timeout;
+        let timer = this
+            .timeout_timer
+            .get_or_insert_with(|| Box::pin(sleep(timeout)));
+        if timer.as_mut().poll(cx).is_ready() {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "potential channel deadlock",
+                format!("channel response timed out after {}ms", timeout.as_millis()),
             )
             .into()));
         }
 
-        Pin::new(&mut this.inner).poll(cx)
+        Poll::Pending
     }
 }
 
@@ -164,7 +191,8 @@ impl<T> From<oneshot::Receiver<T>> for Response<T, io::Error> {
     fn from(rx: oneshot::Receiver<T>) -> Self {
         Self {
             inner: InnerResponse::PendingMapper(rx),
-            timeout: Default::default(),
+            timeout: RESPONSE_TIMEOUT,
+            timeout_timer: Default::default(),
         }
     }
 }
@@ -173,7 +201,8 @@ impl<T, E> From<oneshot::Receiver<result::Result<T, E>>> for Response<T, E> {
     fn from(rx: oneshot::Receiver<result::Result<T, E>>) -> Self {
         Self {
             inner: InnerResponse::Pending(rx),
-            timeout: Default::default(),
+            timeout: RESPONSE_TIMEOUT,
+            timeout_timer: Default::default(),
         }
     }
 }
@@ -360,6 +389,18 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_try_fire_and_forget() {
+            let (sender, _receiver) = channel!(1);
+
+            assert_eq!(true, sender.try_fire_and_forget(TestCommand::None));
+            assert_eq!(
+                false,
+                sender.try_fire_and_forget(TestCommand::None),
+                "expected the full channel to reject the message"
+            );
+        }
+
+        #[tokio::test]
         async fn test_backpressure() {
             let (sender, mut receiver) = channel!(1);
 
@@ -385,6 +426,44 @@ mod tests {
                 _ = time::sleep(Duration::from_millis(100)) => assert!(false, "expected the second message to be processed"),
                 _ = &mut future => {},
             }
+        }
+    }
+
+    mod response {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_ready_reply_wins_over_elapsed_timeout() {
+            let (tx, rx) = oneshot::channel::<u32>();
+            let response =
+                Response::<u32, io::Error>::from(rx).with_timeout(Duration::from_millis(20));
+            tokio::pin!(response);
+
+            // start the timer, then let it elapse while a reply is already available
+            assert!(futures::poll!(&mut response).is_pending());
+            tx.send(42).unwrap();
+            time::sleep(Duration::from_millis(60)).await;
+
+            assert_eq!(42, response.await.expect("expected a reply"));
+        }
+
+        #[tokio::test]
+        async fn test_times_out_without_reply() {
+            let (_tx, rx) = oneshot::channel::<u32>();
+            let response =
+                Response::<u32, io::Error>::from(rx).with_timeout(Duration::from_millis(20));
+
+            let err = response.await.expect_err("expected a timeout");
+
+            assert_eq!(io::ErrorKind::TimedOut, err.kind());
+        }
+
+        #[tokio::test]
+        async fn test_from_receiver_uses_default_timeout() {
+            let (_tx, rx) = oneshot::channel::<u32>();
+            let response = Response::<u32, io::Error>::from(rx);
+
+            assert_eq!(RESPONSE_TIMEOUT, response.timeout);
         }
     }
 
