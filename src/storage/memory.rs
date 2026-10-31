@@ -76,20 +76,28 @@ impl MemoryStorage {
 
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     pub async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash> {
-        let pieces = self.pieces.read().await;
-        let bytes = pieces.get(&piece).map(|e| &e[..]).unwrap_or(&[]);
+        let bytes = self.piece_bytes(piece).await;
+        let hash = tokio::task::spawn_blocking(move || Sha1::digest(bytes.as_slice()))
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-        Sha1Hash::try_from(Sha1::digest(bytes))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        Sha1Hash::try_from(hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     pub async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash> {
-        let pieces = self.pieces.read().await;
-        let bytes = pieces.get(&piece).map(|e| &e[..]).unwrap_or(&[]);
+        let bytes = self.piece_bytes(piece).await;
+        let hash = tokio::task::spawn_blocking(move || Sha256::digest(bytes.as_slice()))
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-        Sha256Hash::try_from(Sha256::digest(bytes))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        Sha256Hash::try_from(hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    }
+
+    /// Returns a copy of the stored bytes of the given piece.
+    async fn piece_bytes(&self, piece: &PieceIndex) -> Vec<u8> {
+        let pieces = self.pieces.read().await;
+        pieces.get(piece).map(|e| e.to_vec()).unwrap_or_default()
     }
 
     /// Returns the storage metrics.
