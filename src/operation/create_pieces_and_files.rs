@@ -122,9 +122,17 @@ impl CreatePiecesAndFilesOperation {
 
         for piece_index in 0..num_pieces {
             let hash = if info_hash.has_v2() {
-                InfoHash::try_from_bytes(sha256_pieces.get(piece_index).unwrap())?
+                InfoHash::try_from_bytes(sha256_pieces.get(piece_index).ok_or(
+                    TorrentError::InvalidMetadata(
+                        "metadata contains invalid sha256 pieces".to_string(),
+                    ),
+                )?)?
             } else {
-                InfoHash::try_from_bytes(sha1_pieces.get(piece_index).unwrap())?
+                InfoHash::try_from_bytes(sha1_pieces.get(piece_index).ok_or(
+                    TorrentError::InvalidMetadata(
+                        "metadata contains invalid sha1 pieces".to_string(),
+                    ),
+                )?)?
             };
             let length = if piece_index != num_pieces - 1 {
                 piece_length

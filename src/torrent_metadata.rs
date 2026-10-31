@@ -388,7 +388,7 @@ impl TorrentMetadataInfo {
         self.pieces
             .as_slice()
             .chunks_exact(20)
-            .map(|e| e.try_into().unwrap())
+            .filter_map(|e| e.try_into().ok())
             .collect()
     }
 
@@ -401,7 +401,7 @@ impl TorrentMetadataInfo {
         self.pieces
             .as_slice()
             .chunks_exact(32)
-            .map(|e| e.try_into().unwrap())
+            .filter_map(|e| e.try_into().ok())
             .collect()
     }
 
