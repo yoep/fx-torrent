@@ -214,7 +214,7 @@ macro_rules! torrent {
             $operations,
             $discoveries,
             |params| {
-                crate::storage::DiskStorage::new(params.info_hash, params.path, params.data_pool)
+                crate::storage::MMapStorage::new(params.path, params.info_hash, params.data_pool)
                     .into()
             }
         )

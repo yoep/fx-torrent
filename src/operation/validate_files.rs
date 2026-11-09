@@ -286,7 +286,7 @@ mod tests {
     use super::*;
     use crate::channel::ChannelReceiver;
     use crate::operation::CreatePiecesAndFilesOperation;
-    use crate::storage::DiskStorage;
+    use crate::storage::MMapStorage;
     use crate::tests::copy_test_file;
     use crate::torrent::TorrentCommand;
     use crate::TorrentError;
@@ -357,7 +357,7 @@ mod tests {
             vec![],
             None,
             None,
-            |info_hash, data_pool| DiskStorage::new(info_hash, temp_path, data_pool).into()
+            |info_hash, data_pool| MMapStorage::new(temp_path, info_hash, data_pool).into()
         );
         let mut operation = FileValidationOperation::new();
 
@@ -411,7 +411,7 @@ mod tests {
             vec![],
             None,
             None,
-            |info_hash, data_pool| DiskStorage::new(info_hash, temp_path, data_pool).into()
+            |info_hash, data_pool| MMapStorage::new(temp_path, info_hash, data_pool).into()
         );
         let mut operation = FileValidationOperation::new();
 
@@ -455,7 +455,7 @@ mod tests {
             vec![],
             None,
             None,
-            |info_hash, data_pool| DiskStorage::new(info_hash, temp_path, data_pool).into()
+            |info_hash, data_pool| MMapStorage::new(temp_path, info_hash, data_pool).into()
         );
         let mut operation = FileValidationOperation::new();
 

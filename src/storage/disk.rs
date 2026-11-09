@@ -1,9 +1,6 @@
-use crate::storage::parts_file::PartsFile;
 use crate::storage::{unavailable, Metrics, Result};
 use crate::torrent_data::DataPool;
-use crate::{
-    FileAttributeFlags, FileIndex, FilePriority, InfoHash, PieceIndex, Sha1Hash, Sha256Hash,
-};
+use crate::{FileAttributeFlags, FileIndex, FilePriority, PieceIndex, Sha1Hash, Sha256Hash};
 use sha1::digest::Output;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
@@ -20,22 +17,21 @@ use tracing::instrument;
 /// The buffer size used to stream piece data from the disk while hashing.
 const HASH_BUFFER_SIZE: usize = 128 * 1024;
 
-/// File system storage for the torrent piece data.
+/// Stores the torrent data on the file system.
+///
+/// The disk storage doesn't take the file priorities into account and will always try to access
+/// the data from/to the file system.
 #[derive(Debug)]
 pub struct DiskStorage {
     path: RwLock<PathBuf>,
     data_pool: DataPool,
-    part_file: PartsFile,
     metrics: Metrics,
 }
 
 impl DiskStorage {
-    pub fn new<P: AsRef<Path>>(info_hash: InfoHash, path: P, data_pool: DataPool) -> Self {
-        let part_filename = format!(".{}.parts", hex::encode(info_hash.short_info_hash_bytes()));
-
+    pub fn new(path: impl AsRef<Path>, data_pool: DataPool) -> Self {
         Self {
             path: RwLock::new(path.as_ref().to_path_buf()),
-            part_file: PartsFile::new(part_filename, path, data_pool.clone()),
             data_pool,
             metrics: Default::default(),
         }
@@ -46,12 +42,12 @@ impl DiskStorage {
         &self,
         buffer: &mut [u8],
         piece: &PieceIndex,
-        offset: usize,
+        piece_offset: usize,
     ) -> Result<usize> {
         let mut cursor = 0;
         let buffer_len = buffer.len();
         let (mut file_index, mut torrent_offset) =
-            self.readwrite(piece, offset, buffer_len).await?;
+            self.readwrite(piece, piece_offset, buffer_len).await?;
 
         while cursor < buffer_len {
             let file = self
@@ -67,27 +63,6 @@ impl DiskStorage {
                 cursor += file.len();
                 torrent_offset += file.len();
                 file_index += 1;
-                continue;
-            }
-
-            // check if we need to read from the parts file
-            if file.priority == FilePriority::None {
-                let parts_len = min(bytes_remaining, file.len());
-                let mut parts_buffer = vec![0u8; parts_len];
-
-                let bytes_read = self
-                    .part_file
-                    .read(
-                        &mut parts_buffer,
-                        &file.pieces.start,
-                        torrent_offset.saturating_sub(file.torrent_offset),
-                    )
-                    .await?;
-                buffer[cursor..cursor + bytes_read].copy_from_slice(&parts_buffer[..bytes_read]);
-                cursor += bytes_read;
-                torrent_offset += bytes_read;
-                file_index += 1;
-                self.metrics.bytes_read.inc_by(bytes_read as u64);
                 continue;
             }
 
@@ -146,34 +121,6 @@ impl DiskStorage {
                 cursor += file.len();
                 torrent_offset += file.len();
                 file_index += 1;
-                continue;
-            }
-
-            // check if we need to write to the parts file
-            if file.priority == FilePriority::None {
-                let cur_piece = match self.data_pool.find_piece_at_offset(torrent_offset).await {
-                    Some(piece) => piece,
-                    None => return Err(unavailable()),
-                };
-                let piece_offset = torrent_offset.saturating_sub(cur_piece.offset);
-                let file_start_offset = torrent_offset.saturating_sub(file.torrent_offset);
-                let parts_len = min(
-                    bytes_remaining,
-                    file.len().saturating_sub(file_start_offset),
-                );
-                let bytes_written = self
-                    .part_file
-                    .write(
-                        &data[cursor..cursor + parts_len],
-                        &cur_piece.index,
-                        piece_offset,
-                    )
-                    .await?;
-
-                cursor += bytes_written;
-                torrent_offset += bytes_written;
-                file_index += 1;
-                self.metrics.bytes_written.inc_by(bytes_written as u64);
                 continue;
             }
 
@@ -345,7 +292,7 @@ impl DiskStorage {
             .unwrap_or_default()
     }
 
-    /// Get the amount of bytes within the torrent.
+    /// Returns the amount of bytes within the torrent.
     async fn torrent_len(&self) -> usize {
         let last_piece_index = self.data_pool.num_of_pieces().await.saturating_sub(1);
         self.data_pool
@@ -485,7 +432,7 @@ mod tests {
     use crate::operation::{CreatePiecesAndFilesOperation, TorrentOperationResult};
     use crate::tests::read_test_file_to_bytes;
     use crate::torrent::TorrentContext;
-    use crate::{Piece, TorrentFileInfo};
+    use crate::{InfoHash, Piece, TorrentFileInfo};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -502,7 +449,7 @@ mod tests {
             vec![]
         );
         let data_pool = context.data_pool().clone();
-        let storage = DiskStorage::new(context.metadata().info_hash.clone(), temp_path, data_pool);
+        let storage = DiskStorage::new(temp_path, data_pool);
 
         // create pieces & files
         create_pieces_and_files(&mut context).await;
@@ -562,7 +509,7 @@ mod tests {
             vec![]
         );
         let data_pool = context.data_pool().clone();
-        let storage = DiskStorage::new(context.metadata().info_hash.clone(), temp_path, data_pool);
+        let storage = DiskStorage::new(temp_path, data_pool);
 
         // create pieces & files
         create_pieces_and_files(&mut context).await;
@@ -610,6 +557,7 @@ mod tests {
     ///   file_b: torrent bytes 100-191 (length 92)
     #[test]
     fn test_hash_segments() {
+        init_logger!();
         let temp_dir = tempdir().unwrap();
         let file_a = temp_dir.path().join("a.bin");
         let file_b = temp_dir.path().join("b.bin");
@@ -639,6 +587,7 @@ mod tests {
 
     #[test]
     fn test_hash_segments_incomplete_file() {
+        init_logger!();
         let temp_dir = tempdir().unwrap();
         let filepath = temp_dir.path().join("incomplete.bin");
         std::fs::write(&filepath, b"lorem").unwrap();
@@ -667,7 +616,7 @@ mod tests {
             vec![]
         );
         let data_pool = context.data_pool().clone();
-        let storage = DiskStorage::new(context.metadata().info_hash.clone(), temp_path, data_pool);
+        let storage = DiskStorage::new(temp_path, data_pool);
 
         // create pieces & files
         create_pieces_and_files(&mut context).await;
@@ -727,7 +676,7 @@ mod tests {
         data_pool.set_pieces(pieces).await;
         data_pool.set_files(files).await;
 
-        let storage = DiskStorage::new(InfoHash::default(), temp_path, data_pool);
+        let storage = DiskStorage::new(temp_path, data_pool);
 
         // Generate deterministic data for piece 1
         let data: Vec<u8> = (0u8..piece_size as u8).collect();

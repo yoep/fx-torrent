@@ -350,7 +350,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            |params| DiskStorage::new(params.path, params.data_pool).into(),
             None
         );
         let data_pool = torrent.inner.data_pool().await.unwrap();
@@ -425,7 +425,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            |params| DiskStorage::new(params.path, params.data_pool).into(),
             None
         );
 
@@ -457,7 +457,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            |params| DiskStorage::new(params.path, params.data_pool).into(),
             None
         );
         let data_pool = torrent.inner.data_pool().await.unwrap();
@@ -512,7 +512,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            |params| DiskStorage::new(params.path, params.data_pool).into(),
             None
         );
         let data_pool = torrent.inner.data_pool().await.unwrap();
@@ -571,7 +571,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            |params| DiskStorage::new(params.path, params.data_pool).into(),
             None
         );
 
@@ -615,7 +615,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            |params| DiskStorage::new(params.path, params.data_pool).into(),
             None
         );
 
@@ -663,7 +663,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            |params| DiskStorage::new(params.path, params.data_pool).into(),
             None
         );
 

@@ -3596,7 +3596,7 @@ mod tests {
         StatsOperation,
     };
     use crate::peer::TcpPeerDiscovery;
-    use crate::storage::{DiskStorage, MemoryStorage};
+    use crate::storage::{MMapStorage, MemoryStorage};
     use crate::tests::helpers::wait_for_torrent_pieces;
     use crate::tests::{copy_test_file, read_test_file_to_bytes};
     use crate::{InfoHash, Magnet};
@@ -4217,6 +4217,7 @@ mod tests {
 
     mod bytes {
         use super::*;
+        use crate::storage::MMapStorage;
         use tokio::sync::oneshot;
 
         #[tokio::test]
@@ -4231,7 +4232,7 @@ mod tests {
                 TorrentConfig::builder().build(),
                 vec![CreatePiecesAndFilesOperation::new().into()],
                 vec![],
-                |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+                |params| MMapStorage::new(params.path, params.info_hash, params.data_pool).into(),
                 None
             );
             let piece_len = torrent
@@ -4275,7 +4276,7 @@ mod tests {
                 TorrentConfig::builder().build(),
                 vec![CreatePiecesAndFilesOperation::new().into()],
                 vec![],
-                |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+                |params| MMapStorage::new(params.path, params.info_hash, params.data_pool).into(),
                 None
             );
             let (peer, _peer2) = tcp_peer_pair!(&torrent, vec![]);
@@ -4352,7 +4353,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![TcpPeerDiscovery::new().await.unwrap().into()],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            |params| MMapStorage::new(params.path, params.info_hash, params.data_pool).into(),
             None
         );
         let target_torrent = torrent!(
@@ -4365,7 +4366,7 @@ mod tests {
                 CreatePiecesAndFilesOperation::new().into(),
             ],
             vec![TcpPeerDiscovery::new().await.unwrap().into()],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            |params| MMapStorage::new(params.path, params.info_hash, params.data_pool).into(),
             None
         );
         let (source_peer, target_peer) = tcp_peer_pair!(
@@ -4609,7 +4610,7 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into()],
             vec![],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            |params| MMapStorage::new(params.path, params.info_hash, params.data_pool).into(),
             None
         );
         let (peer, _peer2) = tcp_peer_pair!(&torrent, vec![]);

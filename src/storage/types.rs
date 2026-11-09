@@ -1,4 +1,4 @@
-use crate::storage::{DiskStorage, MemoryStorage, Metrics, Result};
+use crate::storage::{DiskStorage, MMapStorage, MemoryStorage, Metrics, Result};
 use crate::torrent_data::DataPool;
 use crate::{InfoHash, PieceIndex, Sha1Hash, Sha256Hash};
 use async_trait::async_trait;
@@ -10,6 +10,7 @@ use std::sync::Arc;
 /// The storage type for storing and reading torrent data.
 #[derive(Debug, Clone)]
 pub enum Storage {
+    MMap(Arc<MMapStorage>),
     Disk(Arc<DiskStorage>),
     Memory(Arc<MemoryStorage>),
     Other(Arc<dyn Extension>),
@@ -36,6 +37,7 @@ impl Storage {
         offset: usize,
     ) -> Result<usize> {
         match self {
+            Storage::MMap(storage) => storage.read(buffer, piece, offset).await,
             Storage::Disk(storage) => storage.read(buffer, piece, offset).await,
             Storage::Memory(storage) => storage.read(buffer, piece, offset).await,
             Storage::Other(storage) => storage.read(buffer, piece, offset).await,
@@ -55,6 +57,7 @@ impl Storage {
     /// Returns the number of bytes written to the storage.
     pub async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         match self {
+            Storage::MMap(storage) => storage.write(data, piece, offset).await,
             Storage::Disk(storage) => storage.write(data, piece, offset).await,
             Storage::Memory(storage) => storage.write(data, piece, offset).await,
             Storage::Other(storage) => storage.write(data, piece, offset).await,
@@ -64,6 +67,7 @@ impl Storage {
     /// Calculate the hash for the given piece stored in the storage.
     pub async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash> {
         match self {
+            Storage::MMap(storage) => storage.hash_v1(piece).await,
             Storage::Disk(storage) => storage.hash_v1(piece).await,
             Storage::Memory(storage) => storage.hash_v1(piece).await,
             Storage::Other(storage) => storage.hash_v1(piece).await,
@@ -73,6 +77,7 @@ impl Storage {
     /// Calculate the hash for the given piece stored in the storage.
     pub async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash> {
         match self {
+            Storage::MMap(storage) => storage.hash_v2(piece).await,
             Storage::Disk(storage) => storage.hash_v2(piece).await,
             Storage::Memory(storage) => storage.hash_v2(piece).await,
             Storage::Other(storage) => storage.hash_v2(piece).await,
@@ -82,6 +87,7 @@ impl Storage {
     /// Move the storage to the new location path.
     pub async fn move_storage(&self, new_path: &Path) -> Result<()> {
         match self {
+            Storage::MMap(storage) => storage.move_storage(new_path).await,
             Storage::Disk(storage) => storage.move_storage(new_path).await,
             Storage::Memory(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -94,6 +100,7 @@ impl Storage {
     /// Returns the storage metrics.
     pub fn metrics(&self) -> &Metrics {
         match self {
+            Storage::MMap(storage) => storage.metrics(),
             Storage::Disk(storage) => storage.metrics(),
             Storage::Memory(storage) => storage.metrics(),
             Storage::Other(storage) => storage.metrics(),
@@ -104,6 +111,12 @@ impl Storage {
 impl From<DiskStorage> for Storage {
     fn from(storage: DiskStorage) -> Self {
         Storage::Disk(Arc::new(storage))
+    }
+}
+
+impl From<MMapStorage> for Storage {
+    fn from(storage: MMapStorage) -> Self {
+        Storage::MMap(Arc::new(storage))
     }
 }
 
