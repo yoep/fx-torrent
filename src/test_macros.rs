@@ -575,6 +575,21 @@ macro_rules! mark_piece_completed {
     }};
 }
 
+/// Create the pieces and files for the given torrent context.
+macro_rules! create_pieces_and_files {
+    ($context:expr) => {{
+        use crate::operation::CreatePiecesAndFilesOperation;
+        use crate::operation::TorrentOperationResult;
+        use crate::TorrentContext;
+
+        let context: &mut TorrentContext = $context;
+        let mut operation = CreatePiecesAndFilesOperation::new();
+        let result = operation.execute(context).await;
+
+        assert_eq!(TorrentOperationResult::Continue, result);
+    }};
+}
+
 /// Asserts that a condition is true within a specified timeout.
 macro_rules! assert_timeout {
     ($timeout:expr, $condition:expr) => {{

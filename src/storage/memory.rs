@@ -109,7 +109,7 @@ impl MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operation::{CreatePiecesAndFilesOperation, TorrentOperationResult};
+    use crate::operation::CreatePiecesAndFilesOperation;
     use crate::tests::read_test_file_to_bytes;
     use tempfile::tempdir;
 
@@ -162,12 +162,7 @@ mod tests {
         }
 
         // create the pieces
-        let result = operation.execute(&mut context).await;
-        assert_eq!(
-            TorrentOperationResult::Continue,
-            result,
-            "expected the pieces to have been created"
-        );
+        create_pieces_and_files!(&mut context);
         let piece_hash = context
             .data_pool()
             .piece(&piece)

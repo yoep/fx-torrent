@@ -429,9 +429,7 @@ impl Drop for DiskStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operation::{CreatePiecesAndFilesOperation, TorrentOperationResult};
     use crate::tests::read_test_file_to_bytes;
-    use crate::torrent::TorrentContext;
     use crate::{InfoHash, Piece, TorrentFileInfo};
     use tempfile::tempdir;
 
@@ -452,7 +450,7 @@ mod tests {
         let storage = DiskStorage::new(temp_path, data_pool);
 
         // create pieces & files
-        create_pieces_and_files(&mut context).await;
+        create_pieces_and_files!(&mut context);
 
         // write the piece data
         {
@@ -512,7 +510,7 @@ mod tests {
         let storage = DiskStorage::new(temp_path, data_pool);
 
         // create pieces & files
-        create_pieces_and_files(&mut context).await;
+        create_pieces_and_files!(&mut context);
 
         // write the piece data
         {
@@ -619,7 +617,7 @@ mod tests {
         let storage = DiskStorage::new(temp_path, data_pool);
 
         // create pieces & files
-        create_pieces_and_files(&mut context).await;
+        create_pieces_and_files!(&mut context);
 
         let result = storage.hash_v1(&0).await;
 
@@ -716,11 +714,5 @@ mod tests {
             &file_b_content[..bytes_in_b],
             "expected file_b.bin head to match piece data tail"
         );
-    }
-
-    async fn create_pieces_and_files(context: &mut TorrentContext) {
-        let mut operation = CreatePiecesAndFilesOperation::new();
-        let result = operation.execute(context).await;
-        assert_eq!(TorrentOperationResult::Continue, result);
     }
 }
