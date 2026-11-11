@@ -14,6 +14,14 @@ use tokio::sync::OnceCell;
 use tracing::instrument;
 
 /// A memory-mapped storage, which stores the data either in a [DiskStorage] or [PartFile].
+///
+/// Each file of the torrent is routed based on its [FilePriority]:
+/// - files with [FilePriority::None] are stored in the [PartFile] (`.<short info hash>.parts`)
+///   within the storage path, which is created lazily on first use;
+/// - all other files are stored in the [DiskStorage].
+///
+/// Padding files are skipped, as their content is always zero.
+/// Operations are piece-indexed and may span multiple pieces and files.
 #[derive(Debug)]
 pub struct MMapStorage {
     info_hash: InfoHash,
@@ -26,6 +34,8 @@ pub struct MMapStorage {
 
 impl MMapStorage {
     /// Create a new memory mapped storage for the given path and info hash.
+    ///
+    /// The path is used as root for both the torrent files and the parts file.
     pub fn new(path: impl AsRef<Path>, info_hash: InfoHash, data_pool: DataPool) -> Self {
         Self {
             info_hash,
@@ -37,6 +47,16 @@ impl MMapStorage {
         }
     }
 
+    /// Read data into the buffer, starting at `offset` within the given piece.
+    ///
+    /// Each file in the requested range is read from either the disk storage or parts file.
+    /// It returns the number of bytes read, which is lower than the buffer length when data
+    /// isn't (yet) available.
+    ///
+    /// # Errors
+    ///
+    /// It returns an error when the piece is unknown or the requested range exceeds the
+    /// torrent length.
     #[cfg_attr(feature = "tracing", instrument(skip(self, buffer)))]
     pub async fn read(
         &self,
@@ -127,6 +147,14 @@ impl MMapStorage {
         Ok(cursor)
     }
 
+    /// Write the data, starting at `offset` within the given piece.
+    ///
+    /// Each file in the range is written to either the disk storage or parts file.
+    /// It returns the number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// It returns an error when the piece is unknown or the range exceeds the torrent length.
     #[cfg_attr(feature = "tracing", instrument(skip(self, data)))]
     pub async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         let mut cursor = 0;
@@ -210,18 +238,25 @@ impl MMapStorage {
         Ok(cursor)
     }
 
+    /// Calculate the SHA-1 hash (BEP3) of the given piece.
+    ///
+    /// It returns an error when the piece data isn't completely available.
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     pub async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash> {
         let hash = self.hash::<Sha1>(piece).await?;
         Sha1Hash::try_from(hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
+    /// Calculate the SHA-256 hash (BEP52) of the given piece.
+    ///
+    /// It returns an error when the piece data isn't completely available.
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     pub async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash> {
         let hash = self.hash::<Sha256>(piece).await?;
         Sha256Hash::try_from(hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
+    /// Move the storage to a new location.
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     pub async fn move_storage(&self, new_path: &Path) -> Result<()> {
         self.storage.move_storage(new_path).await

@@ -109,7 +109,6 @@ impl MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operation::CreatePiecesAndFilesOperation;
     use crate::tests::read_test_file_to_bytes;
     use tempfile::tempdir;
 
@@ -151,7 +150,6 @@ mod tests {
             TorrentConfig::builder().path(temp_path).build(),
             vec![]
         );
-        let mut operation = CreatePiecesAndFilesOperation::new();
         let storage = MemoryStorage::new();
 
         // write the piece data

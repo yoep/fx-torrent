@@ -29,6 +29,8 @@ type SlotIndex = usize;
 /// ```
 ///
 /// The pieces are a list of little endian [u64], where each position represents the slot index.
+/// Piece data is stored in fixed-size slots of `piece len` bytes. A slot is assigned to a piece
+/// on first write, and the least-recently-used slot is re-assigned when no free slot remains.
 ///
 /// ```text
 /// 0         8         16
@@ -43,8 +45,10 @@ pub struct PartFile {
 }
 
 impl PartFile {
-    /// Create a new parts file at the given path.
-    /// It can hold the `num_of_pieces` within the file.
+    /// Create a new parts file at the given path, truncating any existing file.
+    /// It can hold `num_of_pieces` pieces of `piece_len` bytes within the file.
+    ///
+    /// An empty header is written to the file directly.
     pub async fn new(
         path: impl AsRef<Path>,
         piece_len: usize,
@@ -72,7 +76,13 @@ impl PartFile {
         })
     }
 
-    /// Open an existing parts file from the given path.
+    /// Open an existing parts file from the given path and restore its slot assignments
+    /// from the header.
+    ///
+    /// # Errors
+    ///
+    /// It returns an error when the file couldn't be opened, the header is invalid,
+    /// or the piece length of the header doesn't match the given `piece_len`.
     pub async fn open(path: impl AsRef<Path>, piece_len: usize) -> Result<Self> {
         let mut file = Self::try_open(path, false).await?;
         let header_len = file.read_u64_le().await? as usize;
@@ -127,7 +137,15 @@ impl PartFile {
         &self.metrics
     }
 
-    /// Read data from the parts file into the given buffer for the given piece.
+    /// Read data from the parts file into the given buffer, starting at `offset` within the piece.
+    ///
+    /// The read continues into subsequent pieces when the buffer exceeds the piece length, and
+    /// stops at the first piece which isn't stored within the parts file.
+    /// It returns the number of bytes read.
+    ///
+    /// # Errors
+    ///
+    /// It returns an error when the offset is greater than the piece length.
     #[cfg_attr(feature = "tracing", instrument(skip(self, buffer)))]
     pub async fn read(
         &self,
@@ -138,12 +156,17 @@ impl PartFile {
         self.inner.lock().await.read(buffer, piece, offset).await
     }
 
-    /// Write the given data of the piece into the parts file.
+    /// Write the given data into the parts file, starting at `offset` within the piece.
+    ///
+    /// The write continues into subsequent pieces when the data exceeds the piece length.
+    /// Slot assignments are persisted in the header of the file.
+    /// It returns the number of bytes written.
     #[cfg_attr(feature = "tracing", instrument(skip(self, data)))]
     pub async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         self.inner.lock().await.write(data, piece, offset).await
     }
 
+    /// Open the file for reading and writing, creating it when it doesn't exist.
     async fn try_open(path: impl AsRef<Path>, truncate: bool) -> Result<File> {
         OpenOptions::new()
             .read(true)
@@ -155,6 +178,7 @@ impl PartFile {
     }
 }
 
+/// The mutable state of the parts file, guarded by a mutex in [PartFile].
 #[derive(Debug)]
 struct Inner {
     file: File,
@@ -165,6 +189,8 @@ struct Inner {
 }
 
 impl Inner {
+    /// Read from the slots of the given piece, continuing into the next pieces for as long as
+    /// a slot is allocated for them.
     async fn read(
         &mut self,
         buffer: &mut [u8],
@@ -334,6 +360,7 @@ impl Inner {
     }
 }
 
+/// A fixed-size region within the parts file, which holds the data of at most one piece.
 #[derive(Debug, Copy, Clone)]
 struct Slot {
     slot_index: SlotIndex,

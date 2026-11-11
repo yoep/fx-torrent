@@ -21,6 +21,11 @@ const HASH_BUFFER_SIZE: usize = 128 * 1024;
 ///
 /// The disk storage doesn't take the file priorities into account and will always try to access
 /// the data from/to the file system.
+///
+/// All operations are piece-indexed: a piece and an offset within that piece are resolved through
+/// the [DataPool] to the torrent files that hold the data. Reads and writes may span multiple
+/// pieces and files, and padding files are skipped. File paths are validated to never leave the
+/// storage path.
 #[derive(Debug)]
 pub struct DiskStorage {
     path: RwLock<PathBuf>,
@@ -29,6 +34,7 @@ pub struct DiskStorage {
 }
 
 impl DiskStorage {
+    /// Create a new disk storage which stores the torrent files relative to the given path.
     pub fn new(path: impl AsRef<Path>, data_pool: DataPool) -> Self {
         Self {
             path: RwLock::new(path.as_ref().to_path_buf()),
@@ -37,6 +43,16 @@ impl DiskStorage {
         }
     }
 
+    /// Read data from the disk into the buffer, starting at `piece_offset` within the given piece.
+    ///
+    /// The read continues into subsequent pieces and files when the buffer exceeds the piece.
+    /// It returns the number of bytes read, which is lower than the buffer length when the end of
+    /// a file was reached before the buffer was filled.
+    ///
+    /// # Errors
+    ///
+    /// It returns an error when the piece is unknown, the requested range exceeds the torrent
+    /// length, or the file path is invalid or couldn't be opened.
     #[cfg_attr(feature = "tracing", instrument(skip(self, buffer)))]
     pub async fn read(
         &self,
@@ -101,6 +117,15 @@ impl DiskStorage {
         Ok(cursor)
     }
 
+    /// Write the data to the disk, starting at `offset` within the given piece.
+    ///
+    /// The write continues into subsequent pieces and files when the data exceeds the piece.
+    /// Missing files and directories are created. It returns the number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// It returns an error when the piece is unknown, the range exceeds the torrent length,
+    /// or the file path is invalid or couldn't be opened.
     #[cfg_attr(feature = "tracing", instrument(skip(self, data)))]
     pub async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         let mut cursor = 0;
@@ -141,12 +166,14 @@ impl DiskStorage {
         Ok(cursor)
     }
 
+    /// Calculate the SHA-1 hash (BEP3) of the given piece from the data stored on the disk.
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     pub async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash> {
         let hash = self.hash::<Sha1>(piece).await?;
         Sha1Hash::try_from(hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
+    /// Calculate the SHA-256 hash (BEP52) of the given piece from the data stored on the disk.
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     pub async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash> {
         let hash = self.hash::<Sha256>(piece).await?;
@@ -154,8 +181,48 @@ impl DiskStorage {
     }
 
     /// Move the storage to a new location.
-    pub async fn move_storage(&self, _new_path: &Path) -> Result<()> {
-        todo!()
+    ///
+    /// Each existing torrent file is moved to the same relative path within `new_path`, creating
+    /// the required directories. Files which don't exist (yet) are skipped. The storage path is
+    /// only updated when all files have been moved; on failure, the already moved files are
+    /// moved back on a best-effort basis.
+    ///
+    /// # Errors
+    ///
+    /// It returns an error when a file path would leave the new storage path, or a file couldn't
+    /// be moved.
+    pub async fn move_storage(&self, new_path: &Path) -> Result<()> {
+        let mut path = self.path.write().await;
+        // early exit, if the new path is the same as the current one
+        if path.as_path() == new_path {
+            return Ok(());
+        }
+
+        let base = Self::canonicalize_unchecked(new_path);
+        let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for file in self.data_pool.files().await {
+            if file.attributes().contains(FileAttributeFlags::PaddingFile) {
+                continue;
+            }
+
+            let source = path.join(&file.torrent_path);
+            let target = new_path.join(&file.torrent_path);
+            if !Self::canonicalize_unchecked(&target).starts_with(&base) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{:?}", target),
+                ));
+            }
+            if !tokio::fs::try_exists(&source).await? {
+                continue;
+            }
+
+            Self::move_file(&source, &target).await?;
+            moved.push((source, target));
+        }
+
+        *path = new_path.to_path_buf();
+        Ok(())
     }
 
     /// Returns the storage metrics.
@@ -192,6 +259,21 @@ impl DiskStorage {
         self.metrics.bytes_read.inc_by(bytes_read as u64);
 
         Ok(hash)
+    }
+
+    /// Move a single file, creating the parent directories of the target.
+    /// It falls back to copy and remove when the target is on a different file system.
+    async fn move_file(source: &Path, target: &Path) -> Result<()> {
+        if let Some(parent) = target.parent() {
+            create_dir_all(parent).await?;
+        }
+
+        if tokio::fs::rename(source, target).await.is_ok() {
+            return Ok(());
+        }
+
+        tokio::fs::copy(source, target).await?;
+        tokio::fs::remove_file(source).await
     }
 
     /// Resolve the file segments which make up the data of the given piece.
@@ -623,6 +705,64 @@ mod tests {
 
         let err = result.expect_err("expected an error to be returned");
         assert_eq!(io::ErrorKind::NotFound, err.kind());
+    }
+
+    #[tokio::test]
+    async fn test_move_storage() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let old_path = temp_dir.path().join("old");
+        let new_path = temp_dir.path().join("new");
+        let make_file = |index: usize, name: &str, offset: usize| crate::File {
+            index,
+            torrent_path: PathBuf::from(name),
+            torrent_offset: offset,
+            info: TorrentFileInfo {
+                length: 10,
+                path: None,
+                path_utf8: None,
+                md5sum: None,
+                attr: None,
+                symlink_path: None,
+                sha1: None,
+            },
+            priority: FilePriority::Normal,
+            pieces: 0..1,
+        };
+        let data_pool = DataPool::new();
+        data_pool
+            .set_pieces(vec![Piece::new(InfoHash::default(), 0, 0, 20)])
+            .await;
+        data_pool
+            .set_files(vec![
+                make_file(0, "dir/file_a.bin", 0),
+                make_file(1, "file_b.bin", 10),
+            ])
+            .await;
+        let storage = DiskStorage::new(&old_path, data_pool);
+
+        // only file_a exists, file_b is skipped
+        std::fs::create_dir_all(old_path.join("dir")).unwrap();
+        std::fs::write(old_path.join("dir/file_a.bin"), b"0123456789").unwrap();
+
+        storage
+            .move_storage(&new_path)
+            .await
+            .expect("expected the storage to have been moved");
+
+        assert!(!old_path.join("dir/file_a.bin").exists());
+        assert_eq!(
+            b"0123456789".as_slice(),
+            std::fs::read(new_path.join("dir/file_a.bin")).unwrap()
+        );
+        assert!(!new_path.join("file_b.bin").exists());
+        assert_eq!(new_path, *storage.path.read().await);
+
+        // the data should be readable from the new location
+        let mut buffer = vec![0u8; 10];
+        let read = storage.read(&mut buffer, &0, 0).await.unwrap();
+        assert_eq!(10, read);
+        assert_eq!(b"0123456789".as_slice(), buffer.as_slice());
     }
 
     #[tokio::test]
