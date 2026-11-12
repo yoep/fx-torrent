@@ -1,6 +1,6 @@
-use crate::storage::{unavailable, Metrics, Result};
+use crate::storage::{unavailable, Error, Metrics, Result};
 use crate::torrent_data::DataPool;
-use crate::{FileAttributeFlags, FileIndex, FilePriority, PieceIndex, Sha1Hash, Sha256Hash};
+use crate::{FileAttributeFlags, FileIndex, PieceIndex, Sha1Hash, Sha256Hash};
 use sha1::digest::Output;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
@@ -29,18 +29,25 @@ const HASH_BUFFER_SIZE: usize = 128 * 1024;
 #[derive(Debug)]
 pub struct DiskStorage {
     path: RwLock<PathBuf>,
+    piece_len: RwLock<Option<usize>>,
     data_pool: DataPool,
     metrics: Metrics,
 }
 
 impl DiskStorage {
     /// Create a new disk storage which stores the torrent files relative to the given path.
-    pub fn new(path: impl AsRef<Path>, data_pool: DataPool) -> Self {
+    pub fn new(path: impl AsRef<Path>, piece_length: Option<usize>, data_pool: DataPool) -> Self {
         Self {
             path: RwLock::new(path.as_ref().to_path_buf()),
+            piece_len: RwLock::new(piece_length),
             data_pool,
             metrics: Default::default(),
         }
+    }
+
+    /// Update the piece length of the torrent within the storage.
+    pub async fn set_piece_len(&self, piece_len: usize) {
+        self.piece_len.write().await.replace(piece_len);
     }
 
     /// Read data from the disk into the buffer, starting at `piece_offset` within the given piece.
@@ -232,26 +239,14 @@ impl DiskStorage {
 
     /// Calculate the digest of the given piece.
     ///
-    /// The piece data is streamed from the disk and hashed on the blocking thread pool,
-    /// preventing the async runtime from being blocked by the file I/O and hash computation.
-    async fn hash<D: Digest + Send + 'static>(&self, piece: &PieceIndex) -> Result<Output<D>> {
-        let segments = match self.piece_segments(piece).await? {
-            Some(segments) => segments,
-            None => {
-                // the piece is (partially) stored within the parts file
-                let len = self.piece_len(piece).await;
-                let mut buffer = vec![0u8; len];
-                let bytes_read = self.read(&mut buffer, piece, 0).await?;
-                if bytes_read != len {
-                    return Err(unavailable());
-                }
-
-                return tokio::task::spawn_blocking(move || D::digest(buffer.as_slice()))
-                    .await
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
-            }
-        };
-
+    /// The file segments of the piece are resolved once and streamed from the disk, hashed on
+    /// the blocking thread pool. This prevents the async runtime from being blocked by the
+    /// file I/O and hash computation, and avoids buffering the whole piece.
+    pub(super) async fn hash<D: Digest + Send + 'static>(
+        &self,
+        piece: &PieceIndex,
+    ) -> Result<Output<D>> {
+        let segments = self.piece_segments(piece).await?;
         let (hash, bytes_read) =
             tokio::task::spawn_blocking(move || Self::hash_segments::<D>(segments))
                 .await
@@ -277,8 +272,7 @@ impl DiskStorage {
     }
 
     /// Resolve the file segments which make up the data of the given piece.
-    /// It returns `None` when the piece data is (partially) stored within the parts file.
-    async fn piece_segments(&self, piece: &PieceIndex) -> Result<Option<Vec<PieceSegment>>> {
+    async fn piece_segments(&self, piece: &PieceIndex) -> Result<Vec<PieceSegment>> {
         let len = self.piece_len(piece).await;
         let (mut file_index, mut torrent_offset) = self.readwrite(piece, 0, len).await?;
         let mut segments = Vec::new();
@@ -296,8 +290,6 @@ impl DiskStorage {
             if segment_len > 0 {
                 if file.attributes().contains(FileAttributeFlags::PaddingFile) {
                     segments.push(PieceSegment::Padding(segment_len));
-                } else if file.priority == FilePriority::None {
-                    return Ok(None);
                 } else {
                     let path = self.absolute_filepath(&file.torrent_path).await;
                     self.assert_valid_filepath(&path).await?;
@@ -314,7 +306,7 @@ impl DiskStorage {
             file_index += 1;
         }
 
-        Ok(Some(segments))
+        Ok(segments)
     }
 
     /// Calculate the digest of the given piece segments.
@@ -451,13 +443,27 @@ impl DiskStorage {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "out-of-bounds"));
         }
 
+        // resolve the file containing the start of the range, which isn't
+        // necessarily the first file of the piece when an offset is given
+        let piece_index = self.piece_at_offset(torrent_piece_start).await?;
         let file_index = self
             .data_pool
-            .file_index_for(&piece)
+            .file_index_for(&piece_index)
             .await
             .ok_or(unavailable())?;
 
         Ok((file_index, torrent_piece_start))
+    }
+
+    /// Returns the piece index for the given torrent byte offset.
+    async fn piece_at_offset(&self, offset: usize) -> Result<PieceIndex> {
+        let piece_len = self
+            .piece_len
+            .read()
+            .await
+            .ok_or(Error::new(io::ErrorKind::Other, "piece length unknown"))?;
+
+        Ok(offset / piece_len)
     }
 
     /// Get the canonicalized path for the given path.
@@ -502,17 +508,11 @@ enum PieceSegment {
     Padding(usize),
 }
 
-impl Drop for DiskStorage {
-    fn drop(&mut self) {
-        // TODO: cleanup parts file
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tests::read_test_file_to_bytes;
-    use crate::{InfoHash, Piece, TorrentFileInfo};
+    use crate::{FilePriority, InfoHash, Piece, TorrentFileInfo};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -529,7 +529,15 @@ mod tests {
             vec![]
         );
         let data_pool = context.data_pool().clone();
-        let storage = DiskStorage::new(temp_path, data_pool);
+        let storage = DiskStorage::new(
+            temp_path,
+            context
+                .metadata()
+                .info
+                .as_ref()
+                .map(|info| info.piece_length as usize),
+            data_pool,
+        );
 
         // create pieces & files
         create_pieces_and_files!(&mut context);
@@ -589,7 +597,15 @@ mod tests {
             vec![]
         );
         let data_pool = context.data_pool().clone();
-        let storage = DiskStorage::new(temp_path, data_pool);
+        let storage = DiskStorage::new(
+            temp_path,
+            context
+                .metadata()
+                .info
+                .as_ref()
+                .map(|info| info.piece_length as usize),
+            data_pool,
+        );
 
         // create pieces & files
         create_pieces_and_files!(&mut context);
@@ -696,7 +712,15 @@ mod tests {
             vec![]
         );
         let data_pool = context.data_pool().clone();
-        let storage = DiskStorage::new(temp_path, data_pool);
+        let storage = DiskStorage::new(
+            temp_path,
+            context
+                .metadata()
+                .info
+                .as_ref()
+                .map(|info| info.piece_length as usize),
+            data_pool,
+        );
 
         // create pieces & files
         create_pieces_and_files!(&mut context);
@@ -739,7 +763,7 @@ mod tests {
                 make_file(1, "file_b.bin", 10),
             ])
             .await;
-        let storage = DiskStorage::new(&old_path, data_pool);
+        let storage = DiskStorage::new(&old_path, Some(10), data_pool);
 
         // only file_a exists, file_b is skipped
         std::fs::create_dir_all(old_path.join("dir")).unwrap();
@@ -814,7 +838,7 @@ mod tests {
         data_pool.set_pieces(pieces).await;
         data_pool.set_files(files).await;
 
-        let storage = DiskStorage::new(temp_path, data_pool);
+        let storage = DiskStorage::new(temp_path, Some(piece_size), data_pool);
 
         // Generate deterministic data for piece 1
         let data: Vec<u8> = (0u8..piece_size as u8).collect();

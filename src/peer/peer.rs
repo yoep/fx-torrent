@@ -2905,7 +2905,13 @@ mod tests {
                 FileValidationOperation::new().into(),
             ],
             vec![],
-            |params| MMapStorage::new(params.path, params.info_hash, params.data_pool).into(),
+            |params| MMapStorage::new(
+                params.path,
+                params.info_hash,
+                params.piece_length,
+                params.data_pool
+            )
+            .into(),
             None
         );
         let target = torrent!(

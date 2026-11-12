@@ -69,7 +69,7 @@ macro_rules! torrent_context {
             $extensions,
             $dht,
             None,
-            |_, _| crate::storage::MemoryStorage::new().into()
+            |_, _, _| crate::storage::MemoryStorage::new().into()
         )
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr, $lsd:expr) => {{
@@ -82,7 +82,7 @@ macro_rules! torrent_context {
             $extensions,
             $dht,
             $lsd,
-            |_, _| crate::storage::MemoryStorage::new().into()
+            |_, _, _| crate::storage::MemoryStorage::new().into()
         )
     }};
     ($uri:expr, $temp_dir:expr, $options:expr, $config:expr, $discoveries:expr, $extensions:expr, $dht:expr, $lsd:expr, $storage:expr) => {{
@@ -135,7 +135,14 @@ macro_rules! torrent_context {
         let max_outstanding_pieces = config.max_in_flight_pieces;
         let peer_port = discoveries.first().map(|e| e.addr().port());
         let callbacks = MultiThreadedCallback::new();
-        let storage: Storage = ($storage)(info_hash, data_pool.clone());
+        let storage: Storage = ($storage)(
+            info_hash,
+            metadata
+                .info
+                .as_ref()
+                .map(|info| info.piece_length as usize),
+            data_pool.clone(),
+        );
         (
             TorrentContext::new(
                 handle,
@@ -214,8 +221,13 @@ macro_rules! torrent {
             $operations,
             $discoveries,
             |params| {
-                crate::storage::MMapStorage::new(params.path, params.info_hash, params.data_pool)
-                    .into()
+                crate::storage::MMapStorage::new(
+                    params.path,
+                    params.info_hash,
+                    params.piece_length,
+                    params.data_pool,
+                )
+                .into()
             }
         )
     }};

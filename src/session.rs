@@ -987,7 +987,13 @@ impl FxSessionBuilder {
             .unwrap_or_else(Self::default_operations_list);
         let storage = self.storage.take().unwrap_or_else(|| {
             Arc::new(|params| {
-                MMapStorage::new(params.path, params.info_hash, params.data_pool).into()
+                MMapStorage::new(
+                    params.path,
+                    params.info_hash,
+                    params.piece_length,
+                    params.data_pool,
+                )
+                .into()
             })
         });
         let session_cache = self

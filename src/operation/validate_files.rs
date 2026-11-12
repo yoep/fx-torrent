@@ -357,7 +357,10 @@ mod tests {
             vec![],
             None,
             None,
-            |info_hash, data_pool| MMapStorage::new(temp_path, info_hash, data_pool).into()
+            |info_hash, piece_len, data_pool| MMapStorage::new(
+                temp_path, info_hash, piece_len, data_pool
+            )
+            .into()
         );
         let mut operation = FileValidationOperation::new();
 
@@ -411,7 +414,10 @@ mod tests {
             vec![],
             None,
             None,
-            |info_hash, data_pool| MMapStorage::new(temp_path, info_hash, data_pool).into()
+            |info_hash, piece_len, data_pool| MMapStorage::new(
+                temp_path, info_hash, piece_len, data_pool
+            )
+            .into()
         );
         let mut operation = FileValidationOperation::new();
 
@@ -455,7 +461,10 @@ mod tests {
             vec![],
             None,
             None,
-            |info_hash, data_pool| MMapStorage::new(temp_path, info_hash, data_pool).into()
+            |info_hash, piece_len, data_pool| MMapStorage::new(
+                temp_path, info_hash, piece_len, data_pool
+            )
+            .into()
         );
         let mut operation = FileValidationOperation::new();
 

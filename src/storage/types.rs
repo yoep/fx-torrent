@@ -17,6 +17,16 @@ pub enum Storage {
 }
 
 impl Storage {
+    /// Update the piece length of the torrent within the storage.
+    pub async fn set_piece_len(&self, piece_len: usize) {
+        match self {
+            Storage::MMap(storage) => storage.set_piece_len(piece_len).await,
+            Storage::Disk(storage) => storage.set_piece_len(piece_len).await,
+            Storage::Other(storage) => storage.set_piece_len(piece_len).await,
+            _ => {}
+        }
+    }
+
     /// Read the torrent data from the given piece into the buffer.
     /// The [Extension] keeps reading piece(s) data until the buffer is filled,
     /// or the no more data is available.
@@ -137,6 +147,9 @@ where
 
 #[async_trait]
 pub trait Extension: Debug + Send + Sync {
+    /// Update the piece length of the torrent within the storage.
+    async fn set_piece_len(&self, piece_len: usize);
+
     /// Read the torrent data from the given piece into the buffer.
     /// The [Extension] keeps reading piece(s) data until the buffer is filled,
     /// or the no more data is available.
@@ -182,7 +195,10 @@ pub trait Extension: Debug + Send + Sync {
 /// The storage parameters for initializing a new [Extension] instance.
 #[derive(Debug, Clone)]
 pub struct StorageParams {
+    /// The info hash of the torrent.
     pub info_hash: InfoHash,
+    /// The length of each piece within the torrent, if known.
+    pub piece_length: Option<usize>,
     pub path: PathBuf,
     pub data_pool: DataPool,
 }
@@ -192,12 +208,14 @@ mod tests {
     use super::*;
     use mockall::mock;
     use rand::{rng, Rng};
+    use tokio::sync::oneshot;
 
     mock! {
         #[derive(Debug)]
         pub Extension {}
         #[async_trait]
         impl Extension for Extension {
+            async fn set_piece_len(&self, piece_len: usize);
             async fn read(&self, buffer: &mut [u8], piece: &PieceIndex, offset: usize) -> Result<usize>;
             async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize>;
             async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash>;
@@ -205,6 +223,26 @@ mod tests {
             async fn move_storage(&self, new_path: &Path) -> Result<()>;
             fn metrics(&self) -> &Metrics;
         }
+    }
+
+    #[tokio::test]
+    async fn test_extension_set_piece_len() {
+        let (tx, rx) = oneshot::channel();
+        let mut extension = MockExtension::new();
+        extension
+            .expect_set_piece_len()
+            .times(1)
+            .return_once(move |len| {
+                tx.send(len).unwrap();
+            });
+        let storage: Storage = extension.into();
+
+        let piece_len = 16000;
+        storage.set_piece_len(piece_len).await;
+
+        let result = timeout!(Duration::from_millis(100), rx)
+            .expect("expected the piece length to have been set");
+        assert_eq!(piece_len, result);
     }
 
     #[tokio::test]

@@ -717,7 +717,13 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into()],
             vec![],
-            |params| MMapStorage::new(params.path, params.info_hash, params.data_pool).into(),
+            |params| MMapStorage::new(
+                params.path,
+                params.info_hash,
+                params.piece_length,
+                params.data_pool
+            )
+            .into(),
             None
         );
         let data_pool = torrent.inner.data_pool().await.unwrap();

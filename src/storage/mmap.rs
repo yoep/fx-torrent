@@ -9,7 +9,7 @@ use sha2::Sha256;
 use std::cmp::min;
 use std::io;
 use std::path::{Path, PathBuf};
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, RwLock};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
@@ -24,11 +24,12 @@ use tracing::instrument;
 /// Operations are piece-indexed and may span multiple pieces and files.
 #[derive(Debug)]
 pub struct MMapStorage {
+    path: PathBuf,
     info_hash: InfoHash,
+    piece_len: RwLock<Option<usize>>,
     storage: DiskStorage,
     part_file: OnceCell<PartFile>,
     data_pool: DataPool,
-    path: PathBuf,
     metrics: Metrics,
 }
 
@@ -36,15 +37,26 @@ impl MMapStorage {
     /// Create a new memory mapped storage for the given path and info hash.
     ///
     /// The path is used as root for both the torrent files and the parts file.
-    pub fn new(path: impl AsRef<Path>, info_hash: InfoHash, data_pool: DataPool) -> Self {
+    pub fn new(
+        path: impl AsRef<Path>,
+        info_hash: InfoHash,
+        piece_len: Option<usize>,
+        data_pool: DataPool,
+    ) -> Self {
         Self {
             info_hash,
-            storage: DiskStorage::new(path.as_ref(), data_pool.clone()),
+            path: path.as_ref().to_path_buf(),
+            piece_len: RwLock::new(piece_len.clone()),
+            storage: DiskStorage::new(path.as_ref(), piece_len, data_pool.clone()),
             part_file: OnceCell::new(),
             data_pool,
-            path: path.as_ref().to_path_buf(),
             metrics: Default::default(),
         }
+    }
+
+    /// Update the piece length of the torrent within the storage.
+    pub async fn set_piece_len(&self, piece_len: usize) {
+        self.piece_len.write().await.replace(piece_len);
     }
 
     /// Read data into the buffer, starting at `offset` within the given piece.
@@ -108,13 +120,17 @@ impl MMapStorage {
                 continue;
             }
 
-            // read the current file from the disk storage
-            // start reading at the current torrent offset, not at the start of the file
+            // read the current file, and all directly following disk files, from the disk storage
+            // in a single call; start at the current torrent offset, not at the start of the file
             let file_offset = torrent_offset.saturating_sub(file.torrent_offset);
-            let read_len = bytes_remaining.min(file.len().saturating_sub(file_offset));
+            let (run_len, next_file_index) = self
+                .disk_run(&file, file_index, file_offset, bytes_remaining)
+                .await;
+            let read_len = bytes_remaining.min(run_len);
+            let piece_index = self.piece_at_offset(torrent_offset).await?;
             let cur_piece = self
                 .data_pool
-                .find_piece_at_offset(torrent_offset)
+                .piece(&piece_index)
                 .await
                 .ok_or(unavailable())?;
             // read directly into the buffer
@@ -134,13 +150,13 @@ impl MMapStorage {
             cursor += bytes_read;
             self.metrics.bytes_read.inc_by(bytes_read as u64);
 
-            // check if all bytes from the file where available
+            // check if all bytes from the files where available
             // if not, don't read the next file
             if bytes_read < read_len {
                 break;
             }
 
-            file_index += 1;
+            file_index = next_file_index;
             torrent_offset += bytes_read;
         }
 
@@ -180,10 +196,12 @@ impl MMapStorage {
 
             // check if we need to write to the parts file
             if file.priority == FilePriority::None {
-                let cur_piece = match self.data_pool.find_piece_at_offset(torrent_offset).await {
-                    Some(piece) => piece,
-                    None => return Err(unavailable()),
-                };
+                let piece_index = self.piece_at_offset(torrent_offset).await?;
+                let cur_piece = self
+                    .data_pool
+                    .piece(&piece_index)
+                    .await
+                    .ok_or(unavailable())?;
                 let piece_offset = torrent_offset.saturating_sub(cur_piece.offset);
                 let file_start_offset = torrent_offset.saturating_sub(file.torrent_offset);
                 let parts_len = min(
@@ -207,12 +225,17 @@ impl MMapStorage {
                 continue;
             }
 
-            // start writing at the current torrent offset, not at the start of the file
+            // write the current file, and all directly following disk files, to the disk storage
+            // in a single call; start at the current torrent offset, not at the start of the file
             let file_offset = torrent_offset.saturating_sub(file.torrent_offset);
-            let write_len = bytes_remaining.min(file.len().saturating_sub(file_offset));
+            let (run_len, next_file_index) = self
+                .disk_run(&file, file_index, file_offset, bytes_remaining)
+                .await;
+            let write_len = bytes_remaining.min(run_len);
+            let piece_index = self.piece_at_offset(torrent_offset).await?;
             let cur_piece = self
                 .data_pool
-                .find_piece_at_offset(torrent_offset)
+                .piece(&piece_index)
                 .await
                 .ok_or(unavailable())?;
             let bytes_written = self
@@ -231,7 +254,7 @@ impl MMapStorage {
 
             cursor += bytes_written;
             torrent_offset += bytes_written;
-            file_index += 1;
+            file_index = next_file_index;
             self.metrics.bytes_written.inc_by(bytes_written as u64);
         }
 
@@ -273,6 +296,14 @@ impl MMapStorage {
     /// from either the disk storage or the parts file based on the file priority.
     /// The digest itself is computed on the blocking thread pool.
     async fn hash<D: Digest + Send + 'static>(&self, piece: &PieceIndex) -> Result<Output<D>> {
+        // fast path: stream the segments from the disk when no part of the piece is in the parts file
+        if !self.is_in_parts_file(piece).await {
+            let hash = self.storage.hash::<D>(piece).await?;
+            let len = self.piece_len(piece).await;
+            self.metrics.bytes_read.inc_by(len as u64);
+            return Ok(hash);
+        }
+
         let len = self
             .data_pool
             .piece(piece)
@@ -291,13 +322,70 @@ impl MMapStorage {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
-    /// Returns the offset in bytes of the piece within the torrent.
-    async fn piece_start(&self, piece: &PieceIndex) -> Result<usize> {
+    /// Returns `true` if any file of the piece is stored within the parts file.
+    async fn is_in_parts_file(&self, piece: &PieceIndex) -> bool {
+        let Some(piece) = self.data_pool.piece(piece).await else {
+            return false;
+        };
+        let piece_end = piece.offset + piece.len();
+        let Some(mut file_index) = self.data_pool.file_index_for(&piece.index).await else {
+            return false;
+        };
+
+        while let Some(file) = self.data_pool.file(&file_index).await {
+            if file.torrent_offset >= piece_end {
+                break;
+            }
+            if file.priority == FilePriority::None
+                && !file.attributes().contains(FileAttributeFlags::PaddingFile)
+            {
+                return true;
+            }
+
+            file_index += 1;
+        }
+
+        false
+    }
+
+    /// Returns the length of the piece in bytes, or 0 when the piece is unknown.
+    async fn piece_len(&self, piece: &PieceIndex) -> usize {
         self.data_pool
-            .piece(&piece)
+            .piece(piece)
             .await
-            .map(|piece| piece.offset)
-            .ok_or(Error::new(io::ErrorKind::Other, "missing piece data"))
+            .map(|piece| piece.len())
+            .unwrap_or_default()
+    }
+
+    /// Returns the amount of bytes which can be accessed through a single [DiskStorage] call,
+    /// starting at `file_offset` within the given file, and the index of the file following the run.
+    ///
+    /// The run continues over the consecutive files which are stored on the disk
+    /// until `max_len` bytes are covered. It stops at padding files and files within the parts file.
+    async fn disk_run(
+        &self,
+        file: &crate::File,
+        file_index: FileIndex,
+        file_offset: usize,
+        max_len: usize,
+    ) -> (usize, FileIndex) {
+        let mut run_len = file.len().saturating_sub(file_offset);
+        let mut next_file_index = file_index + 1;
+
+        while run_len < max_len {
+            match self.data_pool.file(&next_file_index).await {
+                Some(next)
+                    if next.priority != FilePriority::None
+                        && !next.attributes().contains(FileAttributeFlags::PaddingFile) =>
+                {
+                    run_len += next.len();
+                    next_file_index += 1;
+                }
+                _ => break,
+            }
+        }
+
+        (run_len, next_file_index)
     }
 
     /// Returns the parts file for the memory-mapped storage.
@@ -363,6 +451,17 @@ impl MMapStorage {
         Ok((file_index, torrent_piece_start))
     }
 
+    /// Returns the piece index for the given torrent byte offset.
+    async fn piece_at_offset(&self, offset: usize) -> Result<PieceIndex> {
+        let piece_len = self
+            .piece_len
+            .read()
+            .await
+            .ok_or(Error::new(io::ErrorKind::Other, "piece length unknown"))?;
+
+        Ok(offset / piece_len)
+    }
+
     /// Returns the amount of bytes within the torrent.
     async fn torrent_len(&self) -> usize {
         let last_piece_index = self.data_pool.num_of_pieces().await.saturating_sub(1);
@@ -378,6 +477,7 @@ impl MMapStorage {
 mod tests {
     use super::*;
     use crate::tests::{copy_test_file, read_test_file_to_bytes};
+    use crate::{File, Piece, TorrentFileInfo};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -401,7 +501,16 @@ mod tests {
             None
         );
         let info_hash = context.metadata().info_hash.clone();
-        let storage = MMapStorage::new(temp_path, info_hash, context.data_pool().clone());
+        let storage = MMapStorage::new(
+            temp_path,
+            info_hash,
+            context
+                .metadata()
+                .info
+                .as_ref()
+                .map(|info| info.piece_length as usize),
+            context.data_pool().clone(),
+        );
 
         // wait for the files of the torrent
         create_pieces_and_files!(&mut context);
@@ -446,7 +555,16 @@ mod tests {
             None
         );
         let info_hash = context.metadata().info_hash.clone();
-        let storage = MMapStorage::new(temp_path, info_hash, context.data_pool().clone());
+        let storage = MMapStorage::new(
+            temp_path,
+            info_hash,
+            context
+                .metadata()
+                .info
+                .as_ref()
+                .map(|info| info.piece_length as usize),
+            context.data_pool().clone(),
+        );
 
         // wait for the files of the torrent
         create_pieces_and_files!(&mut context);
@@ -487,6 +605,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_read_write_hash_multiple_files() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let piece_len = 64usize;
+        let file_lens = [100usize, 10, 70, 12];
+        let total_len: usize = file_lens.iter().sum();
+        let mut offset = 0;
+        let files = file_lens
+            .iter()
+            .enumerate()
+            .map(|(index, len)| {
+                let file = File {
+                    index,
+                    torrent_path: PathBuf::from(format!("dir/file_{}.bin", index)),
+                    torrent_offset: offset,
+                    info: TorrentFileInfo {
+                        length: *len as u64,
+                        path: None,
+                        path_utf8: None,
+                        md5sum: None,
+                        attr: None,
+                        symlink_path: None,
+                        sha1: None,
+                    },
+                    priority: FilePriority::Normal,
+                    pieces: (offset / piece_len)..((offset + len + piece_len - 1) / piece_len),
+                };
+                offset += len;
+                file
+            })
+            .collect::<Vec<_>>();
+        let pieces = (0..total_len / piece_len)
+            .map(|index| Piece::new(InfoHash::default(), index, index * piece_len, piece_len))
+            .collect::<Vec<_>>();
+        let data_pool = DataPool::new();
+        data_pool.set_pieces(pieces).await;
+        data_pool.set_files(files).await;
+        let storage = MMapStorage::new(
+            temp_dir.path(),
+            InfoHash::default(),
+            Some(piece_len),
+            data_pool,
+        );
+        let data: Vec<u8> = (0..total_len).map(|e| (e % 251) as u8).collect();
+
+        // write all pieces, which spans all files
+        let written = storage.write(&data[..piece_len * 3], &0, 0).await.unwrap();
+        assert_eq!(piece_len * 3, written);
+
+        // read all pieces back, and from within the middle of a file
+        let mut buffer = vec![0u8; piece_len * 3];
+        let read = storage.read(&mut buffer, &0, 0).await.unwrap();
+        assert_eq!(piece_len * 3, read);
+        assert_eq!(&data[..piece_len * 3], buffer.as_slice());
+
+        let mut buffer = vec![0u8; 100];
+        let read = storage.read(&mut buffer, &1, 28).await.unwrap();
+        assert_eq!(100, read);
+        assert_eq!(&data[64 + 28..64 + 128], buffer.as_slice());
+
+        // the hash of a piece spanning multiple files should match the data
+        let expected: [u8; 20] = Sha1::digest(&data[piece_len..piece_len * 2]).into();
+        let hash = storage.hash_v1(&1).await.unwrap();
+        assert_eq!(expected.as_slice(), hash.as_ref());
+    }
+
+    #[tokio::test]
     async fn test_hash_v1() {
         init_logger!();
         let temp_dir = tempdir().unwrap();
@@ -503,7 +688,16 @@ mod tests {
             None
         );
         let info_hash = context.metadata().info_hash.clone();
-        let storage = MMapStorage::new(temp_path, info_hash, context.data_pool().clone());
+        let storage = MMapStorage::new(
+            temp_path,
+            info_hash,
+            context
+                .metadata()
+                .info
+                .as_ref()
+                .map(|info| info.piece_length as usize),
+            context.data_pool().clone(),
+        );
 
         // wait for the files of the torrent
         create_pieces_and_files!(&mut context);

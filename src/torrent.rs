@@ -327,6 +327,10 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
         let storage_params = StorageParams {
             info_hash: metadata.info_hash.clone(),
             path: config.path().to_path_buf(),
+            piece_length: metadata
+                .info
+                .as_ref()
+                .map(|info| info.piece_length as usize),
             data_pool: data_pool.clone(),
         };
         let operations = request
@@ -2440,7 +2444,7 @@ impl TorrentContext {
     /// connection is based on a magnet link.
     ///
     /// If the data was already known, this method does nothing.
-    pub(crate) fn set_metadata(&mut self, metadata_info: TorrentMetadataInfo) {
+    async fn set_metadata(&mut self, metadata_info: TorrentMetadataInfo) {
         // verify if the metadata of the torrent is already known
         // if so, we ignore this update
         if self.metadata.info.is_some() {
@@ -2464,6 +2468,9 @@ impl TorrentContext {
             return;
         }
 
+        self.storage
+            .set_piece_len(metadata_info.piece_length as usize)
+            .await;
         self.metadata.info = Some(metadata_info);
         debug!("Torrent {} updated metadata of {}", self, info_hash);
         self.invoke_event(TorrentEvent::MetadataChanged(self.metadata.clone()));
@@ -2924,7 +2931,7 @@ impl TorrentContext {
             TorrentCommand::Metadata { response } => {
                 response.send(self.metadata.clone());
             }
-            TorrentCommand::SetMetadata { metadata } => self.set_metadata(metadata),
+            TorrentCommand::SetMetadata { metadata } => self.set_metadata(metadata).await,
             TorrentCommand::IsMetadataKnown { response } => {
                 response.send(self.is_metadata_known());
             }
@@ -4232,7 +4239,13 @@ mod tests {
                 TorrentConfig::builder().build(),
                 vec![CreatePiecesAndFilesOperation::new().into()],
                 vec![],
-                |params| MMapStorage::new(params.path, params.info_hash, params.data_pool).into(),
+                |params| MMapStorage::new(
+                    params.path,
+                    params.info_hash,
+                    params.piece_length,
+                    params.data_pool
+                )
+                .into(),
                 None
             );
             let piece_len = torrent
@@ -4276,7 +4289,13 @@ mod tests {
                 TorrentConfig::builder().build(),
                 vec![CreatePiecesAndFilesOperation::new().into()],
                 vec![],
-                |params| MMapStorage::new(params.path, params.info_hash, params.data_pool).into(),
+                |params| MMapStorage::new(
+                    params.path,
+                    params.info_hash,
+                    params.piece_length,
+                    params.data_pool
+                )
+                .into(),
                 None
             );
             let (peer, _peer2) = tcp_peer_pair!(&torrent, vec![]);
@@ -4353,7 +4372,13 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![TcpPeerDiscovery::new().await.unwrap().into()],
-            |params| MMapStorage::new(params.path, params.info_hash, params.data_pool).into(),
+            |params| MMapStorage::new(
+                params.path,
+                params.info_hash,
+                params.piece_length,
+                params.data_pool
+            )
+            .into(),
             None
         );
         let target_torrent = torrent!(
@@ -4366,7 +4391,13 @@ mod tests {
                 CreatePiecesAndFilesOperation::new().into(),
             ],
             vec![TcpPeerDiscovery::new().await.unwrap().into()],
-            |params| MMapStorage::new(params.path, params.info_hash, params.data_pool).into(),
+            |params| MMapStorage::new(
+                params.path,
+                params.info_hash,
+                params.piece_length,
+                params.data_pool
+            )
+            .into(),
             None
         );
         let (source_peer, target_peer) = tcp_peer_pair!(
@@ -4610,7 +4641,13 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into()],
             vec![],
-            |params| MMapStorage::new(params.path, params.info_hash, params.data_pool).into(),
+            |params| MMapStorage::new(
+                params.path,
+                params.info_hash,
+                params.piece_length,
+                params.data_pool
+            )
+            .into(),
             None
         );
         let (peer, _peer2) = tcp_peer_pair!(&torrent, vec![]);
