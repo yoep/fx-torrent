@@ -1,6 +1,10 @@
 use crate::operation::TorrentOperationResult;
-use crate::{InnerTorrent, TorrentContext, TorrentFlags, TorrentMetadataInfo, TorrentState};
-use log::{debug, info, trace, warn};
+#[cfg(any(feature = "dht", feature = "extension-metadata"))]
+use crate::{InnerTorrent, TorrentMetadataInfo};
+use crate::{TorrentContext, TorrentFlags, TorrentState};
+use log::debug;
+#[cfg(any(feature = "dht", feature = "extension-metadata"))]
+use log::{info, trace, warn};
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 

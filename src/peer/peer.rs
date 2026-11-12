@@ -2677,7 +2677,7 @@ mod tests {
     use crate::operation::{CreatePiecesAndFilesOperation, FileValidationOperation};
     use crate::peer::protocol::UtpPacketCapture;
     use crate::peer::tests::create_utp_peer_pair;
-    use crate::storage::{DiskStorage, MemoryStorage};
+    use crate::storage::{MMapStorage, MemoryStorage};
     use crate::tests::copy_test_file;
     use crate::tests::helpers::wait_for_torrent_pieces;
     use crate::DEFAULT_TORRENT_PROTOCOL_EXTENSIONS;
@@ -2905,7 +2905,13 @@ mod tests {
                 FileValidationOperation::new().into(),
             ],
             vec![],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool,).into(),
+            |params| MMapStorage::new(
+                params.path,
+                params.info_hash,
+                params.piece_length,
+                params.data_pool
+            )
+            .into(),
             None
         );
         let target = torrent!(

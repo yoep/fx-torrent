@@ -1,4 +1,4 @@
-use crate::storage::{DiskStorage, MemoryStorage, Metrics, Result};
+use crate::storage::{DiskStorage, MMapStorage, MemoryStorage, Metrics, Result};
 use crate::torrent_data::DataPool;
 use crate::{InfoHash, PieceIndex, Sha1Hash, Sha256Hash};
 use async_trait::async_trait;
@@ -10,12 +10,23 @@ use std::sync::Arc;
 /// The storage type for storing and reading torrent data.
 #[derive(Debug, Clone)]
 pub enum Storage {
+    MMap(Arc<MMapStorage>),
     Disk(Arc<DiskStorage>),
     Memory(Arc<MemoryStorage>),
     Other(Arc<dyn Extension>),
 }
 
 impl Storage {
+    /// Update the piece length of the torrent within the storage.
+    pub async fn set_piece_len(&self, piece_len: usize) {
+        match self {
+            Storage::MMap(storage) => storage.set_piece_len(piece_len).await,
+            Storage::Disk(storage) => storage.set_piece_len(piece_len).await,
+            Storage::Other(storage) => storage.set_piece_len(piece_len).await,
+            _ => {}
+        }
+    }
+
     /// Read the torrent data from the given piece into the buffer.
     /// The [Extension] keeps reading piece(s) data until the buffer is filled,
     /// or the no more data is available.
@@ -36,6 +47,7 @@ impl Storage {
         offset: usize,
     ) -> Result<usize> {
         match self {
+            Storage::MMap(storage) => storage.read(buffer, piece, offset).await,
             Storage::Disk(storage) => storage.read(buffer, piece, offset).await,
             Storage::Memory(storage) => storage.read(buffer, piece, offset).await,
             Storage::Other(storage) => storage.read(buffer, piece, offset).await,
@@ -55,6 +67,7 @@ impl Storage {
     /// Returns the number of bytes written to the storage.
     pub async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         match self {
+            Storage::MMap(storage) => storage.write(data, piece, offset).await,
             Storage::Disk(storage) => storage.write(data, piece, offset).await,
             Storage::Memory(storage) => storage.write(data, piece, offset).await,
             Storage::Other(storage) => storage.write(data, piece, offset).await,
@@ -64,6 +77,7 @@ impl Storage {
     /// Calculate the hash for the given piece stored in the storage.
     pub async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash> {
         match self {
+            Storage::MMap(storage) => storage.hash_v1(piece).await,
             Storage::Disk(storage) => storage.hash_v1(piece).await,
             Storage::Memory(storage) => storage.hash_v1(piece).await,
             Storage::Other(storage) => storage.hash_v1(piece).await,
@@ -73,6 +87,7 @@ impl Storage {
     /// Calculate the hash for the given piece stored in the storage.
     pub async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash> {
         match self {
+            Storage::MMap(storage) => storage.hash_v2(piece).await,
             Storage::Disk(storage) => storage.hash_v2(piece).await,
             Storage::Memory(storage) => storage.hash_v2(piece).await,
             Storage::Other(storage) => storage.hash_v2(piece).await,
@@ -82,6 +97,7 @@ impl Storage {
     /// Move the storage to the new location path.
     pub async fn move_storage(&self, new_path: &Path) -> Result<()> {
         match self {
+            Storage::MMap(storage) => storage.move_storage(new_path).await,
             Storage::Disk(storage) => storage.move_storage(new_path).await,
             Storage::Memory(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -94,6 +110,7 @@ impl Storage {
     /// Returns the storage metrics.
     pub fn metrics(&self) -> &Metrics {
         match self {
+            Storage::MMap(storage) => storage.metrics(),
             Storage::Disk(storage) => storage.metrics(),
             Storage::Memory(storage) => storage.metrics(),
             Storage::Other(storage) => storage.metrics(),
@@ -104,6 +121,12 @@ impl Storage {
 impl From<DiskStorage> for Storage {
     fn from(storage: DiskStorage) -> Self {
         Storage::Disk(Arc::new(storage))
+    }
+}
+
+impl From<MMapStorage> for Storage {
+    fn from(storage: MMapStorage) -> Self {
+        Storage::MMap(Arc::new(storage))
     }
 }
 
@@ -124,6 +147,9 @@ where
 
 #[async_trait]
 pub trait Extension: Debug + Send + Sync {
+    /// Update the piece length of the torrent within the storage.
+    async fn set_piece_len(&self, piece_len: usize);
+
     /// Read the torrent data from the given piece into the buffer.
     /// The [Extension] keeps reading piece(s) data until the buffer is filled,
     /// or the no more data is available.
@@ -169,7 +195,10 @@ pub trait Extension: Debug + Send + Sync {
 /// The storage parameters for initializing a new [Extension] instance.
 #[derive(Debug, Clone)]
 pub struct StorageParams {
+    /// The info hash of the torrent.
     pub info_hash: InfoHash,
+    /// The length of each piece within the torrent, if known.
+    pub piece_length: Option<usize>,
     pub path: PathBuf,
     pub data_pool: DataPool,
 }
@@ -179,12 +208,14 @@ mod tests {
     use super::*;
     use mockall::mock;
     use rand::{rng, Rng};
+    use tokio::sync::oneshot;
 
     mock! {
         #[derive(Debug)]
         pub Extension {}
         #[async_trait]
         impl Extension for Extension {
+            async fn set_piece_len(&self, piece_len: usize);
             async fn read(&self, buffer: &mut [u8], piece: &PieceIndex, offset: usize) -> Result<usize>;
             async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize>;
             async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash>;
@@ -192,6 +223,26 @@ mod tests {
             async fn move_storage(&self, new_path: &Path) -> Result<()>;
             fn metrics(&self) -> &Metrics;
         }
+    }
+
+    #[tokio::test]
+    async fn test_extension_set_piece_len() {
+        let (tx, rx) = oneshot::channel();
+        let mut extension = MockExtension::new();
+        extension
+            .expect_set_piece_len()
+            .times(1)
+            .return_once(move |len| {
+                tx.send(len).unwrap();
+            });
+        let storage: Storage = extension.into();
+
+        let piece_len = 16000;
+        storage.set_piece_len(piece_len).await;
+
+        let result = timeout!(Duration::from_millis(100), rx)
+            .expect("expected the piece length to have been set");
+        assert_eq!(piece_len, result);
     }
 
     #[tokio::test]

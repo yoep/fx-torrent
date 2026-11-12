@@ -399,6 +399,8 @@ impl Extension for MyStrategy {
 
 */
 
+#![deny(unused_imports)]
+
 pub use compact::*;
 pub use config::*;
 pub use error::*;

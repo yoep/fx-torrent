@@ -85,9 +85,7 @@ impl MenuLogging {
 
     fn on_key_event_logger(&mut self, mut key: FXKeyEvent) {
         let selected = self.selected();
-        let combo = if let Some(e) = self.loggers.get_mut(selected) {
-            e
-        } else {
+        let Some(combo) = self.loggers.get_mut(selected) else {
             return;
         };
 

@@ -88,11 +88,6 @@ impl DataPool {
         self.inner.write().await.set_files(files);
     }
 
-    /// Returns the piece which contains the given torrent offset.
-    pub async fn find_piece_at_offset(&self, offset: usize) -> Option<Piece> {
-        self.inner.read().await.find_piece_at_offset(offset)
-    }
-
     /// Returns the [PieceBlock] matching the given offset within the piece, if found.
     pub async fn find_piece_block(&self, piece: &PieceIndex, offset: usize) -> Option<PieceBlock> {
         self.inner
@@ -263,17 +258,6 @@ impl InnerDataPool {
 
     fn set_files(&mut self, files: Vec<File>) {
         self.files = files.into_iter().map(|file| (file.index, file)).collect();
-    }
-
-    fn find_piece_at_offset(&self, offset: usize) -> Option<Piece> {
-        self.pieces
-            .iter()
-            .find(|(_, piece)| {
-                let piece_start = piece.offset;
-                let piece_end = piece_start + piece.len();
-                offset >= piece_start && offset < piece_end
-            })
-            .map(|(_, piece)| piece.clone())
     }
 
     fn piece_priorities(&self) -> BTreeMap<PieceIndex, PiecePriority> {
@@ -640,70 +624,6 @@ mod tests {
             // retrieve the pieces of the pool
             let result = pool.pieces().await;
             assert_eq!(pieces, result, "expected the pieces to be retrieved");
-        }
-    }
-
-    mod find_piece_at_offset {
-        use super::*;
-
-        #[tokio::test]
-        async fn test_find_piece_at_offset() {
-            let piece_len = 512;
-            let pool = DataPool::from(
-                (0..10)
-                    .into_iter()
-                    .map(|index| create_piece(index, piece_len))
-                    .collect::<Vec<_>>(),
-            );
-
-            // check the offset of the last byte in the first piece
-            let result = pool
-                .find_piece_at_offset(511)
-                .await
-                .expect("expected a piece to be found");
-            assert_eq!(
-                0, result.index,
-                "expected the piece at offset 511 to be piece 0"
-            );
-
-            // get the second piece on the first byte
-            let result = pool
-                .find_piece_at_offset(512)
-                .await
-                .expect("expected a piece to be found");
-            assert_eq!(
-                1, result.index,
-                "expected the piece at offset 512 to be piece 1"
-            );
-        }
-
-        #[tokio::test]
-        async fn test_out_of_bounds() {
-            let piece_len = 512;
-            let pool = DataPool::from(
-                (0..10)
-                    .into_iter()
-                    .map(|index| create_piece(index, piece_len))
-                    .collect::<Vec<_>>(),
-            );
-
-            // retrieve the last piece through the last byte
-            let result = pool
-                .find_piece_at_offset(5_119)
-                .await
-                .expect("expected a piece to be found");
-            assert_eq!(
-                9, result.index,
-                "expected the last piece to have been returned"
-            );
-
-            // retrieve an out-of-bounds offset
-            let result = pool.find_piece_at_offset(5_120).await;
-            assert!(
-                result.is_none(),
-                "expected no piece to be found, but got {:?}",
-                result
-            );
         }
     }
 
