@@ -3,7 +3,6 @@ use crate::tracker::{
     TrackerError, TrackerHandle,
 };
 use crate::{bencode, CompactIp, CompactIpv4Addrs, CompactIpv6Addrs, InfoHash};
-use async_trait::async_trait;
 use derive_more::Display;
 use itertools::Itertools;
 use log::{debug, trace};
@@ -257,6 +256,7 @@ mod server {
     use crate::peer::PeerId;
     use crate::tracker::{BaseServer, ServerRequest, TrackerListener};
     use crate::CompactIpv4Addr;
+    use async_trait::async_trait;
     use axum::extract::{ConnectInfo, RawQuery, State};
     use axum::http::StatusCode;
     use axum::routing::get;
