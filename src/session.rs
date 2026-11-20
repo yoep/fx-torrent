@@ -21,7 +21,7 @@ use crate::peer::extension::MetadataExtension;
 use crate::peer::extension::PexExtension;
 use crate::peer::{PeerDiscovery, ProtocolExtensionFlags, TcpPeerDiscovery, UtpPeerDiscovery};
 use crate::session_cache::{FxSessionCache, SessionCache};
-use crate::storage::{DiskStorage, MemoryStorage, Storage, StorageParams};
+use crate::storage::{MMapStorage, MemoryStorage, Storage, StorageParams};
 use crate::torrent::Torrent;
 use crate::tracker::TrackerClient;
 use crate::Result;
@@ -987,7 +987,13 @@ impl FxSessionBuilder {
             .unwrap_or_else(Self::default_operations_list);
         let storage = self.storage.take().unwrap_or_else(|| {
             Arc::new(|params| {
-                DiskStorage::new(params.info_hash, params.path, params.data_pool).into()
+                MMapStorage::new(
+                    params.path,
+                    params.info_hash,
+                    params.piece_length,
+                    params.data_pool,
+                )
+                .into()
             })
         });
         let session_cache = self

@@ -1,9 +1,6 @@
-use crate::storage::parts_file::PartsFile;
-use crate::storage::{unavailable, Metrics, Result};
+use crate::storage::{unavailable, Error, Metrics, Result};
 use crate::torrent_data::DataPool;
-use crate::{
-    FileAttributeFlags, FileIndex, FilePriority, InfoHash, PieceIndex, Sha1Hash, Sha256Hash,
-};
+use crate::{FileAttributeFlags, FileIndex, PieceIndex, Sha1Hash, Sha256Hash};
 use sha1::digest::Output;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
@@ -20,38 +17,60 @@ use tracing::instrument;
 /// The buffer size used to stream piece data from the disk while hashing.
 const HASH_BUFFER_SIZE: usize = 128 * 1024;
 
-/// File system storage for the torrent piece data.
+/// Stores the torrent data on the file system.
+///
+/// The disk storage doesn't take the file priorities into account and will always try to access
+/// the data from/to the file system.
+///
+/// All operations are piece-indexed: a piece and an offset within that piece are resolved through
+/// the [DataPool] to the torrent files that hold the data. Reads and writes may span multiple
+/// pieces and files, and padding files are skipped. File paths are validated to never leave the
+/// storage path.
 #[derive(Debug)]
 pub struct DiskStorage {
     path: RwLock<PathBuf>,
+    piece_len: RwLock<Option<usize>>,
     data_pool: DataPool,
-    part_file: PartsFile,
     metrics: Metrics,
 }
 
 impl DiskStorage {
-    pub fn new<P: AsRef<Path>>(info_hash: InfoHash, path: P, data_pool: DataPool) -> Self {
-        let part_filename = format!(".{}.parts", hex::encode(info_hash.short_info_hash_bytes()));
-
+    /// Create a new disk storage which stores the torrent files relative to the given path.
+    pub fn new(path: impl AsRef<Path>, piece_length: Option<usize>, data_pool: DataPool) -> Self {
         Self {
             path: RwLock::new(path.as_ref().to_path_buf()),
-            part_file: PartsFile::new(part_filename, path, data_pool.clone()),
+            piece_len: RwLock::new(piece_length),
             data_pool,
             metrics: Default::default(),
         }
     }
 
+    /// Update the piece length of the torrent within the storage.
+    pub async fn set_piece_len(&self, piece_len: usize) {
+        self.piece_len.write().await.replace(piece_len);
+    }
+
+    /// Read data from the disk into the buffer, starting at `piece_offset` within the given piece.
+    ///
+    /// The read continues into subsequent pieces and files when the buffer exceeds the piece.
+    /// It returns the number of bytes read, which is lower than the buffer length when the end of
+    /// a file was reached before the buffer was filled.
+    ///
+    /// # Errors
+    ///
+    /// It returns an error when the piece is unknown, the requested range exceeds the torrent
+    /// length, or the file path is invalid or couldn't be opened.
     #[cfg_attr(feature = "tracing", instrument(skip(self, buffer)))]
     pub async fn read(
         &self,
         buffer: &mut [u8],
         piece: &PieceIndex,
-        offset: usize,
+        piece_offset: usize,
     ) -> Result<usize> {
         let mut cursor = 0;
         let buffer_len = buffer.len();
         let (mut file_index, mut torrent_offset) =
-            self.readwrite(piece, offset, buffer_len).await?;
+            self.readwrite(piece, piece_offset, buffer_len).await?;
 
         while cursor < buffer_len {
             let file = self
@@ -67,27 +86,6 @@ impl DiskStorage {
                 cursor += file.len();
                 torrent_offset += file.len();
                 file_index += 1;
-                continue;
-            }
-
-            // check if we need to read from the parts file
-            if file.priority == FilePriority::None {
-                let parts_len = min(bytes_remaining, file.len());
-                let mut parts_buffer = vec![0u8; parts_len];
-
-                let bytes_read = self
-                    .part_file
-                    .read(
-                        &mut parts_buffer,
-                        &file.pieces.start,
-                        torrent_offset.saturating_sub(file.torrent_offset),
-                    )
-                    .await?;
-                buffer[cursor..cursor + bytes_read].copy_from_slice(&parts_buffer[..bytes_read]);
-                cursor += bytes_read;
-                torrent_offset += bytes_read;
-                file_index += 1;
-                self.metrics.bytes_read.inc_by(bytes_read as u64);
                 continue;
             }
 
@@ -126,6 +124,15 @@ impl DiskStorage {
         Ok(cursor)
     }
 
+    /// Write the data to the disk, starting at `offset` within the given piece.
+    ///
+    /// The write continues into subsequent pieces and files when the data exceeds the piece.
+    /// Missing files and directories are created. It returns the number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// It returns an error when the piece is unknown, the range exceeds the torrent length,
+    /// or the file path is invalid or couldn't be opened.
     #[cfg_attr(feature = "tracing", instrument(skip(self, data)))]
     pub async fn write(&self, data: &[u8], piece: &PieceIndex, offset: usize) -> Result<usize> {
         let mut cursor = 0;
@@ -149,34 +156,6 @@ impl DiskStorage {
                 continue;
             }
 
-            // check if we need to write to the parts file
-            if file.priority == FilePriority::None {
-                let cur_piece = match self.data_pool.find_piece_at_offset(torrent_offset).await {
-                    Some(piece) => piece,
-                    None => return Err(unavailable()),
-                };
-                let piece_offset = torrent_offset.saturating_sub(cur_piece.offset);
-                let file_start_offset = torrent_offset.saturating_sub(file.torrent_offset);
-                let parts_len = min(
-                    bytes_remaining,
-                    file.len().saturating_sub(file_start_offset),
-                );
-                let bytes_written = self
-                    .part_file
-                    .write(
-                        &data[cursor..cursor + parts_len],
-                        &cur_piece.index,
-                        piece_offset,
-                    )
-                    .await?;
-
-                cursor += bytes_written;
-                torrent_offset += bytes_written;
-                file_index += 1;
-                self.metrics.bytes_written.inc_by(bytes_written as u64);
-                continue;
-            }
-
             // try to open the torrent file
             let mut fs_file = self.open(&file.torrent_path, true).await?;
             let start_offset = torrent_offset.saturating_sub(file.torrent_offset);
@@ -194,12 +173,14 @@ impl DiskStorage {
         Ok(cursor)
     }
 
+    /// Calculate the SHA-1 hash (BEP3) of the given piece from the data stored on the disk.
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     pub async fn hash_v1(&self, piece: &PieceIndex) -> Result<Sha1Hash> {
         let hash = self.hash::<Sha1>(piece).await?;
         Sha1Hash::try_from(hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
+    /// Calculate the SHA-256 hash (BEP52) of the given piece from the data stored on the disk.
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     pub async fn hash_v2(&self, piece: &PieceIndex) -> Result<Sha256Hash> {
         let hash = self.hash::<Sha256>(piece).await?;
@@ -207,8 +188,48 @@ impl DiskStorage {
     }
 
     /// Move the storage to a new location.
-    pub async fn move_storage(&self, _new_path: &Path) -> Result<()> {
-        todo!()
+    ///
+    /// Each existing torrent file is moved to the same relative path within `new_path`, creating
+    /// the required directories. Files which don't exist (yet) are skipped. The storage path is
+    /// only updated when all files have been moved; on failure, the already moved files are
+    /// moved back on a best-effort basis.
+    ///
+    /// # Errors
+    ///
+    /// It returns an error when a file path would leave the new storage path, or a file couldn't
+    /// be moved.
+    pub async fn move_storage(&self, new_path: &Path) -> Result<()> {
+        let mut path = self.path.write().await;
+        // early exit, if the new path is the same as the current one
+        if path.as_path() == new_path {
+            return Ok(());
+        }
+
+        let base = Self::canonicalize_unchecked(new_path);
+        let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for file in self.data_pool.files().await {
+            if file.attributes().contains(FileAttributeFlags::PaddingFile) {
+                continue;
+            }
+
+            let source = path.join(&file.torrent_path);
+            let target = new_path.join(&file.torrent_path);
+            if !Self::canonicalize_unchecked(&target).starts_with(&base) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{:?}", target),
+                ));
+            }
+            if !tokio::fs::try_exists(&source).await? {
+                continue;
+            }
+
+            Self::move_file(&source, &target).await?;
+            moved.push((source, target));
+        }
+
+        *path = new_path.to_path_buf();
+        Ok(())
     }
 
     /// Returns the storage metrics.
@@ -218,26 +239,14 @@ impl DiskStorage {
 
     /// Calculate the digest of the given piece.
     ///
-    /// The piece data is streamed from the disk and hashed on the blocking thread pool,
-    /// preventing the async runtime from being blocked by the file I/O and hash computation.
-    async fn hash<D: Digest + Send + 'static>(&self, piece: &PieceIndex) -> Result<Output<D>> {
-        let segments = match self.piece_segments(piece).await? {
-            Some(segments) => segments,
-            None => {
-                // the piece is (partially) stored within the parts file
-                let len = self.piece_len(piece).await;
-                let mut buffer = vec![0u8; len];
-                let bytes_read = self.read(&mut buffer, piece, 0).await?;
-                if bytes_read != len {
-                    return Err(unavailable());
-                }
-
-                return tokio::task::spawn_blocking(move || D::digest(buffer.as_slice()))
-                    .await
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
-            }
-        };
-
+    /// The file segments of the piece are resolved once and streamed from the disk, hashed on
+    /// the blocking thread pool. This prevents the async runtime from being blocked by the
+    /// file I/O and hash computation, and avoids buffering the whole piece.
+    pub(super) async fn hash<D: Digest + Send + 'static>(
+        &self,
+        piece: &PieceIndex,
+    ) -> Result<Output<D>> {
+        let segments = self.piece_segments(piece).await?;
         let (hash, bytes_read) =
             tokio::task::spawn_blocking(move || Self::hash_segments::<D>(segments))
                 .await
@@ -247,9 +256,23 @@ impl DiskStorage {
         Ok(hash)
     }
 
+    /// Move a single file, creating the parent directories of the target.
+    /// It falls back to copy and remove when the target is on a different file system.
+    async fn move_file(source: &Path, target: &Path) -> Result<()> {
+        if let Some(parent) = target.parent() {
+            create_dir_all(parent).await?;
+        }
+
+        if tokio::fs::rename(source, target).await.is_ok() {
+            return Ok(());
+        }
+
+        tokio::fs::copy(source, target).await?;
+        tokio::fs::remove_file(source).await
+    }
+
     /// Resolve the file segments which make up the data of the given piece.
-    /// It returns `None` when the piece data is (partially) stored within the parts file.
-    async fn piece_segments(&self, piece: &PieceIndex) -> Result<Option<Vec<PieceSegment>>> {
+    async fn piece_segments(&self, piece: &PieceIndex) -> Result<Vec<PieceSegment>> {
         let len = self.piece_len(piece).await;
         let (mut file_index, mut torrent_offset) = self.readwrite(piece, 0, len).await?;
         let mut segments = Vec::new();
@@ -267,8 +290,6 @@ impl DiskStorage {
             if segment_len > 0 {
                 if file.attributes().contains(FileAttributeFlags::PaddingFile) {
                     segments.push(PieceSegment::Padding(segment_len));
-                } else if file.priority == FilePriority::None {
-                    return Ok(None);
                 } else {
                     let path = self.absolute_filepath(&file.torrent_path).await;
                     self.assert_valid_filepath(&path).await?;
@@ -285,7 +306,7 @@ impl DiskStorage {
             file_index += 1;
         }
 
-        Ok(Some(segments))
+        Ok(segments)
     }
 
     /// Calculate the digest of the given piece segments.
@@ -345,7 +366,7 @@ impl DiskStorage {
             .unwrap_or_default()
     }
 
-    /// Get the amount of bytes within the torrent.
+    /// Returns the amount of bytes within the torrent.
     async fn torrent_len(&self) -> usize {
         let last_piece_index = self.data_pool.num_of_pieces().await.saturating_sub(1);
         self.data_pool
@@ -422,13 +443,27 @@ impl DiskStorage {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "out-of-bounds"));
         }
 
+        // resolve the file containing the start of the range, which isn't
+        // necessarily the first file of the piece when an offset is given
+        let piece_index = self.piece_at_offset(torrent_piece_start).await?;
         let file_index = self
             .data_pool
-            .file_index_for(&piece)
+            .file_index_for(&piece_index)
             .await
             .ok_or(unavailable())?;
 
         Ok((file_index, torrent_piece_start))
+    }
+
+    /// Returns the piece index for the given torrent byte offset.
+    async fn piece_at_offset(&self, offset: usize) -> Result<PieceIndex> {
+        let piece_len = self
+            .piece_len
+            .read()
+            .await
+            .ok_or(Error::new(io::ErrorKind::Other, "piece length unknown"))?;
+
+        Ok(offset / piece_len)
     }
 
     /// Get the canonicalized path for the given path.
@@ -473,19 +508,11 @@ enum PieceSegment {
     Padding(usize),
 }
 
-impl Drop for DiskStorage {
-    fn drop(&mut self) {
-        // TODO: cleanup parts file
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operation::{CreatePiecesAndFilesOperation, TorrentOperationResult};
     use crate::tests::read_test_file_to_bytes;
-    use crate::torrent::TorrentContext;
-    use crate::{Piece, TorrentFileInfo};
+    use crate::{FilePriority, InfoHash, Piece, TorrentFileInfo};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -502,10 +529,18 @@ mod tests {
             vec![]
         );
         let data_pool = context.data_pool().clone();
-        let storage = DiskStorage::new(context.metadata().info_hash.clone(), temp_path, data_pool);
+        let storage = DiskStorage::new(
+            temp_path,
+            context
+                .metadata()
+                .info
+                .as_ref()
+                .map(|info| info.piece_length as usize),
+            data_pool,
+        );
 
         // create pieces & files
-        create_pieces_and_files(&mut context).await;
+        create_pieces_and_files!(&mut context);
 
         // write the piece data
         {
@@ -562,10 +597,18 @@ mod tests {
             vec![]
         );
         let data_pool = context.data_pool().clone();
-        let storage = DiskStorage::new(context.metadata().info_hash.clone(), temp_path, data_pool);
+        let storage = DiskStorage::new(
+            temp_path,
+            context
+                .metadata()
+                .info
+                .as_ref()
+                .map(|info| info.piece_length as usize),
+            data_pool,
+        );
 
         // create pieces & files
-        create_pieces_and_files(&mut context).await;
+        create_pieces_and_files!(&mut context);
 
         // write the piece data
         {
@@ -610,6 +653,7 @@ mod tests {
     ///   file_b: torrent bytes 100-191 (length 92)
     #[test]
     fn test_hash_segments() {
+        init_logger!();
         let temp_dir = tempdir().unwrap();
         let file_a = temp_dir.path().join("a.bin");
         let file_b = temp_dir.path().join("b.bin");
@@ -639,6 +683,7 @@ mod tests {
 
     #[test]
     fn test_hash_segments_incomplete_file() {
+        init_logger!();
         let temp_dir = tempdir().unwrap();
         let filepath = temp_dir.path().join("incomplete.bin");
         std::fs::write(&filepath, b"lorem").unwrap();
@@ -667,15 +712,81 @@ mod tests {
             vec![]
         );
         let data_pool = context.data_pool().clone();
-        let storage = DiskStorage::new(context.metadata().info_hash.clone(), temp_path, data_pool);
+        let storage = DiskStorage::new(
+            temp_path,
+            context
+                .metadata()
+                .info
+                .as_ref()
+                .map(|info| info.piece_length as usize),
+            data_pool,
+        );
 
         // create pieces & files
-        create_pieces_and_files(&mut context).await;
+        create_pieces_and_files!(&mut context);
 
         let result = storage.hash_v1(&0).await;
 
         let err = result.expect_err("expected an error to be returned");
         assert_eq!(io::ErrorKind::NotFound, err.kind());
+    }
+
+    #[tokio::test]
+    async fn test_move_storage() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let old_path = temp_dir.path().join("old");
+        let new_path = temp_dir.path().join("new");
+        let make_file = |index: usize, name: &str, offset: usize| crate::File {
+            index,
+            torrent_path: PathBuf::from(name),
+            torrent_offset: offset,
+            info: TorrentFileInfo {
+                length: 10,
+                path: None,
+                path_utf8: None,
+                md5sum: None,
+                attr: None,
+                symlink_path: None,
+                sha1: None,
+            },
+            priority: FilePriority::Normal,
+            pieces: 0..1,
+        };
+        let data_pool = DataPool::new();
+        data_pool
+            .set_pieces(vec![Piece::new(InfoHash::default(), 0, 0, 20)])
+            .await;
+        data_pool
+            .set_files(vec![
+                make_file(0, "dir/file_a.bin", 0),
+                make_file(1, "file_b.bin", 10),
+            ])
+            .await;
+        let storage = DiskStorage::new(&old_path, Some(10), data_pool);
+
+        // only file_a exists, file_b is skipped
+        std::fs::create_dir_all(old_path.join("dir")).unwrap();
+        std::fs::write(old_path.join("dir/file_a.bin"), b"0123456789").unwrap();
+
+        storage
+            .move_storage(&new_path)
+            .await
+            .expect("expected the storage to have been moved");
+
+        assert!(!old_path.join("dir/file_a.bin").exists());
+        assert_eq!(
+            b"0123456789".as_slice(),
+            std::fs::read(new_path.join("dir/file_a.bin")).unwrap()
+        );
+        assert!(!new_path.join("file_b.bin").exists());
+        assert_eq!(new_path, *storage.path.read().await);
+
+        // the data should be readable from the new location
+        let mut buffer = vec![0u8; 10];
+        let read = storage.read(&mut buffer, &0, 0).await.unwrap();
+        assert_eq!(10, read);
+        assert_eq!(b"0123456789".as_slice(), buffer.as_slice());
     }
 
     #[tokio::test]
@@ -727,7 +838,7 @@ mod tests {
         data_pool.set_pieces(pieces).await;
         data_pool.set_files(files).await;
 
-        let storage = DiskStorage::new(InfoHash::default(), temp_path, data_pool);
+        let storage = DiskStorage::new(temp_path, Some(piece_size), data_pool);
 
         // Generate deterministic data for piece 1
         let data: Vec<u8> = (0u8..piece_size as u8).collect();
@@ -767,11 +878,5 @@ mod tests {
             &file_b_content[..bytes_in_b],
             "expected file_b.bin head to match piece data tail"
         );
-    }
-
-    async fn create_pieces_and_files(context: &mut TorrentContext) {
-        let mut operation = CreatePiecesAndFilesOperation::new();
-        let result = operation.execute(context).await;
-        assert_eq!(TorrentOperationResult::Continue, result);
     }
 }

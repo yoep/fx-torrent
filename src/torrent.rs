@@ -327,6 +327,10 @@ impl TryFrom<&mut TorrentRequest> for Torrent {
         let storage_params = StorageParams {
             info_hash: metadata.info_hash.clone(),
             path: config.path().to_path_buf(),
+            piece_length: metadata
+                .info
+                .as_ref()
+                .map(|info| info.piece_length as usize),
             data_pool: data_pool.clone(),
         };
         let operations = request
@@ -2440,7 +2444,7 @@ impl TorrentContext {
     /// connection is based on a magnet link.
     ///
     /// If the data was already known, this method does nothing.
-    pub(crate) fn set_metadata(&mut self, metadata_info: TorrentMetadataInfo) {
+    async fn set_metadata(&mut self, metadata_info: TorrentMetadataInfo) {
         // verify if the metadata of the torrent is already known
         // if so, we ignore this update
         if self.metadata.info.is_some() {
@@ -2464,6 +2468,9 @@ impl TorrentContext {
             return;
         }
 
+        self.storage
+            .set_piece_len(metadata_info.piece_length as usize)
+            .await;
         self.metadata.info = Some(metadata_info);
         debug!("Torrent {} updated metadata of {}", self, info_hash);
         self.invoke_event(TorrentEvent::MetadataChanged(self.metadata.clone()));
@@ -2731,6 +2738,10 @@ impl TorrentContext {
         let mut completed_pieces = Vec::with_capacity(results.len());
 
         for (piece_index, v1_hash, v2_hash) in results {
+            // early exit if the piece has already been verified
+            if self.data_pool.is_piece_completed(&piece_index).await {
+                continue;
+            }
             // early exit if the piece couldn't be hashed
             // this is most of the time due to missing data in the storage
             if v1_hash.is_none() && v2_hash.is_none() {
@@ -2791,6 +2802,7 @@ impl TorrentContext {
         self.data_pool.set_completed(&indexes, true).await;
 
         for piece in pieces {
+            // inform the piece picker that a piece has completed downloading
             self.piece_picker.set_completed(&piece.index);
 
             // update the metrics
@@ -2924,7 +2936,7 @@ impl TorrentContext {
             TorrentCommand::Metadata { response } => {
                 response.send(self.metadata.clone());
             }
-            TorrentCommand::SetMetadata { metadata } => self.set_metadata(metadata),
+            TorrentCommand::SetMetadata { metadata } => self.set_metadata(metadata).await,
             TorrentCommand::IsMetadataKnown { response } => {
                 response.send(self.is_metadata_known());
             }
@@ -3596,7 +3608,7 @@ mod tests {
         StatsOperation,
     };
     use crate::peer::TcpPeerDiscovery;
-    use crate::storage::{DiskStorage, MemoryStorage};
+    use crate::storage::{MMapStorage, MemoryStorage};
     use crate::tests::helpers::wait_for_torrent_pieces;
     use crate::tests::{copy_test_file, read_test_file_to_bytes};
     use crate::{InfoHash, Magnet};
@@ -4217,6 +4229,7 @@ mod tests {
 
     mod bytes {
         use super::*;
+        use crate::storage::MMapStorage;
         use tokio::sync::oneshot;
 
         #[tokio::test]
@@ -4231,7 +4244,13 @@ mod tests {
                 TorrentConfig::builder().build(),
                 vec![CreatePiecesAndFilesOperation::new().into()],
                 vec![],
-                |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+                |params| MMapStorage::new(
+                    params.path,
+                    params.info_hash,
+                    params.piece_length,
+                    params.data_pool
+                )
+                .into(),
                 None
             );
             let piece_len = torrent
@@ -4275,7 +4294,13 @@ mod tests {
                 TorrentConfig::builder().build(),
                 vec![CreatePiecesAndFilesOperation::new().into()],
                 vec![],
-                |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+                |params| MMapStorage::new(
+                    params.path,
+                    params.info_hash,
+                    params.piece_length,
+                    params.data_pool
+                )
+                .into(),
                 None
             );
             let (peer, _peer2) = tcp_peer_pair!(&torrent, vec![]);
@@ -4352,7 +4377,13 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into(),],
             vec![TcpPeerDiscovery::new().await.unwrap().into()],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            |params| MMapStorage::new(
+                params.path,
+                params.info_hash,
+                params.piece_length,
+                params.data_pool
+            )
+            .into(),
             None
         );
         let target_torrent = torrent!(
@@ -4365,7 +4396,13 @@ mod tests {
                 CreatePiecesAndFilesOperation::new().into(),
             ],
             vec![TcpPeerDiscovery::new().await.unwrap().into()],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            |params| MMapStorage::new(
+                params.path,
+                params.info_hash,
+                params.piece_length,
+                params.data_pool
+            )
+            .into(),
             None
         );
         let (source_peer, target_peer) = tcp_peer_pair!(
@@ -4609,7 +4646,13 @@ mod tests {
             TorrentConfig::builder().build(),
             vec![CreatePiecesAndFilesOperation::new().into()],
             vec![],
-            |params| DiskStorage::new(params.info_hash, params.path, params.data_pool).into(),
+            |params| MMapStorage::new(
+                params.path,
+                params.info_hash,
+                params.piece_length,
+                params.data_pool
+            )
+            .into(),
             None
         );
         let (peer, _peer2) = tcp_peer_pair!(&torrent, vec![]);

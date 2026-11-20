@@ -4,7 +4,7 @@ use crate::{
     BitVec, Piece, PieceIndex, Sha1Hash, Sha256Hash, TorrentContext, TorrentFlags, TorrentState,
 };
 use futures::{stream, StreamExt};
-use log::{info, warn};
+use log::{info, trace, warn};
 use std::fmt::Debug;
 use std::time::Instant;
 use tokio::sync::mpsc::error::TryRecvError;
@@ -18,7 +18,6 @@ use tokio::task::AbortHandle;
 /// while the operation applies the validation results on each tick.
 #[derive(Debug)]
 pub struct FileValidationOperation {
-    num_of_pieces: usize,
     max_concurrent: usize,
     start_time: Instant,
     state: ValidationState,
@@ -28,7 +27,6 @@ pub struct FileValidationOperation {
 impl FileValidationOperation {
     pub fn new() -> Self {
         Self {
-            num_of_pieces: 0,
             max_concurrent: 0,
             start_time: Instant::now(),
             state: ValidationState::Validating,
@@ -75,10 +73,6 @@ impl FileValidationOperation {
             return true;
         }
 
-        let num_of_pieces = match torrent.metadata().total_pieces() {
-            Some(num_of_pieces) => num_of_pieces,
-            None => return false,
-        };
         let piece_len = match torrent
             .metadata()
             .info
@@ -89,7 +83,6 @@ impl FileValidationOperation {
             None => return false,
         };
 
-        self.num_of_pieces = num_of_pieces;
         self.max_concurrent = (torrent.config().checking_mem_usage / piece_len.max(1)).max(1);
         torrent.update_state(TorrentState::CheckingFiles);
         true
@@ -97,25 +90,35 @@ impl FileValidationOperation {
 
     /// Start the background validation of the pieces which haven't been checked yet.
     async fn start(&mut self, torrent: &TorrentContext) {
-        if self.active_task.is_some()
-            || torrent.data_pool().num_of_pieces().await < self.num_of_pieces
-        {
+        let total_num_of_pieces = torrent.data_pool().num_of_pieces().await;
+        if self.active_task.is_some() || total_num_of_pieces == 0 {
             return;
         }
 
         self.start_time = Instant::now();
 
+        // collect all pieces which still need to be validated
+        // this prevents already validated pieces from being rechecked
+        let completed_pieces = torrent.data_pool().bitfield().await;
         let pieces = torrent
             .data_pool()
-            .pieces()
-            .await
-            .into_iter()
-            .filter(|piece| !self.is_checked(&piece.index))
-            .collect::<Vec<_>>();
+            .pieces_with(|piece| {
+                !completed_pieces
+                    .get(piece.index)
+                    .map(|bit| *bit)
+                    .unwrap_or(false)
+            })
+            .await;
         let storage = torrent.storage().clone();
         let max_concurrent = self.max_concurrent;
         let (sender, receiver) = unbounded_channel();
 
+        trace!(
+            "Torrent {} is validating a total of {}/{} pieces",
+            torrent,
+            pieces.len(),
+            total_num_of_pieces
+        );
         let handle = spawn!("FileValidationOperation::run", async move {
             let mut results = stream::iter(pieces)
                 .map(|piece| {
@@ -141,7 +144,7 @@ impl FileValidationOperation {
         });
 
         self.active_task = Some(FileValidationTask {
-            checked: BitVec::repeat(false, self.num_of_pieces),
+            checked: BitVec::repeat(false, total_num_of_pieces),
             handle: handle.abort_handle(),
             results: receiver,
         });
@@ -221,16 +224,6 @@ impl FileValidationOperation {
         }
     }
 
-    /// Returns `true` if the given piece has already been validated.
-    fn is_checked(&self, piece: &PieceIndex) -> bool {
-        self.active_task
-            .as_ref()
-            .map(|task| &task.checked)
-            .and_then(|checked| checked.get(*piece))
-            .map(|e| *e)
-            .unwrap_or(false)
-    }
-
     /// Calculate the hash of the given piece from the storage.
     async fn hash(storage: Storage, piece: Piece) -> ValidationResult {
         match (piece.hash.has_v1(), piece.hash.has_v2()) {
@@ -286,7 +279,7 @@ mod tests {
     use super::*;
     use crate::channel::ChannelReceiver;
     use crate::operation::CreatePiecesAndFilesOperation;
-    use crate::storage::DiskStorage;
+    use crate::storage::MMapStorage;
     use crate::tests::copy_test_file;
     use crate::torrent::TorrentCommand;
     use crate::TorrentError;
@@ -357,7 +350,10 @@ mod tests {
             vec![],
             None,
             None,
-            |info_hash, data_pool| DiskStorage::new(info_hash, temp_path, data_pool).into()
+            |info_hash, piece_len, data_pool| MMapStorage::new(
+                temp_path, info_hash, piece_len, data_pool
+            )
+            .into()
         );
         let mut operation = FileValidationOperation::new();
 
@@ -411,7 +407,10 @@ mod tests {
             vec![],
             None,
             None,
-            |info_hash, data_pool| DiskStorage::new(info_hash, temp_path, data_pool).into()
+            |info_hash, piece_len, data_pool| MMapStorage::new(
+                temp_path, info_hash, piece_len, data_pool
+            )
+            .into()
         );
         let mut operation = FileValidationOperation::new();
 
@@ -455,7 +454,10 @@ mod tests {
             vec![],
             None,
             None,
-            |info_hash, data_pool| DiskStorage::new(info_hash, temp_path, data_pool).into()
+            |info_hash, piece_len, data_pool| MMapStorage::new(
+                temp_path, info_hash, piece_len, data_pool
+            )
+            .into()
         );
         let mut operation = FileValidationOperation::new();
 

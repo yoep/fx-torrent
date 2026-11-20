@@ -4,7 +4,6 @@ use crate::tracker::{
 };
 use crate::tracker::{Result, TrackerError};
 use crate::InfoHash;
-use async_trait::async_trait;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use derive_more::Display;
 use itertools::Itertools;
@@ -329,6 +328,7 @@ mod server {
     use super::*;
     use crate::peer::PeerId;
     use crate::tracker::{BaseServer, ServerRequest, TrackerListener};
+    use async_trait::async_trait;
     use rand::{rng, RngExt};
     use std::collections::HashMap;
     use std::sync::Arc;

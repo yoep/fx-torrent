@@ -2,11 +2,12 @@
 use crate::dht::DhtTracker;
 #[cfg(feature = "lsd")]
 use crate::lsd::LocalServiceDiscovery;
-use crate::tracker::{
-    AnnounceEvent, AnnouncementResult, ScrapeFileMetrics, ScrapeResult, TrackerClient,
-};
+#[cfg(feature = "dht")]
+use crate::tracker::ScrapeFileMetrics;
+use crate::tracker::{AnnounceEvent, AnnouncementResult, ScrapeResult, TrackerClient};
 use crate::Result;
 use crate::{InfoHash, TorrentError};
+#[cfg(feature = "dht")]
 use std::time::Duration;
 
 /// Allows discovering peers in a swarm.
