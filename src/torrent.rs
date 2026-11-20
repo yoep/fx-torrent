@@ -2738,6 +2738,10 @@ impl TorrentContext {
         let mut completed_pieces = Vec::with_capacity(results.len());
 
         for (piece_index, v1_hash, v2_hash) in results {
+            // early exit if the piece has already been verified
+            if self.data_pool.is_piece_completed(&piece_index).await {
+                continue;
+            }
             // early exit if the piece couldn't be hashed
             // this is most of the time due to missing data in the storage
             if v1_hash.is_none() && v2_hash.is_none() {
@@ -2798,6 +2802,7 @@ impl TorrentContext {
         self.data_pool.set_completed(&indexes, true).await;
 
         for piece in pieces {
+            // inform the piece picker that a piece has completed downloading
             self.piece_picker.set_completed(&piece.index);
 
             // update the metrics

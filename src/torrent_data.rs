@@ -71,6 +71,21 @@ impl DataPool {
         self.inner.read().await.pieces.values().cloned().collect()
     }
 
+    /// Returns all pieces matching the given predicate from the pool.
+    pub async fn pieces_with<P>(&self, predicate: P) -> Vec<Piece>
+    where
+        P: Fn(&Piece) -> bool,
+    {
+        self.inner
+            .read()
+            .await
+            .pieces
+            .values()
+            .filter(|piece| predicate(piece))
+            .cloned()
+            .collect()
+    }
+
     /// Returns all files present within the pool.
     pub async fn files(&self) -> Vec<File> {
         self.inner.read().await.files.values().cloned().collect()
