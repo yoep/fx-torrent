@@ -224,9 +224,12 @@ impl Stream for FileStream {
                     }
 
                     let storage = self.storage.clone();
-                    let starting_piece = self.cursor / self.piece_len;
-                    let starting_offset = self.cursor % self.piece_len;
-                    let stream_buffer_len = self.stream_buffer_len;
+                    // the storage is addressed by torrent pieces, so the file offset needs to be
+                    // translated into the torrent offset
+                    let starting_piece = buffer.start / self.piece_len;
+                    let starting_offset = buffer.start % self.piece_len;
+                    // the last buffer of the file might be smaller than the stream buffer length
+                    let stream_buffer_len = buffer.len();
                     let future = async move {
                         let mut buffer = vec![0u8; stream_buffer_len];
 
@@ -406,6 +409,127 @@ mod tests {
             Ok(_) => {}
             _ => assert!(false, "expected Ok(), but got {:?}", result),
         }
+    }
+
+    /// Returns the synthetic data of the given torrent byte range, see [write_pieces].
+    fn torrent_bytes(range: std::ops::Range<usize>) -> Vec<u8> {
+        range.map(|offset| (offset % 251) as u8).collect()
+    }
+
+    /// Write the synthetic data of the given pieces to the storage, and mark them as completed.
+    async fn write_pieces(
+        storage: &crate::storage::Storage,
+        data_pool: &crate::torrent_data::DataPool,
+        pieces: std::ops::RangeInclusive<crate::PieceIndex>,
+    ) {
+        for index in pieces.clone() {
+            let piece = data_pool
+                .piece(&index)
+                .await
+                .expect("expected the piece to exist");
+            let data = torrent_bytes(piece.offset..piece.offset + piece.length);
+            storage
+                .write(&data, &index, 0)
+                .await
+                .expect("expected the piece data to be written");
+        }
+        data_pool
+            .set_completed(pieces.collect::<Vec<_>>().as_slice(), true)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_stream_file_at_torrent_offset() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let storage: crate::storage::Storage = crate::storage::MemoryStorage::new().into();
+        let torrent_storage = storage.clone();
+        let torrent = torrent!(
+            "multifile.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![CreatePiecesAndFilesOperation::new().into(),],
+            vec![],
+            move |_| torrent_storage,
+            None
+        );
+        let data_pool = torrent.inner.data_pool().await.unwrap();
+        wait_for_torrent_pieces(&torrent).await;
+
+        // the second file starts in the middle of a piece
+        let file = torrent.file(&1).await.unwrap();
+        let piece_len = data_pool.piece(&0).await.unwrap().length;
+        assert_ne!(
+            0,
+            file.torrent_offset % piece_len,
+            "expected the file to not start at a piece boundary"
+        );
+        let buffer_range = file.torrent_offset..file.torrent_offset + piece_len;
+        write_pieces(
+            &storage,
+            &data_pool,
+            buffer_range.start / piece_len..=(buffer_range.end - 1) / piece_len,
+        )
+        .await;
+
+        let mut stream = torrent.stream(&file).await.unwrap();
+        let result = timeout!(Duration::from_millis(500), stream.next())
+            .expect("expected a buffer")
+            .expect("expected the buffer data");
+
+        assert_eq!(
+            torrent_bytes(buffer_range),
+            result,
+            "expected the data at the torrent offset of the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stream_last_buffer() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let storage: crate::storage::Storage = crate::storage::MemoryStorage::new().into();
+        let torrent_storage = storage.clone();
+        let torrent = torrent!(
+            "multifile.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![CreatePiecesAndFilesOperation::new().into(),],
+            vec![],
+            move |_| torrent_storage,
+            None
+        );
+        let data_pool = torrent.inner.data_pool().await.unwrap();
+        wait_for_torrent_pieces(&torrent).await;
+
+        // the last bytes of the file are smaller than the stream buffer
+        let file = torrent.file(&1).await.unwrap();
+        let piece_len = data_pool.piece(&0).await.unwrap().length;
+        let remaining = 1000;
+        let file_end = file.torrent_offset + file.len();
+        let buffer_range = file_end - remaining..file_end;
+        write_pieces(
+            &storage,
+            &data_pool,
+            buffer_range.start / piece_len..=(buffer_range.end - 1) / piece_len,
+        )
+        .await;
+
+        let mut stream = torrent.stream(&file).await.unwrap();
+        stream.seek(file.len() - remaining).unwrap();
+        let result = timeout!(Duration::from_millis(500), stream.next())
+            .expect("expected a buffer")
+            .expect("expected the buffer data");
+
+        assert_eq!(
+            torrent_bytes(buffer_range),
+            result,
+            "expected the remaining bytes of the file"
+        );
     }
 
     #[tokio::test]
