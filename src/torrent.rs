@@ -1900,6 +1900,14 @@ impl TorrentContext {
                         }));
                     }
                 },
+                // process the verified pieces as soon as possible, instead of waiting for the next tick,
+                // as readers (e.g. streams) might be waiting on these pieces
+                Some(result) = self.verify_tasks.join_next(), if !self.verify_tasks.is_empty() => {
+                    if let Ok(result) = result {
+                        self.on_piece_verified(&result.piece, result.v1_hash, result.v2_hash)
+                            .await;
+                    }
+                },
                 _ = operations_tick.tick() => self.on_tick(&mut operations, peer_discoveries.as_slice()).await,
             }
         }
@@ -4632,6 +4640,45 @@ mod tests {
         context.remove_options(TorrentFlags::Paused | TorrentFlags::UploadMode);
         let result = context.is_upload_allowed();
         assert_eq!(false, result, "expected uploading to not be allowed");
+    }
+
+    #[tokio::test]
+    async fn test_torrent_piece_verified_without_waiting_for_tick() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let torrent = torrent!(
+            "debian-udp.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![CreatePiecesAndFilesOperation::new().into()],
+            vec![],
+            |params| MMapStorage::new(
+                params.path,
+                params.info_hash,
+                params.piece_length,
+                params.data_pool
+            )
+            .into(),
+            None
+        );
+        let (peer, _peer2) = tcp_peer_pair!(&torrent, vec![]);
+        torrent.inner.peer_connected(peer.clone().into()).await;
+
+        // wait for the torrent pieces to be created
+        wait_for_torrent_pieces(&torrent).await;
+
+        // each piece should be completed right after its verification,
+        // which is well within the torrent tick interval
+        for piece in 0..3 {
+            mark_piece_completed!(&torrent.inner.sender, piece, peer.addr(), "piece-1_30.iso");
+            assert_timeout!(
+                Duration::from_millis(200),
+                torrent.has_piece(&piece).await,
+                "expected the piece to be completed without waiting for the next tick"
+            );
+        }
     }
 
     #[tokio::test]
