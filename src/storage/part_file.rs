@@ -13,6 +13,8 @@ use tokio::sync::Mutex;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
+const INVALID_OFFSET: &str = "offset cannot be greater than piece-length";
+
 /// The unique index of a parts file slot.
 type SlotIndex = usize;
 
@@ -198,10 +200,7 @@ impl Inner {
         mut offset: usize,
     ) -> Result<usize> {
         if offset > self.piece_len {
-            return Err(Error::new(
-                io::ErrorKind::InvalidInput,
-                "offset cannot be greater than piece-length",
-            ));
+            return Err(Error::new(io::ErrorKind::InvalidInput, INVALID_OFFSET));
         }
 
         let mut piece = *piece;
@@ -212,19 +211,27 @@ impl Inner {
             };
 
             let starting_offset = self.slot_data_offset(*slot) + offset;
-            let read_len = (self.piece_len - offset).min(buffer.len() - cursor);
+            let mut read_len = (self.piece_len - offset).min(buffer.len() - cursor);
             self.file
                 .seek(io::SeekFrom::Start(starting_offset as u64))
                 .await?;
-            let bytes_read = self
-                .file
-                .read(&mut buffer[cursor..cursor + read_len])
-                .await?;
+
+            while read_len > 0 {
+                let bytes_read = self
+                    .file
+                    .read(&mut buffer[cursor..cursor + read_len])
+                    .await?;
+                if bytes_read == 0 {
+                    break;
+                }
+
+                cursor += bytes_read;
+                read_len = read_len.saturating_sub(bytes_read);
+                self.metrics.bytes_read.inc_by(bytes_read as u64);
+            }
 
             offset = 0;
             piece += 1;
-            cursor += bytes_read;
-            self.metrics.bytes_read.inc_by(bytes_read as u64);
 
             if let Some(slot) = self.slots.get_mut(slot) {
                 slot.last_accessed = Instant::now();
@@ -450,6 +457,7 @@ impl TryFrom<Slots> for Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{rng, RngExt};
     use tempfile::tempdir;
 
     mod part_file {
@@ -476,6 +484,55 @@ mod tests {
                 piece_len, inner.piece_len,
                 "expected the piece length to match"
             );
+        }
+    }
+
+    mod read {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_offset_larger_than_piece_len() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let path = temp_dir.path().join(".test.parts");
+            let parts_file = PartFile::new(path, 1028, 10).await.unwrap();
+
+            let mut buffer = vec![0u8; 1028];
+            let result = parts_file
+                .read(&mut buffer[..], &0, 4096)
+                .await
+                .expect_err("expected read to fail");
+            assert_eq!(io::ErrorKind::InvalidInput, result.kind());
+            assert_eq!(INVALID_OFFSET, result.to_string());
+        }
+
+        #[tokio::test]
+        async fn test_multiple_pieces() {
+            init_logger!();
+            let temp_dir = tempdir().unwrap();
+            let path = temp_dir.path().join(".test.parts");
+            let piece_len = 1028;
+            let piece1 = generate_piece(piece_len);
+            let piece2 = generate_piece(piece_len);
+            let mut expected_result = vec![0u8; 1096];
+            expected_result[0..piece_len].copy_from_slice(&piece1);
+            expected_result[piece_len..].copy_from_slice(&piece2[0..68]);
+            let parts_file = PartFile::new(path, piece_len, 10).await.unwrap();
+
+            // write 2 pieces to the parts file
+            parts_file
+                .write(&piece1, &1, 0)
+                .await
+                .expect("expected piece 1 to be written");
+            parts_file
+                .write(&piece2, &2, 0)
+                .await
+                .expect("expected piece 2 to be written");
+
+            // read piece 1 and partially piece 2 into the buffer
+            let mut buffer = vec![0u8; expected_result.len()];
+            parts_file.read(&mut buffer, &1, 0).await.unwrap();
+            assert_eq!(expected_result, buffer, "expected the read buffer to match");
         }
     }
 
@@ -554,5 +611,11 @@ mod tests {
             assert_eq!(result.len(), 3 * 8);
             assert_eq!(expected_result, result);
         }
+    }
+
+    fn generate_piece(len: usize) -> Vec<u8> {
+        let mut buffer = vec![0u8; len];
+        rng().fill(&mut buffer[..]);
+        buffer
     }
 }

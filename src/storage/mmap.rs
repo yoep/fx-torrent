@@ -1,8 +1,9 @@
 use crate::storage::{unavailable, DiskStorage, Error, Metrics, PartFile, Result};
 use crate::torrent_data::DataPool;
 use crate::{
-    FileAttributeFlags, FileIndex, FilePriority, InfoHash, PieceIndex, Sha1Hash, Sha256Hash,
+    File, FileAttributeFlags, FileIndex, FilePriority, InfoHash, PieceIndex, Sha1Hash, Sha256Hash,
 };
+use log::{debug, trace};
 use sha1::digest::Output;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
@@ -27,7 +28,7 @@ pub struct MMapStorage {
     path: PathBuf,
     info_hash: InfoHash,
     piece_len: RwLock<Option<usize>>,
-    storage: DiskStorage,
+    disk: DiskStorage,
     part_file: OnceCell<PartFile>,
     data_pool: DataPool,
     metrics: Metrics,
@@ -47,7 +48,7 @@ impl MMapStorage {
             info_hash,
             path: path.as_ref().to_path_buf(),
             piece_len: RwLock::new(piece_len.clone()),
-            storage: DiskStorage::new(path.as_ref(), piece_len, data_pool.clone()),
+            disk: DiskStorage::new(path.as_ref(), piece_len, data_pool.clone()),
             part_file: OnceCell::new(),
             data_pool,
             metrics: Default::default(),
@@ -56,6 +57,7 @@ impl MMapStorage {
 
     /// Update the piece length of the torrent within the storage.
     pub async fn set_piece_len(&self, piece_len: usize) {
+        self.disk.set_piece_len(piece_len).await;
         self.piece_len.write().await.replace(piece_len);
     }
 
@@ -86,7 +88,10 @@ impl MMapStorage {
                 .data_pool
                 .file(&file_index)
                 .await
-                .ok_or(unavailable())?;
+                .ok_or(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("file {} not found", file_index),
+                ))?;
             let bytes_remaining = buffer_len.saturating_sub(cursor);
 
             // check if the file is a padding file
@@ -100,23 +105,28 @@ impl MMapStorage {
 
             // check if we need to read from the parts file
             if file.priority == FilePriority::None {
-                let parts_len = min(bytes_remaining, file.len());
-                let mut parts_buffer = vec![0u8; parts_len];
-
+                let read_len = min(
+                    bytes_remaining,
+                    file.len()
+                        .saturating_sub(torrent_offset.saturating_sub(file.torrent_offset)),
+                );
                 let bytes_read = self
-                    .part_file()
-                    .await?
-                    .read(
-                        &mut parts_buffer,
-                        &file.pieces.start,
-                        torrent_offset.saturating_sub(file.torrent_offset),
-                    )
+                    .read_parts_file(&mut buffer[cursor..cursor + read_len], torrent_offset)
                     .await?;
-                buffer[cursor..cursor + bytes_read].copy_from_slice(&parts_buffer[..bytes_read]);
+                if bytes_read == 0 {
+                    break;
+                }
+
                 cursor += bytes_read;
                 torrent_offset += bytes_read;
+
+                // check if all bytes from the file where available
+                // if not, don't read the next file as it would be misaligned
+                if bytes_read < read_len {
+                    break;
+                }
+
                 file_index += 1;
-                self.metrics.bytes_read.inc_by(bytes_read as u64);
                 continue;
             }
 
@@ -132,10 +142,13 @@ impl MMapStorage {
                 .data_pool
                 .piece(&piece_index)
                 .await
-                .ok_or(unavailable())?;
+                .ok_or(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("piece {} not found", piece_index),
+                ))?;
             // read directly into the buffer
             let bytes_read = self
-                .storage
+                .disk
                 .read(
                     &mut buffer[cursor..cursor + read_len],
                     &cur_piece.index,
@@ -161,6 +174,20 @@ impl MMapStorage {
         }
 
         Ok(cursor)
+    }
+
+    /// Read data from the parts file into the given buffer.
+    /// It returns the total number of bytes read.
+    async fn read_parts_file(&self, buffer: &mut [u8], torrent_offset: usize) -> Result<usize> {
+        let (piece_index, piece_offset) = self.piece_offset_at(torrent_offset).await?;
+        let bytes_read = self
+            .part_file()
+            .await?
+            .read(buffer, &piece_index, piece_offset)
+            .await?;
+
+        self.metrics.bytes_read.inc_by(bytes_read as u64);
+        Ok(bytes_read)
     }
 
     /// Write the data, starting at `offset` within the given piece.
@@ -196,13 +223,7 @@ impl MMapStorage {
 
             // check if we need to write to the parts file
             if file.priority == FilePriority::None {
-                let piece_index = self.piece_at_offset(torrent_offset).await?;
-                let cur_piece = self
-                    .data_pool
-                    .piece(&piece_index)
-                    .await
-                    .ok_or(unavailable())?;
-                let piece_offset = torrent_offset.saturating_sub(cur_piece.offset);
+                let (piece_index, piece_offset) = self.piece_offset_at(torrent_offset).await?;
                 let file_start_offset = torrent_offset.saturating_sub(file.torrent_offset);
                 let parts_len = min(
                     bytes_remaining,
@@ -213,7 +234,7 @@ impl MMapStorage {
                     .await?
                     .write(
                         &data[cursor..cursor + parts_len],
-                        &cur_piece.index,
+                        &piece_index,
                         piece_offset,
                     )
                     .await?;
@@ -239,7 +260,7 @@ impl MMapStorage {
                 .await
                 .ok_or(unavailable())?;
             let bytes_written = self
-                .storage
+                .disk
                 .write(
                     &data[cursor..cursor + write_len],
                     &cur_piece.index,
@@ -282,7 +303,7 @@ impl MMapStorage {
     /// Move the storage to a new location.
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     pub async fn move_storage(&self, new_path: &Path) -> Result<()> {
-        self.storage.move_storage(new_path).await
+        self.disk.move_storage(new_path).await
     }
 
     /// Returns the metrics reference of the memory-mapped storage.
@@ -296,23 +317,28 @@ impl MMapStorage {
     /// from either the disk storage or the parts file based on the file priority.
     /// The digest itself is computed on the blocking thread pool.
     async fn hash<D: Digest + Send + 'static>(&self, piece: &PieceIndex) -> Result<Output<D>> {
+        let len = self.piece_len(piece).await;
+
         // fast path: stream the segments from the disk when no part of the piece is in the parts file
         if !self.is_in_parts_file(piece).await {
-            let hash = self.storage.hash::<D>(piece).await?;
-            let len = self.piece_len(piece).await;
+            let hash = self.disk.hash::<D>(piece).await?;
             self.metrics.bytes_read.inc_by(len as u64);
             return Ok(hash);
         }
 
-        let len = self
-            .data_pool
-            .piece(piece)
-            .await
-            .map(|piece| piece.len())
-            .ok_or(unavailable())?;
         let mut buffer = vec![0u8; len];
-
-        let bytes_read = self.read(&mut buffer, piece, 0).await?;
+        let bytes_read = match self.read(&mut buffer, piece, 0).await {
+            Err(e) => {
+                trace!(
+                    "Torrent {} failed to hash piece {}, {}",
+                    self.info_hash,
+                    piece,
+                    e
+                );
+                return Err(e);
+            }
+            Ok(bytes_read) => bytes_read,
+        };
         if bytes_read != len {
             return Err(unavailable());
         }
@@ -322,7 +348,7 @@ impl MMapStorage {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
     }
 
-    /// Returns `true` if any file of the piece is stored within the parts file.
+    /// Returns `true` if any bytes of the piece might be stored within the parts file.
     async fn is_in_parts_file(&self, piece: &PieceIndex) -> bool {
         let Some(piece) = self.data_pool.piece(piece).await else {
             return false;
@@ -357,6 +383,17 @@ impl MMapStorage {
             .unwrap_or_default()
     }
 
+    /// Returns the piece index and offset (in bytes) for the given torrent position.
+    async fn piece_offset_at(&self, torrent_offset: usize) -> Result<(PieceIndex, usize)> {
+        let piece_index = self.piece_at_offset(torrent_offset).await?;
+        let piece = self.data_pool.piece(&piece_index).await.ok_or(Error::new(
+            io::ErrorKind::NotFound,
+            format!("piece {} not found", piece_index),
+        ))?;
+
+        Ok((piece_index, torrent_offset.saturating_sub(piece.offset)))
+    }
+
     /// Returns the amount of bytes which can be accessed through a single [DiskStorage] call,
     /// starting at `file_offset` within the given file, and the index of the file following the run.
     ///
@@ -364,7 +401,7 @@ impl MMapStorage {
     /// until `max_len` bytes are covered. It stops at padding files and files within the parts file.
     async fn disk_run(
         &self,
-        file: &crate::File,
+        file: &File,
         file_index: FileIndex,
         file_offset: usize,
         max_len: usize,
@@ -390,17 +427,12 @@ impl MMapStorage {
 
     /// Returns the parts file for the memory-mapped storage.
     async fn part_file(&self) -> Result<&PartFile> {
+        let piece_len = self.piece_len.read().await.ok_or(Error::new(
+            io::ErrorKind::Other,
+            "unable to create parts file, metadata is unknown",
+        ))?;
         self.part_file
             .get_or_try_init(|| async {
-                let piece_len = self
-                    .data_pool
-                    .piece(&0)
-                    .await
-                    .map(|piece| piece.len())
-                    .ok_or(Error::new(
-                        io::ErrorKind::Other,
-                        "unable to create parts file, metadata is unknown",
-                    ))?;
                 let filename = format!(
                     ".{}.parts",
                     hex::encode(self.info_hash.short_info_hash_bytes())
@@ -408,10 +440,15 @@ impl MMapStorage {
                 let path = self.path.join(filename);
 
                 if path.exists() {
-                    PartFile::open(path.as_path(), piece_len).await
-                } else {
-                    PartFile::new(path.as_path(), piece_len, 10).await
+                    match PartFile::open(path.as_path(), piece_len).await {
+                        Ok(part) => return Ok(part),
+                        Err(e) => debug!("Failed to open existing parts file {:?}, {}", path, e),
+                    }
                 }
+
+                // always fallback to a new parts file
+                // in-case an older one might have been corrupted
+                PartFile::new(path.as_path(), piece_len, 10).await
             })
             .await
     }
@@ -428,7 +465,10 @@ impl MMapStorage {
             .piece(piece)
             .await
             .map(|piece| piece.offset.saturating_add(offset))
-            .ok_or(unavailable())?;
+            .ok_or(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("piece {} not found", piece),
+            ))?;
 
         // check if the requested range is still within the torrent range
         let end = torrent_piece_start
@@ -439,14 +479,29 @@ impl MMapStorage {
             ))?;
         let torrent_len = self.torrent_len().await;
         if end > torrent_len {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "out-of-bounds"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("position {} is out-of-bounds", end),
+            ));
         }
 
-        let file_index = self
+        let mut file_index = self
             .data_pool
             .file_index_for(&piece)
             .await
-            .ok_or(unavailable())?;
+            .ok_or(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("file not found for piece {}", piece),
+            ))?;
+
+        // the piece might start in an earlier file than the one containing the requested offset,
+        // skip the files which end before the start of the requested range
+        while let Some(file) = self.data_pool.file(&file_index).await {
+            if file.torrent_offset.saturating_add(file.len()) > torrent_piece_start {
+                break;
+            }
+            file_index += 1;
+        }
 
         Ok((file_index, torrent_piece_start))
     }
@@ -479,6 +534,52 @@ mod tests {
     use crate::tests::{copy_test_file, read_test_file_to_bytes};
     use crate::{File, Piece, TorrentFileInfo};
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_set_piece_len() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let (context, _) = torrent_context!(
+            "debian-udp.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().path(temp_path).build(),
+            vec![],
+            vec![],
+            None
+        );
+        let info_hash = context.metadata().info_hash.clone();
+        let storage = MMapStorage::new(
+            temp_path,
+            info_hash,
+            context
+                .metadata()
+                .info
+                .as_ref()
+                .map(|info| info.piece_length as usize),
+            context.data_pool().clone(),
+        );
+
+        let expected_piece_len = 2048;
+        storage.set_piece_len(expected_piece_len).await;
+
+        // verify that the piece_len is correctly stored
+        let result = storage
+            .piece_len
+            .read()
+            .await
+            .expect("expected the piece_len to have been set");
+        assert_eq!(expected_piece_len, result);
+
+        // verify that the piece_len is correctly used within the offset calculation
+        let expected_piece = 7;
+        let result = storage
+            .piece_at_offset(expected_piece * expected_piece_len + 48)
+            .await
+            .unwrap();
+        assert_eq!(expected_piece, result);
+    }
 
     #[tokio::test]
     async fn test_read() {
@@ -666,6 +767,84 @@ mod tests {
         assert_eq!(&data[64 + 28..64 + 128], buffer.as_slice());
 
         // the hash of a piece spanning multiple files should match the data
+        let expected: [u8; 20] = Sha1::digest(&data[piece_len..piece_len * 2]).into();
+        let hash = storage.hash_v1(&1).await.unwrap();
+        assert_eq!(expected.as_slice(), hash.as_ref());
+    }
+
+    #[tokio::test]
+    async fn test_read_write_piece_spanning_disk_and_parts_file() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let piece_len = 64usize;
+        let file_lens = [100usize, 10, 70, 12];
+        let total_len: usize = file_lens.iter().sum();
+        let mut offset = 0;
+        let files = file_lens
+            .iter()
+            .enumerate()
+            .map(|(index, len)| {
+                let file = File {
+                    index,
+                    torrent_path: PathBuf::from(format!("dir/file_{}.bin", index)),
+                    torrent_offset: offset,
+                    info: TorrentFileInfo {
+                        length: *len as u64,
+                        path: None,
+                        path_utf8: None,
+                        md5sum: None,
+                        attr: None,
+                        symlink_path: None,
+                        sha1: None,
+                    },
+                    // file 2 is stored within the parts file, and shares pieces 1 and 2 with disk files
+                    priority: if index == 2 {
+                        FilePriority::None
+                    } else {
+                        FilePriority::Normal
+                    },
+                    pieces: (offset / piece_len)..((offset + len + piece_len - 1) / piece_len),
+                };
+                offset += len;
+                file
+            })
+            .collect::<Vec<_>>();
+        let pieces = (0..total_len / piece_len)
+            .map(|index| Piece::new(InfoHash::default(), index, index * piece_len, piece_len))
+            .collect::<Vec<_>>();
+        let data_pool = DataPool::new();
+        data_pool.set_pieces(pieces).await;
+        data_pool.set_files(files).await;
+        let storage = MMapStorage::new(
+            temp_dir.path(),
+            InfoHash::default(),
+            Some(piece_len),
+            data_pool,
+        );
+        let data: Vec<u8> = (0..total_len).map(|e| (e % 251) as u8).collect();
+
+        let written = storage.write(&data, &0, 0).await.unwrap();
+        assert_eq!(total_len, written);
+
+        // read the whole of piece 1, which spans files 0 and 1 (disk) and file 2 (parts file)
+        let mut buffer = vec![0u8; piece_len];
+        let read = storage.read(&mut buffer, &1, 0).await.unwrap();
+        assert_eq!(piece_len, read);
+        assert_eq!(&data[piece_len..piece_len * 2], buffer.as_slice());
+
+        // read piece 2, which spans file 2 (parts file) and file 3 (disk)
+        let mut buffer = vec![0u8; piece_len];
+        let read = storage.read(&mut buffer, &2, 0).await.unwrap();
+        assert_eq!(piece_len, read);
+        assert_eq!(&data[piece_len * 2..piece_len * 3], buffer.as_slice());
+
+        // read starting from within the parts file
+        let mut buffer = vec![0u8; 30];
+        let read = storage.read(&mut buffer, &1, 50).await.unwrap();
+        assert_eq!(30, read);
+        assert_eq!(&data[piece_len + 50..piece_len + 80], buffer.as_slice());
+
+        // the hash should match the data of the spanning piece
         let expected: [u8; 20] = Sha1::digest(&data[piece_len..piece_len * 2]).into();
         let hash = storage.hash_v1(&1).await.unwrap();
         assert_eq!(expected.as_slice(), hash.as_ref());

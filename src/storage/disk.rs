@@ -357,7 +357,7 @@ impl DiskStorage {
         self.path.read().await.join(filepath.as_ref())
     }
 
-    /// Get the amount of bytes for the given piece.
+    /// Returns the amount of bytes for the given piece.
     async fn piece_len(&self, piece: &PieceIndex) -> usize {
         self.data_pool
             .piece(piece)
