@@ -30,7 +30,7 @@ use crate::{FileStream, TorrentHandle};
 use derive_more::Display;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use fx_callback::{Callback, MultiThreadedCallback, Subscription};
 use itertools::Itertools;
 use log::{debug, info, log, trace, warn, Level};
@@ -3257,24 +3257,6 @@ impl TorrentContext {
         });
     }
 
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    async fn on_verify_task_tick(&mut self) {
-        let start_time = Instant::now();
-        while let Some(result) = self.verify_tasks.join_next().now_or_never().flatten() {
-            match result {
-                Ok(result) => {
-                    self.on_piece_verified(&result.piece, result.v1_hash, result.v2_hash)
-                        .await
-                }
-                Err(_) => break,
-            }
-
-            if start_time.elapsed() > TICK_INTERVAL {
-                break;
-            }
-        }
-    }
-
     /// Process the new options of the torrent.
     async fn options_changed(&mut self) {
         // update the state of the torrent based on the new options
@@ -3477,7 +3459,6 @@ impl TorrentContext {
             .await;
         self.peer_pool.tick().await;
         self.piece_picker_tick().await;
-        self.on_verify_task_tick().await;
         self.on_upload_tick().await;
     }
 
