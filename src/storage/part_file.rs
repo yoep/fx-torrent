@@ -212,19 +212,27 @@ impl Inner {
             };
 
             let starting_offset = self.slot_data_offset(*slot) + offset;
-            let read_len = (self.piece_len - offset).min(buffer.len() - cursor);
+            let mut read_len = (self.piece_len - offset).min(buffer.len() - cursor);
             self.file
                 .seek(io::SeekFrom::Start(starting_offset as u64))
                 .await?;
-            let bytes_read = self
-                .file
-                .read(&mut buffer[cursor..cursor + read_len])
-                .await?;
+
+            while read_len > 0 {
+                let bytes_read = self
+                    .file
+                    .read(&mut buffer[cursor..cursor + read_len])
+                    .await?;
+                if bytes_read == 0 {
+                    break;
+                }
+
+                cursor += bytes_read;
+                read_len = read_len.saturating_sub(bytes_read);
+                self.metrics.bytes_read.inc_by(bytes_read as u64);
+            }
 
             offset = 0;
             piece += 1;
-            cursor += bytes_read;
-            self.metrics.bytes_read.inc_by(bytes_read as u64);
 
             if let Some(slot) = self.slots.get_mut(slot) {
                 slot.last_accessed = Instant::now();
