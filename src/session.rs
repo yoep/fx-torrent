@@ -1026,7 +1026,11 @@ impl FxSessionBuilder {
         ))
     }
 
-    fn default_operations_list() -> Vec<TorrentOperationFactory> {
+    /// Returns the default torrent operations of the session, see [FxSessionBuilder::default_operations].
+    ///
+    /// This can be used to customize the default operations, e.g. replacing one of them,
+    /// before setting them through [FxSessionBuilder::operations].
+    pub fn default_operations_list() -> Vec<TorrentOperationFactory> {
         // FIXME: this is currently a duplicate list, consolidate with the torrent request operations
         vec![
             TorrentOperationFactory::new(|| StatsOperation::new().into()),
