@@ -756,6 +756,23 @@ impl Torrent {
             .await;
     }
 
+    /// Invalidate the given pieces, marking them as no longer available.
+    ///
+    /// This should be used when the piece data has been removed from the underlying storage,
+    /// e.g. by a storage which only keeps a limited amount of data.
+    /// The invalidated pieces will be downloaded again when they have a priority other than [PiecePriority::None].
+    pub async fn invalidate_pieces(&self, pieces: Vec<PieceIndex>) {
+        let _ = self
+            .inner
+            .sender
+            .send(|tx| TorrentCommand::InvalidatePieces {
+                pieces,
+                response: tx,
+            })
+            .await
+            .await;
+    }
+
     /// Returns `true` if the piece index has been downloaded, validated, and written to storage.
     pub async fn has_piece(&self, piece: &PieceIndex) -> bool {
         self.inner
@@ -1683,6 +1700,10 @@ pub enum TorrentCommand {
         priorities: Vec<(PieceIndex, PiecePriority)>,
         response: Reply<()>,
     },
+    InvalidatePieces {
+        pieces: Vec<PieceIndex>,
+        response: Reply<()>,
+    },
     PrioritizeFiles {
         priorities: Vec<(FileIndex, PiecePriority)>,
         response: Reply<()>,
@@ -2156,6 +2177,27 @@ impl TorrentContext {
 
         // update the state of the torrent based on the new priorities
         // this can only be done after the init phase to not disrupt the init operations
+        let is_not_init_state = !self.state.is_initializing_phase();
+        if is_not_init_state {
+            let new_state = self.determine_state().await;
+            self.update_state(new_state);
+        }
+    }
+
+    /// Invalidate the given pieces, resetting them to be downloaded again.
+    async fn invalidate_pieces(&mut self, pieces: Vec<PieceIndex>) {
+        if pieces.is_empty() {
+            return;
+        }
+
+        self.data_pool.set_completed(pieces.as_slice(), false).await;
+        pieces
+            .iter()
+            .for_each(|piece| self.piece_picker.set_failed(piece));
+        self.update_interested_pieces_stats().await;
+
+        debug!("Torrent {} invalidated {} pieces", self, pieces.len());
+
         let is_not_init_state = !self.state.is_initializing_phase();
         if is_not_init_state {
             let new_state = self.determine_state().await;
@@ -3036,6 +3078,9 @@ impl TorrentContext {
                 response,
             } => {
                 response.send(self.prioritize_pieces(priorities).await);
+            }
+            TorrentCommand::InvalidatePieces { pieces, response } => {
+                response.send(self.invalidate_pieces(pieces).await);
             }
             TorrentCommand::PrioritizeFiles {
                 priorities,
@@ -4660,6 +4705,56 @@ mod tests {
                 "expected the piece to be completed without waiting for the next tick"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_torrent_invalidate_pieces() {
+        init_logger!();
+        let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_str().unwrap();
+        let torrent = torrent!(
+            "debian-udp.torrent",
+            temp_path,
+            TorrentFlags::none(),
+            TorrentConfig::builder().build(),
+            vec![CreatePiecesAndFilesOperation::new().into()],
+            vec![],
+            |params| MMapStorage::new(
+                params.path,
+                params.info_hash,
+                params.piece_length,
+                params.data_pool
+            )
+            .into(),
+            None
+        );
+        let (peer, _peer2) = tcp_peer_pair!(&torrent, vec![]);
+        torrent.inner.peer_connected(peer.clone().into()).await;
+
+        // wait for the torrent pieces to be created
+        wait_for_torrent_pieces(&torrent).await;
+
+        for piece in 0..2 {
+            mark_piece_completed!(&torrent.inner.sender, piece, peer.addr(), "piece-1_30.iso");
+            assert_timeout!(
+                Duration::from_millis(500),
+                torrent.has_piece(&piece).await,
+                "expected the piece to have been completed"
+            );
+        }
+
+        torrent.invalidate_pieces(vec![0]).await;
+
+        assert_eq!(
+            false,
+            torrent.has_piece(&0).await,
+            "expected the invalidated piece to no longer be available"
+        );
+        assert_eq!(
+            true,
+            torrent.has_piece(&1).await,
+            "expected the other pieces to still be available"
+        );
     }
 
     #[tokio::test]
