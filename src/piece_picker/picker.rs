@@ -884,11 +884,191 @@ mod tests {
         }
     }
 
+    mod block_rejected {
+        use super::*;
+
+        /// Create a piece picker with the given number of single block pieces.
+        /// It returns the picker together with the values that need to be kept alive for the test.
+        macro_rules! picker_with_pieces {
+            ($num_of_pieces:expr) => {{
+                let temp_dir = tempdir().unwrap();
+                let temp_path = temp_dir.path().to_str().unwrap();
+                let (context, rx) = torrent_context!(
+                    "debian.torrent",
+                    temp_path,
+                    TorrentFlags::none(),
+                    TorrentConfig::default(),
+                    vec![],
+                    vec![],
+                    None
+                );
+                let pieces = pieces!($num_of_pieces, $num_of_pieces * 1024, 1024);
+                let mut picker = piece_picker!(&context, 32);
+                picker.set_pieces(&pieces);
+
+                (picker, (temp_dir, context, rx))
+            }};
+        }
+
+        /// Mark the block as requested from the given peers.
+        fn request_block(picker: &mut FxPiecePicker, block: &PieceBlock, peers: &[SocketAddr]) {
+            picker.downloads.get_mut(block.piece()).unwrap()[*block.block()].state =
+                PieceBlockState::Requested;
+            picker
+                .requested_from
+                .entry(block.index)
+                .or_default()
+                .extend(peers.iter().copied());
+        }
+
+        #[tokio::test]
+        async fn test_single_requester() {
+            init_logger!();
+            let (mut picker, _guard) = picker_with_pieces!(2);
+            let peer: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+            let block = picker.downloads[&0][0].piece_block;
+            request_block(&mut picker, &block, &[peer]);
+
+            picker.block_rejected(&peer, block);
+
+            assert_eq!(
+                PieceBlockState::None,
+                picker.downloads[&0][0].state,
+                "expected the block to be available to request again"
+            );
+            assert!(
+                !picker.requested_from.contains_key(&block.index),
+                "expected the request entry to have been removed"
+            );
+            assert_eq!(
+                Some(&HashSet::from([peer])),
+                picker.rejected_by.get(&block.index),
+                "expected the peer to be registered as having rejected the block"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_other_requesters_remaining() {
+            init_logger!();
+            let (mut picker, _guard) = picker_with_pieces!(2);
+            let rejecting_peer: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+            let other_peer: SocketAddr = "127.0.0.1:6882".parse().unwrap();
+            let block = picker.downloads[&0][0].piece_block;
+            request_block(&mut picker, &block, &[rejecting_peer, other_peer]);
+
+            picker.block_rejected(&rejecting_peer, block);
+
+            assert_eq!(
+                PieceBlockState::Requested,
+                picker.downloads[&0][0].state,
+                "expected the block to still be requested from the other peer"
+            );
+            assert_eq!(
+                Some(&HashSet::from([other_peer])),
+                picker.requested_from.get(&block.index),
+                "expected only the rejecting peer to have been removed"
+            );
+            assert_eq!(
+                Some(&HashSet::from([rejecting_peer])),
+                picker.rejected_by.get(&block.index),
+                "expected only the rejecting peer to be registered as rejected"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_all_requesters() {
+            init_logger!();
+            let (mut picker, _guard) = picker_with_pieces!(2);
+            let peer1: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+            let peer2: SocketAddr = "127.0.0.1:6882".parse().unwrap();
+            let block = picker.downloads[&0][0].piece_block;
+            request_block(&mut picker, &block, &[peer1, peer2]);
+
+            picker.block_rejected(&peer1, block);
+            picker.block_rejected(&peer2, block);
+
+            assert_eq!(
+                PieceBlockState::None,
+                picker.downloads[&0][0].state,
+                "expected the block to be available again after all peers rejected it"
+            );
+            assert!(!picker.requested_from.contains_key(&block.index));
+            assert_eq!(
+                Some(&HashSet::from([peer1, peer2])),
+                picker.rejected_by.get(&block.index)
+            );
+        }
+
+        #[tokio::test]
+        async fn test_not_requested() {
+            init_logger!();
+            let (mut picker, _guard) = picker_with_pieces!(2);
+            let peer: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+            let block = picker.downloads[&0][0].piece_block;
+            picker.downloads.get_mut(&0).unwrap()[0].state = PieceBlockState::Requested;
+
+            picker.block_rejected(&peer, block);
+
+            assert_eq!(
+                PieceBlockState::None,
+                picker.downloads[&0][0].state,
+                "expected the block to not stay requested without any requesting peer"
+            );
+            assert_eq!(
+                Some(&HashSet::from([peer])),
+                picker.rejected_by.get(&block.index)
+            );
+        }
+
+        #[tokio::test]
+        async fn test_only_affects_rejected_block() {
+            init_logger!();
+            let (mut picker, _guard) = picker_with_pieces!(2);
+            let peer: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+            let rejected = picker.downloads[&0][0].piece_block;
+            let other = picker.downloads[&1][0].piece_block;
+            request_block(&mut picker, &rejected, &[peer]);
+            request_block(&mut picker, &other, &[peer]);
+
+            picker.block_rejected(&peer, rejected);
+
+            assert_eq!(PieceBlockState::None, picker.downloads[&0][0].state);
+            assert_eq!(
+                PieceBlockState::Requested,
+                picker.downloads[&1][0].state,
+                "expected the other block to remain requested"
+            );
+            assert!(picker.requested_from.contains_key(&other.index));
+            assert!(!picker.rejected_by.contains_key(&other.index));
+        }
+
+        #[tokio::test]
+        async fn test_unknown_block() {
+            init_logger!();
+            let (mut picker, _guard) = picker_with_pieces!(2);
+            let peer: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+            let mut block = picker.downloads[&0][0].piece_block;
+            block.index = PieceBlockIndex {
+                piece: 99,
+                block: 0,
+            };
+            block.piece = 99;
+
+            picker.block_rejected(&peer, block);
+
+            assert!(
+                picker.rejected_by.is_empty(),
+                "expected an unknown block to not be registered"
+            );
+            assert!(picker.requested_from.is_empty());
+        }
+    }
+
     mod is_end_game {
         use super::*;
 
         #[tokio::test]
-        async fn test_end_game_not_reached() {
+        async fn test_not_reached() {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
@@ -917,7 +1097,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_end_game_reached() {
+        async fn test_reached() {
             init_logger!();
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
