@@ -23,7 +23,8 @@ impl SequentialStrategy {
         blocks
             .into_iter()
             .filter(|block| is_end_game || block.state == PieceBlockState::None)
-            .sorted_by(|a, b| a.piece().cmp(b.piece()))
+            // the most urgent pieces are picked first, e.g. the pieces being waited on by a stream
+            .sorted_by(|a, b| b.priority.cmp(&a.priority).then(a.piece().cmp(b.piece())))
             .take(target_queue_len)
             .collect()
     }
@@ -49,5 +50,33 @@ mod tests {
         assert_eq!(&blocks[1], result[1]);
         assert_eq!(&blocks[2], result[2]);
         assert_eq!(&blocks[3], result[3]);
+    }
+
+    #[test]
+    fn test_pick_pieces_priority_first() {
+        use crate::PiecePriority;
+
+        let mut blocks = piece_infos!(4, 128_000, 32_768);
+        for block in blocks.iter_mut() {
+            block.priority = match block.piece() {
+                2 => PiecePriority::Now,
+                3 => PiecePriority::Next,
+                _ => PiecePriority::High,
+            };
+        }
+        let strategy = SequentialStrategy::new();
+
+        let result = strategy.pick_pieces(&blocks, blocks.len(), false, PickerOptions::Sequential);
+
+        let pieces = result
+            .iter()
+            .map(|block| *block.piece())
+            .dedup()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vec![2, 3, 0, 1],
+            pieces,
+            "expected the most urgent pieces to be picked first, in sequential order"
+        );
     }
 }
