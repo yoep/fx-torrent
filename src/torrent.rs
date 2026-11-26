@@ -3232,7 +3232,7 @@ impl TorrentContext {
         block: PieceBlock,
         data: Vec<u8>,
     ) {
-        let piece = block.piece;
+        let piece = block.piece();
         let peer = match self.peer_pool.get(&peer_addr) {
             None => {
                 debug!(
@@ -3246,8 +3246,8 @@ impl TorrentContext {
 
         self.piece_picker.block_received(peer, block, data).await;
 
-        if self.piece_picker.is_piece_finished(&piece) {
-            self.verify_piece(&piece).await;
+        if self.piece_picker.is_piece_finished(piece) {
+            self.verify_piece(piece).await;
         }
     }
 
@@ -4019,6 +4019,7 @@ mod tests {
             let temp_dir = tempdir().unwrap();
             let temp_path = temp_dir.path().to_str().unwrap();
             let expected_piece_part = PieceBlock {
+                index: crate::PieceBlockIndex { piece: 0, block: 1 },
                 piece: 0,
                 block: 1,
                 begin: 16384,

@@ -364,7 +364,7 @@ impl HttpPeerContext {
         self.requested_queue_len += blocks.len();
         let requests = blocks
             .into_iter()
-            .map(|block| (block.piece, block))
+            .map(|block| (*block.piece(), block))
             .into_group_map();
 
         self.update_state(PeerState::Downloading).await;

@@ -3,7 +3,7 @@ use crate::piece_picker::strategy::rarest_first::RarestFirstStrategy;
 use crate::piece_picker::strategy::suggested_only::SuggestedOnlyStrategy;
 use crate::piece_picker::strategy::{PriorityStrategy, SequentialStrategy};
 use crate::piece_picker::{PickerOptions, PiecePickerBlock};
-use crate::PieceIndex;
+use crate::{PieceBlock, PieceIndex};
 use async_trait::async_trait;
 use std::fmt::Debug;
 
@@ -41,15 +41,15 @@ impl Strategy {
     ///
     /// Picking `blocks` which are already being [crate::piece_picker::PieceBlockState::Requested]
     /// is allowed, especially during the endgame phase of the torrent.
-    pub fn pick_pieces<'a>(
+    pub fn pick_pieces(
         &self,
         peer: &Peer,
-        blocks: &'a Vec<PiecePickerBlock>,
+        blocks: &[PiecePickerBlock],
         target_queue_len: usize,
         suggested_pieces: &[PieceIndex],
         is_end_game: bool,
         options: PickerOptions,
-    ) -> Vec<&'a PiecePickerBlock> {
+    ) -> Vec<PieceBlock> {
         match self {
             Strategy::RarestFirst(strategy) => {
                 strategy.pick_pieces(blocks, target_queue_len, is_end_game, options)
@@ -123,13 +123,13 @@ pub trait Extension: Debug + Send + Sync {
     /// The `blocks` are already filtered on peer availability and
     /// not [crate::piece_picker::PieceBlockState::Finished] therefore,
     /// they should not be filtered again on these criteria.
-    fn pick_pieces<'a>(
+    fn pick_pieces(
         &self,
         peer: &Peer,
-        blocks: &'a Vec<PiecePickerBlock>,
+        blocks: &[PiecePickerBlock],
         target_queue_len: usize,
         suggested_pieces: &[PieceIndex],
         is_end_game: bool,
         options: PickerOptions,
-    ) -> Vec<&'a PiecePickerBlock>;
+    ) -> Vec<PieceBlock>;
 }

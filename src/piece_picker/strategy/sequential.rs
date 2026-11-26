@@ -1,5 +1,6 @@
+use crate::piece_picker::strategy::select_top;
 use crate::piece_picker::{PickerOptions, PieceBlockState, PiecePickerBlock};
-use itertools::Itertools;
+use crate::PieceBlock;
 
 #[derive(Debug)]
 pub struct SequentialStrategy;
@@ -11,32 +12,38 @@ impl SequentialStrategy {
 
     pub(crate) fn pick_pieces<'a>(
         &self,
-        blocks: &'a Vec<PiecePickerBlock>,
+        blocks: &[PiecePickerBlock],
         target_queue_len: usize,
         is_end_game: bool,
         options: PickerOptions,
-    ) -> Vec<&'a PiecePickerBlock> {
+    ) -> Vec<PieceBlock> {
         if !options.contains(PickerOptions::Sequential) {
             return vec![];
         }
 
-        blocks
-            .into_iter()
-            .filter(|block| is_end_game || block.state == PieceBlockState::None)
+        select_top(
+            blocks
+                .iter()
+                .filter(|block| is_end_game || block.state == PieceBlockState::None),
+            target_queue_len,
             // the most urgent pieces are picked first, e.g. the pieces being waited on by a stream
-            .sorted_by(|a, b| b.priority.cmp(&a.priority).then(a.piece().cmp(b.piece())))
-            .take(target_queue_len)
-            .collect()
+            |a, b| {
+                b.priority
+                    .cmp(&a.priority)
+                    .then(a.piece_block.index.cmp(&b.piece_block.index))
+            },
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use itertools::Itertools;
 
     #[test]
     fn test_pick_pieces() {
-        let blocks = piece_infos!(4, 128_000, 32_768);
+        let blocks = piece_blocks!(4, 128_000, 32_768);
         let strategy = SequentialStrategy::new();
 
         let result = strategy.pick_pieces(&blocks, 4, false, PickerOptions::Sequential);
@@ -46,17 +53,17 @@ mod tests {
             result.len(),
             "expected 4 piece blocks to have been picked"
         );
-        assert_eq!(&blocks[0], result[0]);
-        assert_eq!(&blocks[1], result[1]);
-        assert_eq!(&blocks[2], result[2]);
-        assert_eq!(&blocks[3], result[3]);
+        assert_eq!(blocks[0].piece_block, result[0]);
+        assert_eq!(blocks[1].piece_block, result[1]);
+        assert_eq!(blocks[2].piece_block, result[2]);
+        assert_eq!(blocks[3].piece_block, result[3]);
     }
 
     #[test]
     fn test_pick_pieces_priority_first() {
         use crate::PiecePriority;
 
-        let mut blocks = piece_infos!(4, 128_000, 32_768);
+        let mut blocks = piece_blocks!(4, 128_000, 32_768);
         for block in blocks.iter_mut() {
             block.priority = match block.piece() {
                 2 => PiecePriority::Now,
@@ -70,7 +77,7 @@ mod tests {
 
         let pieces = result
             .iter()
-            .map(|block| *block.piece())
+            .map(|block| block.piece)
             .dedup()
             .collect::<Vec<_>>();
         assert_eq!(

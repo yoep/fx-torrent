@@ -68,7 +68,7 @@ macro_rules! pieces {
     }};
 }
 
-/// Create a set of [crate::piece_picker::PieceInfo] instances.
+/// Create a set of [crate::piece_picker::PiecePickerBlock] instances.
 /// These are derived from pieces created through the `pieces` macro.
 ///
 /// # Arguments
@@ -76,7 +76,7 @@ macro_rules! pieces {
 /// * `num_of_pieces` - The total number of pieces to create.
 /// * `total_len` - The total length of all pieces combined.
 /// * `piece_len` - The length of each piece, except the last one.
-macro_rules! piece_infos {
+macro_rules! piece_blocks {
     ($num_of_pieces:expr, $total_len:expr, $piece_len:expr) => {{
         use crate::piece_picker::PiecePickerBlock;
         use crate::Piece;

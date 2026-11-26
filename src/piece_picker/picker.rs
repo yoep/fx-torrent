@@ -4,7 +4,10 @@ use crate::piece_picker::strategy::Strategy;
 use crate::piece_picker::PickerOptions;
 use crate::storage::Storage;
 use crate::torrent_data::DataPool;
-use crate::{BitVec, BlockIndex, Piece, PieceBlock, PieceIndex, PiecePriority, TorrentHandle};
+use crate::{
+    BitVec, BlockIndex, Piece, PieceBlock, PieceBlockIndex, PieceIndex, PiecePriority,
+    TorrentHandle,
+};
 use derive_more::Display;
 use futures::future::Either;
 use itertools::Itertools;
@@ -25,6 +28,12 @@ pub struct FxPiecePicker {
     options: PickerOptions,
     max_outstanding_pieces: usize,
     downloads: HashMap<PieceIndex, Vec<PiecePickerBlock>>,
+    /// Peers which are actively requesting certain blocks.
+    /// This is most of the time one peer per block, but can be multiple during the end-game.
+    requested_from: HashMap<PieceBlockIndex, HashSet<SocketAddr>>,
+    /// Peers that have rejected a certain block.
+    /// We should not retry to request the piece block from those peers.
+    rejected_by: HashMap<PieceBlockIndex, HashSet<SocketAddr>>,
     cache: PickerCache,
     data_pool: DataPool,
     strategies: Vec<Strategy>,
@@ -46,6 +55,8 @@ impl FxPiecePicker {
             options,
             max_outstanding_pieces,
             downloads: Default::default(),
+            requested_from: Default::default(),
+            rejected_by: Default::default(),
             cache: PickerCache::new(storage, cache_limit),
             data_pool,
             strategies,
@@ -85,9 +96,10 @@ impl FxPiecePicker {
             None => return,
             Some(blocks) => blocks,
         };
-        blocks
-            .iter_mut()
-            .for_each(|block| block.state = PieceBlockState::Finished);
+        for block in blocks.iter_mut() {
+            block.state = PieceBlockState::Finished;
+            self.requested_from.remove(&block.piece_block.index);
+        }
     }
 
     /// Set the given piece as failed,
@@ -101,6 +113,9 @@ impl FxPiecePicker {
             Some(info) => info,
         };
         Self::invalidate_piece(piece_info);
+        for block in piece_info.iter() {
+            self.requested_from.remove(&block.piece_block.index);
+        }
     }
 
     /// Returns the options set for the piece picker.
@@ -229,37 +244,41 @@ impl FxPiecePicker {
         self.write_block(&block, data).await;
 
         // check if this was the last block needed to complete the piece
-        if self.is_piece_complete(&block.piece) {
-            trace!("Piece picker {} finished piece {}", self, block.piece);
-            self.on_piece_completed(&block.piece).await;
+        if self.is_piece_complete(block.piece()) {
+            trace!("Piece picker {} finished piece {}", self, block.piece());
+            self.on_piece_completed(block.piece()).await;
         }
     }
 
     /// Process a piece block request that has been rejected by the peer.
     pub fn block_rejected(&mut self, peer_addr: &SocketAddr, block: PieceBlock) {
-        // try to find the block
-        let block_info = match self
+        // try to find the piece block that has been rejected
+        let Some(piece_block) = self
             .downloads
-            .get_mut(&block.piece)
-            .and_then(|blocks| blocks.get_mut(block.block))
-        {
-            None => {
-                trace!(
-                    "Piece picker {} couldn't find download block {:?}",
-                    self,
-                    block
-                );
-                return;
-            }
-            Some(block_info) => block_info,
+            .get_mut(block.piece())
+            .and_then(|blocks| blocks.get_mut(*block.block()))
+        else {
+            trace!(
+                "Piece picker {} couldn't find download block {:?}",
+                self,
+                block
+            );
+            return;
         };
 
-        block_info.requested_from.remove(peer_addr);
-        block_info.rejected_by.insert(*peer_addr);
-
-        if block_info.requested_from.is_empty() {
-            block_info.state = PieceBlockState::None;
+        if let Some(peers) = self.requested_from.get_mut(&block.index) {
+            peers.remove(peer_addr);
+            if peers.is_empty() {
+                self.requested_from.remove(&block.index);
+                piece_block.state = PieceBlockState::None;
+            }
+        } else {
+            piece_block.state = PieceBlockState::None;
         }
+        self.rejected_by
+            .entry(block.index)
+            .or_default()
+            .insert(*peer_addr);
     }
 
     /// Request interesting pieces from the given peer.
@@ -373,11 +392,7 @@ impl FxPiecePicker {
             }
 
             let request_start_time = Instant::now();
-            let blocks = picked_blocks
-                .iter()
-                .map(|block| block.piece_block)
-                .collect_vec();
-            peer.request(blocks.as_slice()).await;
+            peer.request(picked_blocks.as_slice()).await;
             let elapsed = request_start_time.elapsed();
             debug!(
                 "Piece picker {} requested {} blocks from peer {} in {:.3}ms",
@@ -387,7 +402,8 @@ impl FxPiecePicker {
                 elapsed.as_secs_f64() * 1000.0
             );
 
-            let mut picked_piece_blocks = vec![];
+            let mut picked_piece_blocks: HashSet<PieceBlockIndex> =
+                HashSet::with_capacity(picked_blocks.len());
             for block in picked_blocks {
                 let block = match self
                     .downloads
@@ -399,16 +415,19 @@ impl FxPiecePicker {
                 };
 
                 block.state = PieceBlockState::Requested;
-                block.requested_from.insert(*peer.addr());
+                self.requested_from
+                    .entry(block.piece_block.index)
+                    .or_default()
+                    .insert(*peer.addr());
 
                 // remove the block from the list of interesting pieces
-                picked_piece_blocks.push(block.piece_block);
+                picked_piece_blocks.insert(block.piece_block.index);
 
                 num_requested_blocks += 1;
                 target_queue_len -= 1;
             }
 
-            interested_pieces.retain(|e| !picked_piece_blocks.contains(&e.piece_block));
+            interested_pieces.retain(|e| !picked_piece_blocks.contains(&e.piece_block.index));
         }
 
         let elapsed = start_time.elapsed();
@@ -457,8 +476,8 @@ impl FxPiecePicker {
         let handle = self.handle;
         let block = match self
             .downloads
-            .get_mut(&block.piece)
-            .and_then(|blocks| blocks.get_mut(block.block))
+            .get_mut(block.piece())
+            .and_then(|blocks| blocks.get_mut(*block.block()))
         {
             None => {
                 debug!(
@@ -473,6 +492,7 @@ impl FxPiecePicker {
         match self.cache.write(&block.piece_block, data).await {
             Ok(()) => {
                 block.state = PieceBlockState::Finished;
+                self.requested_from.remove(&block.piece_block.index);
             }
             Err(e) => {
                 warn!(
@@ -558,7 +578,7 @@ impl FxPiecePicker {
                     None
                 }
             })
-            .cloned()
+            .copied()
             .collect_vec()
     }
 
@@ -608,7 +628,7 @@ pub enum PieceBlockState {
 }
 
 /// The state of a piece block within the piece picker.
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct PiecePickerBlock {
     /// The piece block information.
     pub piece_block: PieceBlock,
@@ -616,12 +636,6 @@ pub struct PiecePickerBlock {
     pub priority: PiecePriority,
     /// The number of peers this block is available on.
     pub availability: usize,
-    /// The peers this block is requested from.
-    /// This is most of the time one peer, but can be multiple during the end-game.
-    pub requested_from: HashSet<SocketAddr>,
-    /// The peers that have rejected this block.
-    /// We should not retry to request this block from these peers.
-    pub rejected_by: HashSet<SocketAddr>,
     /// The current state of the block.
     pub state: PieceBlockState,
 }
@@ -629,12 +643,12 @@ pub struct PiecePickerBlock {
 impl PiecePickerBlock {
     /// Returns the piece this block belongs to.
     pub fn piece(&self) -> &PieceIndex {
-        &self.piece_block.piece
+        self.piece_block.piece()
     }
 
     /// Returns the block index of this piece block.
     pub fn block(&self) -> &BlockIndex {
-        &self.piece_block.block
+        self.piece_block.block()
     }
 }
 
@@ -653,8 +667,6 @@ impl From<&Piece> for Vec<PiecePickerBlock> {
                 piece_block: block.clone(),
                 priority: piece.priority,
                 availability: 0,
-                requested_from: Default::default(),
-                rejected_by: Default::default(),
                 state: PieceBlockState::None,
             })
             .collect()
