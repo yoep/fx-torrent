@@ -576,7 +576,7 @@ impl TryFrom<Cursor<&[u8]>> for Request {
 impl From<PieceBlock> for Request {
     fn from(value: PieceBlock) -> Self {
         Self {
-            index: value.piece,
+            index: *value.piece(),
             begin: value.begin,
             length: value.length,
         }

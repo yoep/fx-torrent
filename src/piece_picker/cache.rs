@@ -99,7 +99,7 @@ impl PickerCache {
             ));
         }
 
-        match self.pieces.get(&block.piece) {
+        match self.pieces.get(block.piece()) {
             Some(Allocation::Slot(_)) => return self.write_block_to_buffer(block, data),
             Some(Allocation::Storage) => return self.write_block_to_storage(block, data).await,
             _ => {}
@@ -114,10 +114,10 @@ impl PickerCache {
         {
             let slot = &mut self.slots[slot_index];
 
-            slot.piece = Some(block.piece);
+            slot.piece = Some(*block.piece());
             slot.last_activity = Instant::now();
             self.pieces
-                .insert(block.piece, Allocation::Slot(slot_index));
+                .insert(*block.piece(), Allocation::Slot(slot_index));
         }
 
         // write the block data to the reserved buffer slot
@@ -193,7 +193,7 @@ impl PickerCache {
 
     /// Write the data of the block to the cache buffer.
     fn write_block_to_buffer(&mut self, block: &PieceBlock, data: Vec<u8>) -> Result<()> {
-        let slot_index = match self.pieces.get(&block.piece) {
+        let slot_index = match self.pieces.get(block.piece()) {
             Some(Allocation::Slot(index)) => *index,
             _ => return Ok(()),
         };
@@ -218,7 +218,7 @@ impl PickerCache {
     async fn write_block_to_storage(&mut self, block: &PieceBlock, data: Vec<u8>) -> Result<()> {
         let written = self
             .storage
-            .write(data.as_slice(), &block.piece, block.begin)
+            .write(data.as_slice(), block.piece(), block.begin)
             .await?;
         if written != block.length {
             return Err(io::Error::new(
@@ -345,6 +345,7 @@ mod tests {
         let block_len = piece_len / 3;
         for block in 0..3 {
             let block = PieceBlock {
+                index: crate::PieceBlockIndex { piece: 0, block },
                 piece: 0,
                 block,
                 begin: block_len * block,
@@ -383,6 +384,7 @@ mod tests {
             None
         );
         let block = PieceBlock {
+            index: crate::PieceBlockIndex { piece: 0, block: 3 },
             piece: 0,
             block: 3,
             begin: 3072,
@@ -453,6 +455,7 @@ mod tests {
                 None
             );
             let block = PieceBlock {
+                index: crate::PieceBlockIndex { piece: 0, block: 0 },
                 piece: 0,
                 block: 0,
                 begin: 0,
@@ -490,6 +493,7 @@ mod tests {
                 None
             );
             let block = PieceBlock {
+                index: crate::PieceBlockIndex { piece: 0, block: 1 },
                 piece: 0,
                 block: 1,
                 begin: 512,
@@ -527,6 +531,7 @@ mod tests {
                 None
             );
             let block = PieceBlock {
+                index: crate::PieceBlockIndex { piece: 0, block: 0 },
                 piece: 0,
                 block: 0,
                 begin: 0,
@@ -543,6 +548,7 @@ mod tests {
             cache
                 .write(
                     &PieceBlock {
+                        index: crate::PieceBlockIndex { piece: 1, block: 0 },
                         piece: 1,
                         block: 0,
                         begin: 0,

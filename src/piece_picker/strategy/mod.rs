@@ -3,9 +3,11 @@ pub use rarest_first::*;
 pub use sequential::*;
 pub use suggested_only::*;
 pub use types::*;
+use utils::*;
 
 mod priority;
 mod rarest_first;
 mod sequential;
 mod suggested_only;
 mod types;
+mod utils;

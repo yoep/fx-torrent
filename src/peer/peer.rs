@@ -1149,7 +1149,10 @@ impl BitTorrentPeerContext {
             }
 
             // check if at least one wanted piece is not in the download queue and pending requests
-            let in_queue = self.download_queue.iter().any(|e| &e.piece == &piece.index);
+            let in_queue = self
+                .download_queue
+                .iter()
+                .any(|e| e.piece() == &piece.index);
             let in_pending = self
                 .pending_requests
                 .iter()
@@ -2134,7 +2137,7 @@ impl BitTorrentPeerContext {
                 continue;
             }
             if self.pending_requests.iter().any(|pending| {
-                pending.request.index == block.piece && pending.request.begin == block.begin
+                &pending.request.index == block.piece() && pending.request.begin == block.begin
             }) {
                 trace!(
                     "Peer {} is already downloading piece block {:?}",
@@ -2219,7 +2222,7 @@ impl BitTorrentPeerContext {
             // if the remote peer is choked, but the fast protocol allows this piece
             // we continue sending the request as it's still valid
             let is_remote_choked = self.remote_choke_state == ChokeState::Choked;
-            let is_fast_allowed = self.is_fast_allowed(&block.piece);
+            let is_fast_allowed = self.is_fast_allowed(block.piece());
             if is_remote_choked && !is_fast_allowed {
                 // the block is not allowed within the fast protocol,
                 // put it back into the download queue
@@ -2230,7 +2233,7 @@ impl BitTorrentPeerContext {
             // if the block is already in the pending requests,
             // drop it and continue with the next one
             if self.pending_requests.iter().any(|pending| {
-                pending.request.index == block.piece && pending.request.begin == block.begin
+                &pending.request.index == block.piece() && pending.request.begin == block.begin
             }) {
                 trace!(
                     "Peer {} is already downloading piece block {:?}",
@@ -2244,7 +2247,7 @@ impl BitTorrentPeerContext {
                 trace!(
                     "Peer {} failed to sent request ({}:{}), {}",
                     self,
-                    block.piece,
+                    block.piece(),
                     block.begin,
                     e
                 );

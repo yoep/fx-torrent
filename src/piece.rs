@@ -110,6 +110,10 @@ impl Piece {
             };
 
             blocks.push(PieceBlock {
+                index: PieceBlockIndex {
+                    piece: index,
+                    block,
+                },
                 piece: index,
                 block,
                 begin: part_offset,
@@ -167,12 +171,25 @@ impl Piece {
     }
 }
 
-/// A data block within a piece.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct PieceBlock {
+/// The unique index of a [PieceBlock].
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PieceBlockIndex {
     /// The piece index of the block.
     pub piece: PieceIndex,
     /// The block index within the piece.
+    pub block: BlockIndex,
+}
+
+/// A data block within a piece.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct PieceBlock {
+    /// The unique index of the block, which is the combination of the piece and block index.
+    pub index: PieceBlockIndex,
+    /// The piece index of the block.
+    #[deprecated(note = "Use piece() instead", since = "0.10.5")]
+    pub piece: PieceIndex,
+    /// The block index within the piece.
+    #[deprecated(note = "Use block() instead", since = "0.10.5")]
     pub block: BlockIndex,
     /// The offset of bytes where this block begins within the piece.
     pub begin: usize,
@@ -184,6 +201,16 @@ pub struct PieceBlock {
 impl PieceBlock {
     /// The amount of bytes that can be requested from a peer.
     pub const MAX_LEN: usize = 16 * 1024; // 16 KiB
+
+    /// Returns the piece index of the block.
+    pub fn piece(&self) -> &PieceIndex {
+        &self.index.piece
+    }
+
+    /// Returns the block index within the piece.
+    pub fn block(&self) -> &BlockIndex {
+        &self.index.block
+    }
 }
 
 impl PartialOrd<Self> for PieceBlock {
@@ -194,11 +221,7 @@ impl PartialOrd<Self> for PieceBlock {
 
 impl Ord for PieceBlock {
     fn cmp(&self, other: &Self) -> Ordering {
-        if self.piece != other.piece {
-            return self.piece.cmp(&other.piece);
-        }
-
-        self.block.cmp(&other.block)
+        self.index.cmp(&other.index)
     }
 }
 
@@ -209,6 +232,10 @@ mod tests {
     macro_rules! block {
         ($piece:expr, $block:expr) => {{
             PieceBlock {
+                index: PieceBlockIndex {
+                    piece: $piece,
+                    block: $block,
+                },
                 piece: $piece,
                 block: $block,
                 begin: 0,

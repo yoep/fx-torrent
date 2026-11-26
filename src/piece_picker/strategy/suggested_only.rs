@@ -1,5 +1,5 @@
 use crate::piece_picker::{PickerOptions, PieceBlockState, PiecePickerBlock};
-use crate::PieceIndex;
+use crate::{PieceBlock, PieceIndex};
 
 #[derive(Debug)]
 pub struct SuggestedOnlyStrategy;
@@ -13,12 +13,12 @@ impl SuggestedOnlyStrategy {
     /// according to this strategy.
     pub(crate) fn pick_pieces<'a>(
         &self,
-        blocks: &'a Vec<PiecePickerBlock>,
+        blocks: &[PiecePickerBlock],
         target_queue_len: usize,
         suggested_pieces: &[PieceIndex],
         is_end_game: bool,
         options: PickerOptions,
-    ) -> Vec<&'a PiecePickerBlock> {
+    ) -> Vec<PieceBlock> {
         if !options.contains(PickerOptions::SuggestedOnly) {
             return vec![];
         }
@@ -30,6 +30,7 @@ impl SuggestedOnlyStrategy {
                     && (is_end_game || block.state == PieceBlockState::None)
             })
             .take(target_queue_len)
+            .map(|block| block.piece_block.clone())
             .collect()
     }
 }
@@ -40,7 +41,7 @@ mod tests {
 
     #[test]
     fn test_pick_pieces() {
-        let blocks = piece_infos!(4, 128_000, 32_768);
+        let blocks = piece_blocks!(4, 128_000, 32_768);
         let strategy = SuggestedOnlyStrategy::new();
 
         let result =
@@ -51,9 +52,9 @@ mod tests {
             result.len(),
             "expected 4 piece blocks to have been picked"
         );
-        assert_eq!(&blocks[4], result[0]);
-        assert_eq!(&blocks[5], result[1]);
-        assert_eq!(&blocks[6], result[2]);
-        assert_eq!(&blocks[7], result[3]);
+        assert_eq!(blocks[4].piece_block, result[0]);
+        assert_eq!(blocks[5].piece_block, result[1]);
+        assert_eq!(blocks[6].piece_block, result[2]);
+        assert_eq!(blocks[7].piece_block, result[3]);
     }
 }
